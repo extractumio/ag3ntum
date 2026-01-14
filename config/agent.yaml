@@ -1,0 +1,59 @@
+# Ag3ntum Agent Configuration
+# Override via CLI: --set agent.model=... or --model ...
+
+agent:
+  # Default Claude model to use
+  default_model: claude-haiku-4-5-20251001
+
+  # Available Claude models for the UI dropdown
+  models_available:
+    - claude-haiku-4-5-20251001
+    - claude-sonnet-4-5-20250929
+    - claude-opus-4-5-20251101
+
+  # Deprecated: Use default_model instead
+  # Kept for backward compatibility with CLI overrides
+  model: claude-haiku-4-5-20251001
+
+  # Maximum conversation turns before stopping
+  max_turns: 100
+
+  # Execution timeout in seconds (1800 = 30 minutes)
+  timeout_seconds: 1800
+
+  # Enable custom skills from skills/ directory
+  enable_skills: true
+
+  # Enable file change tracking for checkpoint/rewind functionality
+  enable_file_checkpointing: true
+
+  # Note: permission_mode is configured in config/permissions.yaml (defaultMode field)
+  # Do not set it here to avoid SDK bypassing permission checks
+
+  # Role template name (loads prompts/roles/<role>.md)
+  # Create custom roles in prompts/roles/ directory
+  role: default
+
+  # SDK-specific options
+  # Maximum buffer size for streaming (null = SDK default)
+  max_buffer_size: null
+
+  # Output format: null (default), text, json, stream-json
+  output_format: stream-json
+
+  # Include partial/incomplete messages in output
+  include_partial_messages: true
+
+# File Explorer settings
+file_explorer:
+  # Show hidden files (starting with .) by default
+  show_hidden_files: false
+
+  # Maximum number of files to display per directory
+  max_files_per_directory: 1000
+
+  # Default sort field: name, size, created_at, modified_at
+  default_sort: modified_at
+
+  # Default sort order: asc, desc
+  default_sort_order: desc

@@ -1,0 +1,86 @@
+# Fully permissive user profile for development/testing.
+# USE WITH CAUTION - allows all operations without restrictions.
+#
+# SIMPLIFIED SECURITY ARCHITECTURE:
+# Uses Ag3ntum MCP tools with PathValidator for security.
+
+name: user-permissive
+description: Fully permissive user profile for development/testing with Ag3ntum tools.
+defaultMode: default
+
+tools:
+  # Ag3ntum MCP tools - these replace native Claude Code tools
+  enabled:
+    # Ag3ntum file tools (use PathValidator)
+    - mcp__ag3ntum__Read
+    - mcp__ag3ntum__Write
+    - mcp__ag3ntum__Edit
+    - mcp__ag3ntum__MultiEdit
+    - mcp__ag3ntum__Glob
+    - mcp__ag3ntum__Grep
+    - mcp__ag3ntum__LS
+    # Ag3ntum command tool (uses bwrap sandbox)
+    - mcp__ag3ntum__Bash
+    # Ag3ntum network tool
+    - mcp__ag3ntum__WebFetch
+    # Native tools that don't need replacement
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    # Native Claude Code web search (requires network)
+    - WebSearch
+
+  # BLOCKED: Native Claude Code tools - replaced by Ag3ntum versions
+  disabled:
+    - Bash
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Glob
+    - Grep
+    - LS
+    - WebFetch
+    - NotebookEdit
+
+  # Legacy: permission checking is now done by tools themselves
+  permission_checked: []
+
+session_workspace:
+  description: |
+    Fully permissive - all Ag3ntum operations allowed.
+    Security is enforced by Ag3ntum tools themselves.
+  allow:
+    # Allow all Ag3ntum tools
+    - mcp__ag3ntum__Read(*)
+    - mcp__ag3ntum__Write(*)
+    - mcp__ag3ntum__Edit(*)
+    - mcp__ag3ntum__MultiEdit(*)
+    - mcp__ag3ntum__Bash(*)
+    - mcp__ag3ntum__Glob(*)
+    - mcp__ag3ntum__Grep(*)
+    - mcp__ag3ntum__LS(*)
+    - mcp__ag3ntum__WebFetch(*)
+    # Other tools
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - WebSearch
+
+  deny:
+    # Block ALL native Claude Code tools
+    - Bash(*)
+    - Read(*)
+    - Write(*)
+    - Edit(*)
+    - MultiEdit(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+    - WebFetch(*)
+
+  allowed_dirs:
+    - ./skills
+    - "{workspace}"

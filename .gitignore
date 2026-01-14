@@ -1,0 +1,46 @@
+# Logs and sessions
+logs/
+sessions/
+
+# Environment and Secrets
+.env
+config/secrets.yaml
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Node.js / Frontend
+node_modules/
+package-lock.json
+dist/
+.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Output files
+output.yaml
+
+design/
+
+.DS_Store
+
+*.db
+# Auto-generated
+docker-compose.override.yml
+
+users/
+
+.claude/
+TODO
+tmp_*.py

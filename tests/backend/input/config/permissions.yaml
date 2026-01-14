@@ -1,0 +1,98 @@
+# Permission profile for E2E tests
+# Agent is sandboxed to its workspace with skill access
+#
+# SIMPLIFIED SECURITY ARCHITECTURE:
+# Native Claude Code tools (Read, Write, Bash, etc.) are BLOCKED.
+# All file/command operations go through Ag3ntum MCP tools.
+
+name: test
+description: Test profile for E2E testing with Ag3ntum tools
+
+defaultMode: default
+
+tools:
+  # Ag3ntum MCP tools - these replace native Claude Code tools
+  enabled:
+    # Ag3ntum file tools (use PathValidator)
+    - mcp__ag3ntum__Read
+    - mcp__ag3ntum__Write
+    - mcp__ag3ntum__Edit
+    - mcp__ag3ntum__MultiEdit
+    - mcp__ag3ntum__Glob
+    - mcp__ag3ntum__Grep
+    - mcp__ag3ntum__LS
+    # Ag3ntum command tool (uses bwrap sandbox)
+    - mcp__ag3ntum__Bash
+    # Ag3ntum network tool (uses domain blocklist)
+    - mcp__ag3ntum__WebFetch
+    # Native tools that don't need replacement
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - NotebookEdit
+    # Native Claude Code web search (requires network)
+    - WebSearch
+    
+  # BLOCKED: Native Claude Code tools - replaced by Ag3ntum versions
+  disabled:
+    - Bash
+    - Read
+    - Write
+    - Edit
+    - MultiEdit
+    - Glob
+    - Grep
+    - LS
+    - WebFetch
+    
+  # Legacy: permission checking is now done by tools themselves
+  permission_checked: []
+
+session_workspace:
+  description: |
+    LEGACY: Pattern-based permissions are no longer the primary security layer.
+    Security is now enforced by:
+    1. Bubblewrap mount namespace (for Ag3ntumBash subprocesses)
+    2. Ag3ntumPathValidator (for Python file tools like Ag3ntumRead/Write/Edit)
+    3. Native Claude Code tools are blocked via tools.disabled
+  allow:
+    # Allow all Ag3ntum tools (they have built-in security)
+    - mcp__ag3ntum__Bash(*)
+    - mcp__ag3ntum__Read(*)
+    - mcp__ag3ntum__Write(*)
+    - mcp__ag3ntum__Edit(*)
+    - mcp__ag3ntum__MultiEdit(*)
+    - mcp__ag3ntum__Glob(*)
+    - mcp__ag3ntum__Grep(*)
+    - mcp__ag3ntum__LS(*)
+    - mcp__ag3ntum__WebFetch(*)
+    # Other allowed tools
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - NotebookEdit
+    - WebSearch
+    
+  deny:
+    # Block ALL native Claude Code tools - use Ag3ntum versions instead
+    - Bash(*)
+    - Read(*)
+    - Write(*)
+    - Edit(*)
+    - MultiEdit(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+    - WebFetch(*)
+    
+  allowed_dirs:
+    - "{workspace}"
+
+# File checkpointing configuration
+checkpointing:
+  auto_checkpoint_tools:
+    - mcp__ag3ntum__Write
+    - mcp__ag3ntum__Edit
+    - mcp__ag3ntum__MultiEdit

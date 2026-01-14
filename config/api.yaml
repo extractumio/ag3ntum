@@ -1,0 +1,34 @@
+# Ag3ntum API Configuration
+# FastAPI backend settings
+
+api:
+  # Server host and port
+  host: "0.0.0.0"
+  port: 40080
+  external_port: 40080
+  reload: false
+
+  # CORS allowed origins
+  # Add your frontend URL here
+  cors_origins:
+    - "http://localhost:50080"
+    - "http://127.0.0.1:50080"
+
+# Database settings
+database:
+  # SQLite database path (relative to Project root)
+  path: "./data/ag3ntum.db"
+
+# Web UI settings
+web:
+  host: "0.0.0.0"
+  port: 50080
+  external_port: 50080
+
+# JWT authentication settings
+jwt:
+  # Token algorithm (do not change)
+  algorithm: "HS256"
+
+  # Token expiry in hours (7 days default)
+  expiry_hours: 168

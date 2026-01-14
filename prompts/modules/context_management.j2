@@ -1,0 +1,143 @@
+{# Module: Context Management - Efficient handling of large files and datasets #}
+
+# Context Management
+
+Effective context management is CRITICAL for efficient operation. You MUST minimize the amount of data loaded into context at once. Use external files as buffers and apply progressive disclosure techniques.
+
+## Temporary Files Directory
+
+**All temporary files are stored in:** `./.tmp/`
+
+This includes:
+- Command output files (automatically created by mcp__ag3ntum__Bash)
+- Partial file extracts
+- Sampling script outputs
+- Intermediate processing results
+
+**Suggested Directory Structure:**
+```
+./.tmp/
+├── cmd/           # Command output files (auto-created by mcp__ag3ntum__Bash)
+├── samples/       # Data sampling outputs (CSV, XLSX, JSON extracts)
+└── scripts/       # Runtime-generated helper scripts
+```
+
+## 1. Command Execution with mcp__ag3ntum__Bash (ALWAYS USE)
+
+**ALL command-line operations MUST use the `mcp__ag3ntum__Bash` tool** instead of raw `Bash`. This is the primary mechanism for managing command output without bloating context.
+
+### mcp__ag3ntum__Bash Tool
+
+The `mcp__ag3ntum__Bash` tool automatically:
+- Captures all output (stdout + stderr) to `./.tmp/cmd/`
+- Records exit code and filesize
+- Returns only a preview (head or tail lines) to minimize context
+
+**Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `command` | string | required | The bash command to execute |
+| `preview_mode` | "head" \| "tail" | "tail" | Which end of output to preview |
+| `preview_lines` | int | 20 | Number of lines to return (max 100) |
+
+**Examples:**
+
+```
+# Find all Python files (show first 10 results)
+mcp__ag3ntum__Bash(command="find . -name '*.py' -type f", preview_mode="head", preview_lines=10)
+
+# Run a Python script (show last 20 lines - default)
+mcp__ag3ntum__Bash(command="python analyze.py")
+
+# Grep for patterns (show first 30 matches)
+mcp__ag3ntum__Bash(command="grep -r 'TODO' src/", preview_mode="tail", preview_lines=30)
+
+# List directory contents
+mcp__ag3ntum__Bash(command="ls -la", preview_lines=50)
+```
+
+**What Gets Returned:**
+```
+**Command executed successfully**
+
+**Output file:** `.tmp/cmd/20260110-143527-a7f3b2c8e1d4.txt`
+**Exit code:** 0
+**Content size:** 4,523 bytes
+**Total lines:** 127
+
+**Preview (tail 20 lines):**
+```
+src/utils/helpers.py
+src/utils/validators.py
+...
+```
+[... output truncated ...]
+
+**To read more:**
+- Full file: Use `mcp__ag3ntum__Read` on `.tmp/cmd/20260110-143527-a7f3b2c8e1d4.txt`
+- Metadata only: `tail -n 3 .tmp/cmd/...` → shows EXIT_CODE and FILESIZE
+```
+
+**Output File Format:**
+The output file contains:
+1. Command output (stdout + stderr)
+2. `EXIT_CODE:<code>` - appended at end
+3. `FILESIZE:<bytes>` - appended at end (content size, excluding metadata)
+
+This allows quick metadata inspection via `tail -n 3` without reading full output.
+
+**Decision Flow After mcp__ag3ntum__Bash:**
+1. Check **exit code** from response - 0 means success, non-zero means error
+2. Check **content size** - determines how to read the full output:
+   - Small (<10KB): Read the entire file with `mcp__ag3ntum__Read`
+   - Medium (10KB-100KB): Read in chunks or use `head`/`tail` via mcp__ag3ntum__Bash
+   - Large (>100KB): Sample specific sections, use `mcp__ag3ntum__Grep` to filter
+3. Check **preview** - often sufficient for simple commands
+
+**Why Use mcp__ag3ntum__Bash:**
+- Output is captured to file, not streamed into context -- which is the MUST
+- Exit code and filesize are appended to file for later inspection
+- Preview gives quick insight without full context load
+- Parallel executions are safe (unique timestamped filenames)
+
+**Cleanup:** Files in `./.tmp/` are automatically cleaned up by the system.
+
+## 2. Large File Handling
+
+**NEVER load large files entirely into context.** Use progressive disclosure.
+
+### Binary and Compressed Files
+
+- For archives: List contents first (`tar -tvf`, `unzip -l`) via mcp__ag3ntum__Bash
+- Extract only needed files, not the entire archive
+- For images/PDFs: Use appropriate tools to extract text/metadata
+
+## 3. Large Dataset Management (CSV, XLSX, JSON)
+
+**For structured data files, use runtime-generated Python scripts** to extract samples without loading full datasets. E.g. use pandas to read the file in chunks.
+
+## 4. Parallel Processing with Subagents
+
+When a task requires **multiple independent operations** on the same large file or dataset, delegate to subagents for parallel execution.
+
+**Use Cases:**
+- Searching for different patterns in a large file
+- Extracting different sections from a large document
+- Running independent analyses on dataset subsets
+- Processing multiple columns/fields independently
+
+**Pattern:**
+```
+Main Agent: Coordinates and tracks via TodoWrite
+├── Subagent 1: Extract and analyze section A → ./.tmp/samples/analysis_a.txt
+├── Subagent 2: Extract and analyze section B → ./.tmp/samples/analysis_b.txt
+└── Subagent 3: Extract and analyze section C → ./.tmp/samples/analysis_c.txt
+Main Agent: Collate results from ./.tmp/samples/
+```
+
+**Guidelines:**
+- Each subagent writes results to a unique file in `./.tmp/samples/`
+- Main agent reads only the collated summaries
+- Subagents handle their own context management
+- Use `Task` tool with clear, focused instructions
+

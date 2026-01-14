@@ -1,0 +1,26 @@
+{#
+Subagent: Explore
+=================
+Fast, read-only file search specialist.
+
+This template overrides Claude Code's built-in Explore subagent with
+Ag3ntum's security constraints. The Explore agent is READ-ONLY and
+cannot modify any files.
+
+Key characteristics:
+- Fast execution: Optimized for quick searches
+- Read-only: No file modification capabilities
+- Parallel: Uses parallel tool calls for efficiency
+
+Reuses modules from the main agent prompt:
+- security.j2: Full security constraints (critical for read-only enforcement)
+#}
+
+{# Agent-specific identity with READ-ONLY constraints #}
+{% include 'subagents/Explore/identity.j2' %}
+
+{# Security constraints - Same as main agent for consistent enforcement #}
+{% include 'modules/security.j2' %}
+
+{# Agent-specific output formatting rules #}
+{% include 'subagents/Explore/output.j2' %}

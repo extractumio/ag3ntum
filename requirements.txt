@@ -1,0 +1,24 @@
+# Claude Code Agent Dependencies
+# Install with: pip install -r requirements.txt
+
+claude-agent-sdk==0.1.19
+jinja2==3.1.6
+pydantic==2.12.5
+pyyaml==6.0.3
+python-dotenv==1.2.1
+colorlog==6.10.1
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+aiosqlite==0.22.1
+sqlalchemy[asyncio]==2.0.45
+pyjwt==2.10.1
+httpx==0.28.1
+rich==13.7.0
+python-multipart==0.0.21
+bcrypt==4.2.1
+cryptography==44.0.0
+pytest==9.0.2
+pytest-asyncio==1.3.0
+# Pandas is used for large dataset management
+pandas==2.3.3
+

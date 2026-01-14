@@ -1,0 +1,106 @@
+# Unified security configuration for all Ag3ntum tools
+# Single source of truth for path validation and tool behavior
+#
+# NOTE: This is a TEMPLATE - workspace_path is set per-session at runtime!
+# The values here are defaults that can be overridden.
+
+path_validator:
+  # These are TEMPLATE values - actual paths set per-session by agent_runner.py
+  # At runtime: workspace_path = /users/{username}/sessions/{session_id}/workspace
+  
+  # Skills directory (REAL Docker path, mounted inside workspace/skills)
+  skills_path: "/skills"
+  
+  # Log all path access attempts (for debugging)
+  log_all_access: true
+  
+  # Patterns blocked even within workspace (matched against relative paths)
+  blocklist:
+    - "*.env"
+    - "*.key"
+    - ".git/**"
+    - "__pycache__/**"
+    - "*.pyc"
+    - ".secrets/**"
+    - "*.pem"
+    - "*.p12"
+    - "*.pfx"
+  
+  # If set, only these patterns are allowed (null = allow all not in blocklist)
+  # allowlist:
+  #   - "**/*.py"
+  #   - "**/*.yaml"
+  #   - "**/*.json"
+  
+  # Read-only path prefixes (relative to workspace)
+  readonly_prefixes:
+    - "skills/"
+
+# Network tool configuration
+network:
+  # Enable network tools (WebFetch, etc.)
+  enabled: true
+  
+  # Domain allowlist (empty = allow all)
+  allowed_domains: []
+  
+  # Domain blocklist
+  blocked_domains:
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
+    - "metadata.google.internal"
+    - "169.254.169.254"  # AWS metadata
+    - "metadata.azure.com"
+  
+  # Request timeout (seconds)
+  timeout: 30
+  
+  # Maximum response size (bytes)
+  max_response_size: 10485760  # 10MB
+
+# Tool-specific settings
+tools:
+  bash:
+    # Command execution timeout (seconds)
+    timeout: 300
+    # Output preview mode: "tail" or "head"
+    preview_mode: "tail"
+    # Number of lines to preview
+    preview_lines: 20
+    # Maximum preview lines
+    max_preview_lines: 100
+    # Temporary output directory (relative to workspace)
+    output_dir: ".tmp/cmd"
+  
+  read:
+    # Maximum file size to read (bytes)
+    max_file_size: 10485760  # 10MB
+    # Bytes to check for binary detection
+    binary_preview_bytes: 8192
+  
+  write:
+    # Patterns that require confirmation (future feature)
+    sensitive_patterns: []
+    # Maximum file size to write (bytes)
+    max_file_size: 52428800  # 50MB
+  
+  edit:
+    # Maximum file size to edit (bytes)
+    max_file_size: 10485760  # 10MB
+  
+  grep:
+    # Maximum results to return
+    max_results: 1000
+    # Context lines before/after match
+    context_lines: 3
+  
+  glob:
+    # Maximum files to return
+    max_results: 10000
+  
+  ls:
+    # Maximum entries to return
+    max_entries: 1000
+    # Include hidden files by default
+    include_hidden: false

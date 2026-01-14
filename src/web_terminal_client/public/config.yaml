@@ -1,0 +1,10 @@
+server:
+  port: 50080
+  host: "0.0.0.0"
+
+api:
+  base_url: "http://localhost:40080"
+
+ui:
+  max_output_lines: 1000
+  auto_scroll: true

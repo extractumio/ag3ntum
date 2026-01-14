@@ -1,0 +1,35 @@
+{#
+Subagent: general-purpose
+=========================
+Security-hardened general-purpose research agent.
+
+This template overrides Claude Code's built-in general-purpose subagent
+with Ag3ntum's security constraints and tool policies.
+
+Reuses modules from the main agent prompt for consistency:
+- security.j2: Full security constraints
+- tools.j2: Tool usage policy (without permission config)
+- skills.j2: Skills integration (if enabled)
+
+Agent-specific modules:
+- identity.j2: What this agent is and its capabilities
+- output.j2: How to format responses
+#}
+
+{# Agent-specific identity #}
+{% include 'subagents/general-purpose/identity.j2' %}
+
+{# Security constraints - Same as main agent for consistent enforcement #}
+{% include 'modules/security.j2' %}
+
+{# Tool usage policy - Parallel execution, subagent delegation rules #}
+{# Note: Permission-specific sections won't render without 'permissions' context #}
+{% include 'modules/tools.j2' %}
+
+{% if enable_skills %}
+{# Skills integration - SDK-native skill discovery #}
+{% include 'modules/skills.j2' %}
+{% endif %}
+
+{# Agent-specific output formatting rules #}
+{% include 'subagents/general-purpose/output.j2' %}

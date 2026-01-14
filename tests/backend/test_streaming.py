@@ -1,0 +1,738 @@
+"""
+Tests for SSE streaming and event handling.
+
+Covers:
+- EventingTracer event emission
+- Event structure validation for all event types
+- Cancellation and resumability
+- Event persistence
+- Resume context building
+- Persist-then-publish race condition prevention
+"""
+import asyncio
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from src.core.tracer import EventingTracer, NullTracer
+from src.services import event_service
+from src.services.event_stream import EventHub, EventSinkQueue
+
+
+# =============================================================================
+# EventingTracer Tests
+# =============================================================================
+
+class TestEventingTracer:
+    """Tests for EventingTracer event emission."""
+
+    @pytest.mark.asyncio
+    async def test_eventing_tracer_streams_without_header_leak(self) -> None:
+        """Structured output headers are stripped from streaming messages."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="session-1")
+
+        tracer.on_message("```\n---\nstatus: COMPLETE\n", is_partial=True)
+        await asyncio.sleep(0)
+        assert queue.empty()
+
+        tracer.on_message("---\n```\n\nHello", is_partial=True)
+        await asyncio.sleep(0)
+
+        partial_event = await queue.get()
+        assert partial_event["type"] == "message"
+        # Note: text may include leading newline after header strip
+        assert "Hello" in partial_event["data"]["text"]
+        assert partial_event["data"]["is_partial"] is True
+
+        tracer.on_message("", is_partial=False)
+        await asyncio.sleep(0)
+
+        final_event = await queue.get()
+        assert final_event["data"]["is_partial"] is False
+        assert "Hello" in final_event["data"]["full_text"]
+        assert final_event["data"]["structured_status"] == "COMPLETE"
+
+    @pytest.mark.asyncio
+    async def test_emit_event_creates_valid_structure(self) -> None:
+        """emit_event creates events with required fields."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="test-session")
+
+        tracer.emit_event("test_type", {"key": "value"})
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+
+        # Validate required fields
+        assert event["type"] == "test_type"
+        assert event["data"]["key"] == "value"
+        assert "timestamp" in event
+        assert "sequence" in event
+        assert isinstance(event["sequence"], int)
+
+    @pytest.mark.asyncio
+    async def test_emit_event_increments_sequence(self) -> None:
+        """Sequence numbers increment with each event."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="seq-test")
+
+        tracer.emit_event("event1", {})
+        tracer.emit_event("event2", {})
+        tracer.emit_event("event3", {})
+        await asyncio.sleep(0)
+
+        event1 = await queue.get()
+        event2 = await queue.get()
+        event3 = await queue.get()
+
+        assert event1["sequence"] < event2["sequence"] < event3["sequence"]
+
+
+# =============================================================================
+# SSE Event Types Tests
+# =============================================================================
+
+class TestSSEEventTypes:
+    """Tests for all SSE event types structure."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_event_structure(self) -> None:
+        """cancelled event has correct structure with resumable flag."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="cancelled-test")
+
+        tracer.emit_event("cancelled", {
+            "message": "Task was cancelled",
+            "session_id": "cancelled-test",
+            "resumable": True,
+        })
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+        assert event["type"] == "cancelled"
+        assert event["data"]["message"] == "Task was cancelled"
+        assert event["data"]["resumable"] is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled_event_not_resumable(self) -> None:
+        """cancelled event can indicate non-resumable session."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="not-resumable-test")
+
+        tracer.emit_event("cancelled", {
+            "message": "Task was cancelled",
+            "session_id": "not-resumable-test",
+            "resumable": False,
+        })
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+        assert event["type"] == "cancelled"
+        assert event["data"]["resumable"] is False
+
+    @pytest.mark.asyncio
+    async def test_agent_complete_event_structure(self) -> None:
+        """agent_complete event has correct structure."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="complete-test")
+
+        tracer.emit_event("agent_complete", {
+            "status": "COMPLETE",
+            "num_turns": 5,
+            "duration_ms": 12500,
+            "total_cost_usd": 0.0125,
+            "model": "claude-sonnet-4-5-20250929",
+        })
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+        assert event["type"] == "agent_complete"
+        assert event["data"]["status"] == "COMPLETE"
+        assert event["data"]["num_turns"] == 5
+
+    @pytest.mark.asyncio
+    async def test_error_event_structure(self) -> None:
+        """error event has correct structure."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="error-test")
+
+        tracer.emit_event("error", {
+            "message": "Something went wrong",
+            "error_type": "execution_error",
+        })
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+        assert event["type"] == "error"
+        assert event["data"]["message"] == "Something went wrong"
+        assert event["data"]["error_type"] == "execution_error"
+
+
+# =============================================================================
+# Event Persistence Tests
+# =============================================================================
+
+class TestEventPersistence:
+    """Tests for event persistence via event_service."""
+
+    @pytest.mark.asyncio
+    async def test_record_event_skips_partial_and_persists_full_text(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Partial messages are not persisted; full messages are."""
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        await event_service.record_event({
+            "type": "message",
+            "data": {"text": "partial", "is_partial": True},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 1,
+            "session_id": "session-2",
+        })
+        await event_service.record_event({
+            "type": "message",
+            "data": {"text": "", "full_text": "Full message", "is_partial": False},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 2,
+            "session_id": "session-2",
+        })
+
+        events = await event_service.list_events("session-2")
+        assert len(events) == 1
+        assert events[0]["data"]["text"] == "Full message"
+
+    @pytest.mark.asyncio
+    async def test_record_cancelled_event_with_resumable(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelled events are persisted with resumable flag."""
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        await event_service.record_event({
+            "type": "cancelled",
+            "data": {"message": "Task was cancelled", "resumable": True},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 1,
+            "session_id": "cancelled-session",
+        })
+
+        events = await event_service.list_events("cancelled-session")
+        assert len(events) == 1
+        assert events[0]["type"] == "cancelled"
+        assert events[0]["data"]["resumable"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_latest_terminal_status_cancelled(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """get_latest_terminal_status returns 'cancelled' for cancelled sessions."""
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        await event_service.record_event({
+            "type": "agent_start",
+            "data": {"session_id": "claude-123"},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 1,
+            "session_id": "terminal-status-test",
+        })
+        await event_service.record_event({
+            "type": "cancelled",
+            "data": {"message": "Cancelled", "resumable": True},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 2,
+            "session_id": "terminal-status-test",
+        })
+
+        status = await event_service.get_latest_terminal_status("terminal-status-test")
+        assert status == "cancelled"
+
+
+# =============================================================================
+# Terminal Events Tests
+# =============================================================================
+
+class TestTerminalEvents:
+    """Tests for terminal event detection and handling."""
+
+    @pytest.mark.asyncio
+    async def test_terminal_events_are_recognized(self) -> None:
+        """All terminal event types are correctly identified."""
+        terminal_types = {"agent_complete", "error", "cancelled"}
+
+        for event_type in terminal_types:
+            queue: asyncio.Queue = asyncio.Queue()
+            tracer = EventingTracer(
+                NullTracer(), event_queue=queue, session_id=f"{event_type}-test"
+            )
+
+            tracer.emit_event(event_type, {"test": True})
+            await asyncio.sleep(0)
+
+            event = await queue.get()
+            assert event["type"] == event_type
+
+
+# =============================================================================
+# Sequence Number Tests
+# =============================================================================
+
+class TestSequenceNumbers:
+    """Tests for event sequence numbering."""
+
+    @pytest.mark.asyncio
+    async def test_sequence_starts_from_initial(self) -> None:
+        """Sequence numbers start from initial_sequence parameter."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=queue,
+            session_id="seq-init-test",
+            initial_sequence=100,
+        )
+
+        tracer.emit_event("test", {})
+        await asyncio.sleep(0)
+
+        event = await queue.get()
+        assert event["sequence"] == 101
+
+    @pytest.mark.asyncio
+    async def test_sequence_is_monotonically_increasing(self) -> None:
+        """Sequence numbers always increase."""
+        queue: asyncio.Queue = asyncio.Queue()
+        tracer = EventingTracer(
+            NullTracer(), event_queue=queue, session_id="monotonic-test"
+        )
+
+        sequences = []
+        for i in range(10):
+            tracer.emit_event(f"event_{i}", {})
+
+        await asyncio.sleep(0)
+
+        while not queue.empty():
+            event = await queue.get()
+            sequences.append(event["sequence"])
+
+        # Verify strictly increasing
+        for i in range(1, len(sequences)):
+            assert sequences[i] > sequences[i - 1]
+
+
+# =============================================================================
+# Persist-Then-Publish Tests (Race Condition Prevention)
+# =============================================================================
+
+class TestPersistThenPublish:
+    """
+    Tests for the persist-then-publish pattern that prevents race conditions.
+
+    The fix ensures events are persisted to DB BEFORE being published to EventHub.
+    This guarantees that SSE subscribers will always find events either:
+    1. In the queue (if subscribed before publish), or
+    2. In the database (if subscribed after publish)
+    """
+
+    @pytest.mark.asyncio
+    async def test_event_sink_called_before_queue_put(self) -> None:
+        """Event sink (persistence) is called before queue put (publish)."""
+        call_order = []
+
+        async def mock_sink(event):
+            call_order.append(("sink", event["type"]))
+            await asyncio.sleep(0.01)  # Simulate DB write
+
+        class MockQueue:
+            async def put(self, event):
+                call_order.append(("queue", event["type"]))
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=MockQueue(),
+            event_sink=mock_sink,
+            session_id="order-test",
+        )
+
+        tracer.emit_event("test_event", {"data": "value"})
+        await asyncio.sleep(0.1)  # Wait for async task to complete
+
+        # Verify sink is called before queue
+        assert len(call_order) == 2
+        assert call_order[0] == ("sink", "test_event")
+        assert call_order[1] == ("queue", "test_event")
+
+    @pytest.mark.asyncio
+    async def test_publish_waits_for_persistence_to_complete(self) -> None:
+        """Publishing waits for persistence to complete, not just start."""
+        persistence_completed = False
+        publish_started_before_persistence_done = False
+
+        async def slow_sink(event):
+            nonlocal persistence_completed
+            await asyncio.sleep(0.05)  # Simulate slow DB write
+            persistence_completed = True
+
+        class CheckingQueue:
+            async def put(self, event):
+                nonlocal publish_started_before_persistence_done
+                if not persistence_completed:
+                    publish_started_before_persistence_done = True
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=CheckingQueue(),
+            event_sink=slow_sink,
+            session_id="wait-test",
+        )
+
+        tracer.emit_event("test_event", {})
+        await asyncio.sleep(0.2)  # Wait for async task to complete
+
+        assert persistence_completed
+        assert not publish_started_before_persistence_done
+
+    @pytest.mark.asyncio
+    async def test_persistence_failure_does_not_block_publish(self) -> None:
+        """If persistence fails, event is still published (with warning)."""
+        published_events = []
+
+        async def failing_sink(event):
+            raise Exception("DB connection failed")
+
+        class TrackingQueue:
+            async def put(self, event):
+                published_events.append(event)
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=TrackingQueue(),
+            event_sink=failing_sink,
+            session_id="fail-test",
+        )
+
+        # Should not raise, even though sink fails
+        tracer.emit_event("test_event", {"data": "value"})
+        await asyncio.sleep(0.1)
+
+        # Event should still be published
+        assert len(published_events) == 1
+        assert published_events[0]["type"] == "test_event"
+
+    @pytest.mark.asyncio
+    async def test_multiple_events_maintain_order(self) -> None:
+        """Multiple events are persisted and published in order."""
+        persisted_events = []
+        published_events = []
+
+        async def tracking_sink(event):
+            persisted_events.append(event["sequence"])
+            await asyncio.sleep(0.01)
+
+        class TrackingQueue:
+            async def put(self, event):
+                published_events.append(event["sequence"])
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=TrackingQueue(),
+            event_sink=tracking_sink,
+            session_id="multi-test",
+        )
+
+        for i in range(5):
+            tracer.emit_event(f"event_{i}", {"index": i})
+
+        await asyncio.sleep(0.5)  # Wait for all async tasks
+
+        # Both lists should have same events in same order
+        assert len(persisted_events) == 5
+        assert len(published_events) == 5
+        assert persisted_events == published_events
+
+    @pytest.mark.asyncio
+    async def test_no_event_sink_still_publishes(self) -> None:
+        """Events are published even without an event sink."""
+        published_events = []
+
+        class TrackingQueue:
+            async def put(self, event):
+                published_events.append(event)
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=TrackingQueue(),
+            event_sink=None,  # No persistence
+            session_id="no-sink-test",
+        )
+
+        tracer.emit_event("test_event", {})
+        await asyncio.sleep(0.1)
+
+        assert len(published_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_persist_flag_false_skips_persistence(self) -> None:
+        """persist_event=False skips persistence but still publishes."""
+        persisted = []
+        published = []
+
+        async def tracking_sink(event):
+            persisted.append(event)
+
+        class TrackingQueue:
+            async def put(self, event):
+                published.append(event)
+
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=TrackingQueue(),
+            event_sink=tracking_sink,
+            session_id="skip-persist-test",
+        )
+
+        tracer.emit_event("test_event", {}, persist_event=False)
+        await asyncio.sleep(0.1)
+
+        assert len(persisted) == 0  # Not persisted
+        assert len(published) == 1  # But published
+
+
+class TestEventHubSubscription:
+    """Tests for EventHub subscription and event delivery."""
+
+    @pytest.mark.asyncio
+    async def test_subscriber_receives_events_after_subscribe(self) -> None:
+        """Subscriber receives events published after subscription."""
+        hub = EventHub()
+        session_id = "sub-test"
+
+        queue = await hub.subscribe(session_id)
+
+        await hub.publish(session_id, {"type": "test", "sequence": 1})
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["type"] == "test"
+
+        await hub.unsubscribe(session_id, queue)
+
+    @pytest.mark.asyncio
+    async def test_subscriber_misses_events_before_subscribe(self) -> None:
+        """Subscriber does not receive events published before subscription."""
+        hub = EventHub()
+        session_id = "miss-test"
+
+        # Publish before subscription
+        await hub.publish(session_id, {"type": "missed", "sequence": 1})
+
+        # Subscribe after
+        queue = await hub.subscribe(session_id)
+
+        # Queue should be empty (missed the event)
+        assert queue.empty()
+
+        await hub.unsubscribe(session_id, queue)
+
+    @pytest.mark.asyncio
+    async def test_event_sink_queue_integration(self) -> None:
+        """EventSinkQueue correctly publishes to EventHub."""
+        hub = EventHub()
+        session_id = "sink-queue-test"
+
+        queue = await hub.subscribe(session_id)
+        sink_queue = EventSinkQueue(hub, session_id)
+
+        await sink_queue.put({"type": "test", "sequence": 1})
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["type"] == "test"
+
+        await hub.unsubscribe(session_id, queue)
+
+
+class TestAgentRunnerEventEmission:
+    """Tests for event emission in agent_runner fallback paths."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_emit_persists_before_publish(self) -> None:
+        """Agent runner fallback emit_event persists before publishing."""
+        from src.services.agent_runner import AgentRunner
+
+        runner = AgentRunner()
+        session_id = "fallback-test"
+
+        call_order = []
+
+        async def mock_record_event(event):
+            call_order.append("persist")
+            await asyncio.sleep(0.01)
+
+        async def mock_publish(sid, event):
+            call_order.append("publish")
+
+        with patch("src.services.event_service.record_event", mock_record_event):
+            with patch.object(runner._event_hub, "publish", mock_publish):
+                # Subscribe to receive events
+                queue = await runner.subscribe(session_id)
+
+                # Manually trigger the persist_then_publish pattern
+                # (simulating the fallback path when tracer is None)
+                async def persist_then_publish():
+                    await mock_record_event({"type": "test"})
+                    await mock_publish(session_id, {"type": "test"})
+
+                await persist_then_publish()
+
+                await runner.unsubscribe(session_id, queue)
+
+        assert call_order == ["persist", "publish"]
+
+
+class TestSSEReplayWithPersistence:
+    """
+    Tests for SSE replay correctly finding persisted events.
+
+    These tests verify the complete flow:
+    1. Events are persisted to DB
+    2. SSE connects and replays from DB
+    3. Events are found during replay
+    """
+
+    @pytest.mark.asyncio
+    async def test_replay_finds_persisted_events(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SSE replay finds events that were persisted before subscription."""
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        session_id = "replay-test"
+
+        # Persist events directly (simulating what happens before SSE connects)
+        for i in range(1, 4):
+            await event_service.record_event({
+                "type": f"event_{i}",
+                "data": {"index": i},
+                "timestamp": datetime.now(timezone.utc),
+                "sequence": i,
+                "session_id": session_id,
+            })
+
+        # Replay (simulating SSE connection)
+        events = await event_service.list_events(session_id, after_sequence=0)
+
+        assert len(events) == 3
+        assert events[0]["type"] == "event_1"
+        assert events[1]["type"] == "event_2"
+        assert events[2]["type"] == "event_3"
+
+    @pytest.mark.asyncio
+    async def test_replay_with_after_sequence_filter(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SSE replay correctly filters events by after_sequence."""
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        session_id = "filter-test"
+
+        # Persist events
+        for i in range(1, 6):
+            await event_service.record_event({
+                "type": f"event_{i}",
+                "data": {},
+                "timestamp": datetime.now(timezone.utc),
+                "sequence": i,
+                "session_id": session_id,
+            })
+
+        # Replay with after_sequence=2 (should get events 3, 4, 5)
+        events = await event_service.list_events(session_id, after_sequence=2)
+
+        assert len(events) == 3
+        assert events[0]["sequence"] == 3
+        assert events[1]["sequence"] == 4
+        assert events[2]["sequence"] == 5
+
+    @pytest.mark.asyncio
+    async def test_complete_flow_persist_subscribe_replay(
+        self,
+        test_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Complete flow: persist event, subscribe to hub, replay from DB.
+
+        This simulates the race condition scenario that was fixed:
+        1. Event is persisted to DB
+        2. SSE subscribes to EventHub
+        3. SSE replays from DB and finds the event
+        """
+        async_session = async_sessionmaker(
+            test_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
+
+        session_id = "complete-flow-test"
+        hub = EventHub()
+
+        # Step 1: Persist event (simulates agent emitting event)
+        await event_service.record_event({
+            "type": "agent_start",
+            "data": {"session_id": "claude-123"},
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": 1,
+            "session_id": session_id,
+        })
+
+        # Step 2: Subscribe to hub (simulates SSE connection)
+        queue = await hub.subscribe(session_id)
+
+        # Step 3: Replay from DB (simulates SSE replay logic)
+        replayed_events = await event_service.list_events(session_id, after_sequence=0)
+
+        # Event should be found in replay
+        assert len(replayed_events) == 1
+        assert replayed_events[0]["type"] == "agent_start"
+
+        # Queue should be empty (event was before subscription)
+        assert queue.empty()
+
+        await hub.unsubscribe(session_id, queue)

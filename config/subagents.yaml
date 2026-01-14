@@ -1,0 +1,117 @@
+# =============================================================================
+# Ag3ntum Subagent Configuration
+# =============================================================================
+#
+# This file configures subagent overrides for Claude Code's built-in subagents.
+# Subagents defined here will replace the default Claude Code subagents when
+# the SDK's `agents` parameter is passed to ClaudeAgentOptions.
+#
+# ARCHITECTURE NOTE:
+# -----------------
+# Subagent definitions are loaded ONCE at API startup by the SubagentManager
+# singleton. The same agent definitions are shared across ALL users and sessions.
+# This is intentional for:
+#   - Performance: Prompt templates are rendered once, not per-request
+#   - Consistency: All users get the same security-hardened subagents
+#   - Simplicity: Single source of truth for subagent configuration
+#
+# FUTURE EXTENSION:
+# -----------------
+# Per-user subagent customization may be added later. When implemented,
+# user-specific overrides would be loaded from:
+#   /users/{username}/.claude/agents/
+# and merged with these global definitions at session creation time.
+#
+# =============================================================================
+
+subagents:
+  # ---------------------------------------------------------------------------
+  # general-purpose: Override with security-hardened version
+  # ---------------------------------------------------------------------------
+  # This replaces Claude Code's built-in general-purpose subagent with
+  # Ag3ntum's security constraints (from modules/security.j2) and tool
+  # policies (from modules/tools.j2).
+  #
+  general-purpose:
+    enabled: true
+    description: "General-purpose agent for research, code search, and multi-step tasks"
+    prompt_template: "subagents/general-purpose/prompt.j2"
+    tools:
+      - mcp__ag3ntum__Read
+      - mcp__ag3ntum__Glob
+      - mcp__ag3ntum__Grep
+      - mcp__ag3ntum__WebFetch
+      - WebSearch
+      # Note: Bash is intentionally omitted for subagents by default.
+      # The main agent handles command execution with proper sandboxing.
+      # Add "mcp__ag3ntum__Bash" here only if subagents need direct command access.
+
+  # ---------------------------------------------------------------------------
+  # Explore: Fast, read-only file search specialist
+  # ---------------------------------------------------------------------------
+  # This replaces Claude Code's built-in Explore subagent with Ag3ntum's
+  # security-hardened version. Key characteristics:
+  #   - READ-ONLY: Cannot create, modify, or delete files
+  #   - Fast: Optimized for quick searches with parallel tool calls
+  #   - Efficient: Uses glob/grep for broad searches, read for specific files
+  #
+  Explore:
+    enabled: true
+    description: "Fast, read-only agent for exploring codebases and finding files"
+    prompt_template: "subagents/Explore/prompt.j2"
+    tools:
+      - mcp__ag3ntum__Read
+      - mcp__ag3ntum__Glob
+      - mcp__ag3ntum__Grep
+      # Note: No Write, Edit, or Bash - this is a READ-ONLY agent
+
+  # ---------------------------------------------------------------------------
+  # claude-code-guide: DISABLED
+  # ---------------------------------------------------------------------------
+  # This agent provides Claude Code documentation lookup. It's disabled in
+  # Ag3ntum because:
+  #   1. Users should not access Claude Code internals
+  #   2. It may leak information about the underlying system
+  #   3. Ag3ntum has its own documentation and help system
+  #
+  claude-code-guide:
+    enabled: false
+    description: "Disabled - Claude Code documentation is not available"
+    prompt_template: "subagents/disabled.j2"
+    tools: []
+
+  # ---------------------------------------------------------------------------
+  # statusline-setup: DISABLED
+  # ---------------------------------------------------------------------------
+  # This agent configures Claude Code's status line from shell PS1.
+  # It's disabled in Ag3ntum because:
+  #   1. Ag3ntum runs in a web interface, not a terminal
+  #   2. Status line configuration is not applicable
+  #   3. It may expose shell configuration details
+  #
+  statusline-setup:
+    enabled: false
+    description: "Disabled - Status line configuration is not available"
+    prompt_template: "subagents/disabled.j2"
+    tools: []
+
+  # ---------------------------------------------------------------------------
+  # Additional subagents can be defined here
+  # ---------------------------------------------------------------------------
+  # Each subagent should have its own folder under prompts/subagents/:
+  #
+  #   prompts/subagents/<agent-name>/
+  #   ├── prompt.j2      # Main template (includes other modules)
+  #   ├── identity.j2    # Agent identity and capabilities
+  #   └── output.j2      # Output formatting rules
+  #
+  # Example of a custom research agent:
+  #
+  # research-agent:
+  #   enabled: true
+  #   description: "Specialized agent for web research and summarization"
+  #   prompt_template: "subagents/research-agent/prompt.j2"
+  #   tools:
+  #     - mcp__ag3ntum__WebFetch
+  #     - WebSearch
+  #     - mcp__ag3ntum__Read
