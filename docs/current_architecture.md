@@ -329,7 +329,7 @@ add_cli_arguments()        # --config, --secrets, --set, --show-tools, etc.
 | **AuthService** | `auth_service.py` | JWT authentication, password hashing |
 | **UserService** | `user_service.py` | User CRUD operations |
 | **EventService** | `event_service.py` | Event persistence and queries |
-| **EventHub** | `event_stream.py` | SSE fanout with pub/sub and backpressure |
+| **RedisEventHub** | `redis_event_hub.py` | SSE fanout with Redis pub/sub and backpressure |
 | **EncryptionService** | `encryption_service.py` | Token encryption/decryption |
 
 ### 3.3 Configuration Files
@@ -542,9 +542,10 @@ Task reaches agent execution
 The **Inbound WAF (Web Application Firewall) Filter** protects the backend API from resource exhaustion and DoS attacks by enforcing size limits on incoming requests.
 
 **Implementation:**
-- **Middleware**: `InboundWAFMiddleware` in `src/api/waf_filter.py`
-- **Validators**: Pydantic `BeforeValidator` in `src/api/models.py`
-- **Integration**: Registered in `src/api/main.py` FastAPI app
+- **Middleware**: `waf_middleware` function in `src/api/main.py` (HTTP middleware)
+- **Validation Logic**: `validate_request_size` and filter functions in `src/api/waf_filter.py`
+- **Validators**: Pydantic field validators in `src/api/models.py`
+- **Integration**: Registered as HTTP middleware in `src/api/main.py`
 
 **Protection Limits:**
 
@@ -556,26 +557,30 @@ The **Inbound WAF (Web Application Firewall) Filter** protects the backend API f
 
 **How It Works:**
 
-1. **Request Body Middleware** (`InboundWAFMiddleware`):
+1. **Request Body Middleware** (`waf_middleware` function):
    ```python
    # Checks Content-Length header before reading body
-   if content_length > MAX_REQUEST_BODY_BYTES (20MB):
-       raise HTTPException(413, "Request size too large")
+   @app.middleware("http")
+   async def waf_middleware(request: Request, call_next):
+       await validate_request_size(request)  # Raises HTTPException(413) if > 20MB
+       return await call_next(request)
    ```
 
-2. **Text Field Validation** (`WAFTextContent` validator):
+2. **Text Field Validation** (via `filter_request_data` function):
    ```python
-   # Applied to 'task' field in CreateSessionRequest, RunTaskRequest, etc.
-   if len(text) > MAX_TEXT_CONTENT_CHARS (100K):
-       logger.warning("Truncating text from {len} to 100K chars")
-       return text[:100_000]  # Truncate and continue
+   # Applied to 'task', 'content', 'text' fields in request models
+   def truncate_text_content(text: str, field_name: str) -> str:
+       if len(text) > MAX_TEXT_CONTENT_CHARS (100K):
+           logger.warning(f"Truncating {field_name} from {len} to 100K chars")
+           return text[:100_000]  # Truncate and continue
    ```
 
-3. **File Upload Validation** (`WAFFileContent` validator):
+3. **File Upload Validation** (`validate_file_size` function):
    ```python
-   # Applied to file content fields
-   if len(file_bytes) > MAX_FILE_UPLOAD_BYTES (10MB):
-       raise HTTPException(413, "File too large")
+   # Called before processing file uploads
+   def validate_file_size(content_length: int) -> None:
+       if content_length > MAX_FILE_UPLOAD_SIZE (10MB):
+           raise HTTPException(413, "File too large")
    ```
 
 **Protected Endpoints:**
@@ -824,8 +829,8 @@ class SessionService:
     def get_session_info(session_id: str) -> dict
     def get_session_file(session_id: str, path: str) -> Path
 
-# EventHub (services/event_stream.py)
-class EventHub:
+# RedisEventHub (services/redis_event_hub.py)
+class RedisEventHub:
     async def subscribe(session_id: str) -> asyncio.Queue
     async def unsubscribe(session_id: str, queue: asyncio.Queue) -> None
     async def publish(session_id: str, event: dict) -> None
@@ -848,7 +853,7 @@ class EventingTracer(TracerBase):
     def __init__(
         self,
         tracer: TracerBase,                    # Wrapped tracer (BackendConsoleTracer)
-        event_queue: EventSinkQueue,           # EventHub sink for publishing
+        event_queue: EventSinkQueue,           # EventHub/RedisEventHub sink for publishing
         event_sink: Callable[[dict], Awaitable[None]],  # DB persistence callback
         session_id: str,
         initial_sequence: int = 0,
@@ -856,18 +861,50 @@ class EventingTracer(TracerBase):
 
     def emit_event(event_type: str, data: dict[str, Any]) -> None
     # All TracerBase methods (on_agent_start, on_tool_start, etc.)
-    # Call wrapped tracer + persist to DB + publish to EventHub
+    # Call wrapped tracer + publish to Redis/EventHub + persist to DB
 ```
 
-**EventHub** - Pub/sub fanout for SSE:
+**EventHub** - In-memory pub/sub fanout for SSE (single-server mode):
 
 ```python
 class EventHub:
-    """Manages per-session event subscriptions with backpressure handling."""
+    """In-memory event hub for single-server deployments."""
 
     async def subscribe(session_id: str) -> asyncio.Queue  # Create subscriber queue
     async def unsubscribe(session_id: str, queue: asyncio.Queue) -> None
     async def publish(session_id: str, event: dict) -> None  # Fanout to all subscribers
+```
+
+**RedisEventHub** - Redis-based pub/sub for horizontal scaling:
+
+```python
+class RedisEventHub:
+    """Redis-based event hub for cross-container SSE streaming."""
+
+    async def subscribe(session_id: str) -> asyncio.Queue
+    # Creates local queue + background Redis listener task
+    # Channel pattern: session:{session_id}:events
+
+    async def unsubscribe(session_id: str, queue: asyncio.Queue) -> None
+    # Cancels background listener task
+
+    async def publish(session_id: str, event: dict) -> None
+    # Publishes to Redis Pub/Sub channel
+    # All containers receive the event in real-time
+```
+
+**Redis Configuration** (see `config/redis.conf`):
+- **Port binding**: `127.0.0.1:46379` (external) → `6379` (internal)
+- **Security**: Localhost-only access, no external network exposure
+- **Memory limit**: 256MB with LRU eviction policy
+- **Disabled commands**: `KEYS` (performance), `SHUTDOWN`, `DEBUG`
+- **No persistence**: Ephemeral events only (SQLite stores history)
+
+**Feature Flag** (`config/api.yaml`):
+```yaml
+features:
+  redis_sse: false  # Default: in-memory EventHub (single-server)
+                    # Set true: RedisEventHub (horizontal scaling)
 ```
 
 **Event Structure:**
@@ -893,14 +930,28 @@ class EventHub:
 7. Subscriber automatically unsubscribed when stream ends
 
 **Event Delivery Guarantee:**
-- EventingTracer persists events to DB before publishing to EventHub
-- SSE endpoint subscribes first, then replays from DB
-- No race condition: events are either in queue or in DB
+- **Publish-then-persist**: Events published to Redis/EventHub first (~1ms), then persisted to SQLite (~50ms)
+- **10-event overlap buffer**: SSE replays from `sequence - 10` to catch late-arriving events
+- **Deduplication**: Events deduplicated by sequence number to prevent duplicates
+- **No race condition**: Overlap buffer + deduplication ensures no events are lost
 
-**Fallback Strategy:**
-- Web UI uses SSE streaming for real-time events
-- History endpoint (`/events/history`) available for polling fallback
-- CLI always uses direct `ExecutionTracer` (no SSE needed)
+**Event Flow:**
+1. EventingTracer emits event → publishes to Redis (~1ms)
+2. Event persisted to SQLite in background (~50ms)
+3. SSE subscribers receive event immediately from Redis
+4. Late subscribers replay from DB with 10-event overlap
+5. Duplicate events filtered by sequence number
+
+**Client Fallback:**
+- **Web UI**: SSE streaming for real-time events (Redis required)
+- **History endpoint**: `/events/history` available for polling fallback
+- **CLI**: Always uses direct `ExecutionTracer` (no SSE needed)
+
+**Horizontal Scaling:**
+- **RedisEventHub**: Cross-container event delivery via Redis Pub/Sub
+- **Port security**: Redis bound to `127.0.0.1:46379` (localhost only)
+- **Redis required**: System fails to start with clear error if Redis unavailable
+- **See**: `docs/redis_security.md` for complete security configuration
 
 ---
 
@@ -1045,12 +1096,12 @@ Project/
 │   │   └── models.py         # User, Session, Event, Token models (4 tables)
 │   ├── services/             # Business logic (7 services)
 │   │   ├── __init__.py
-│   │   ├── agent_runner.py   # Background task runner with EventHub
+│   │   ├── agent_runner.py   # Background task runner with RedisEventHub
 │   │   ├── auth_service.py   # JWT authentication
 │   │   ├── user_service.py   # User CRUD operations
 │   │   ├── session_service.py # Session CRUD service
 │   │   ├── event_service.py  # Event persistence
-│   │   ├── event_stream.py   # SSE fanout (EventHub, EventSinkQueue)
+│   │   ├── redis_event_hub.py # Redis-based SSE fanout (required)
 │   │   └── encryption_service.py  # Token encryption
 │   └── web_terminal_client/  # React Web UI (Stage 3)
 │       ├── index.html        # HTML entry point

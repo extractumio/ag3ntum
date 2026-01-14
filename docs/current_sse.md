@@ -6,6 +6,12 @@ This document describes the current SSE implementation for real-time event strea
 
 Ag3ntum uses Server-Sent Events (SSE) to stream real-time execution events from the backend to the frontend during agent task execution. This enables live updates of tool calls, messages, errors, and completion status without polling.
 
+**Architecture:** Redis Pub/Sub for real-time streaming + SQLite for persistent conversation history.
+
+- **Redis Pub/Sub:** Handles high-throughput real-time event delivery across multiple API containers (horizontal scaling)
+- **SQLite:** Authoritative storage for final/important events (conversation history, audit trail)
+- **Event Flow:** Events are published to Redis first (~1ms latency) for fast SSE delivery, then persisted to SQLite (~5-50ms) for replay and history
+
 ```
 ┌─────────────┐         POST /sessions/run          ┌─────────────┐
 │   Frontend  │────────────────────────────────────▶│   Backend   │
@@ -22,6 +28,137 @@ Ag3ntum uses Server-Sent Events (SSE) to stream real-time execution events from 
 │             │    agent_complete, error, etc.)     │             │
 └─────────────┘                                     └─────────────┘
 ```
+
+---
+
+## Redis + SQLite Architecture
+
+### High-Level Design
+
+Ag3ntum uses a **two-tier event delivery system**:
+
+1. **Redis Pub/Sub (Tier 1)**: Real-time streaming layer
+   - Purpose: Low-latency event delivery to active SSE connections
+   - Latency: ~1ms
+   - Persistence: None (ephemeral)
+   - Scaling: Horizontal (multiple API containers share Redis)
+   - Channel pattern: `session:{session_id}:events`
+
+2. **SQLite (Tier 2)**: Persistent storage layer
+   - Purpose: Authoritative conversation history and replay
+   - Latency: ~5-50ms (with retries)
+   - Persistence: Durable (on disk)
+   - Scaling: Vertical (per-user session files)
+   - Events stored: Final messages, tool calls, agent lifecycle events
+
+### Event Flow Sequence
+
+```
+Agent emits event
+    ↓
+EventingTracer.emit_event()
+    ↓
+persist_then_publish():
+    ├─ (1) Publish to Redis Pub/Sub         [~1ms, all events]
+    │      └─ RedisEventHub.publish()
+    │         └─ PUBLISH session:{id}:events
+    │
+    └─ (2) Persist to SQLite                 [~5-50ms, final events only]
+           └─ EventService.record_event()
+              └─ INSERT INTO events
+
+SSE Connection:
+    ├─ Subscribe to Redis channel            [Receives all future events]
+    ├─ Replay from SQLite (seq-10 to seq)    [Overlap buffer catches race]
+    └─ Stream live from Redis                [Deduplicate by sequence]
+```
+
+### Why Redis First, SQLite Second?
+
+**Performance:** Publishing to Redis first minimizes latency for active SSE connections:
+- Old approach: Wait for DB write (~50ms) → publish → SSE receives
+- New approach: Publish to Redis (~1ms) → SSE receives → DB write happens async
+
+**Trade-off:** Small race condition window (1-50ms) where event is in Redis but not yet in SQLite.
+
+**Solution:** **10-event overlap buffer** in SSE replay:
+- SSE replays from `sequence - 10` instead of `sequence`
+- Deduplication by sequence number prevents duplicates
+- Events published to Redis but not yet in SQLite are caught by overlap
+
+### Horizontal Scaling
+
+Multiple API containers share the same Redis instance:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ API Container 1   │ API Container 2   │ API Container 3
+│                   │                   │
+│ ┌──────────┐      │ ┌──────────┐      │ ┌──────────┐
+│ │SSE Client│      │ │SSE Client│      │ │SSE Client│
+│ │session_A │      │ │session_B │      │ │session_A │
+│ └────┬─────┘      │ └────┬─────┘      │ └────┬─────┘
+└──────┼────────────┘      │             └──────┼──────────┘
+       │                   │                    │
+       └───────────────────┼────────────────────┘
+                           ↓
+                    ┌─────────────┐
+                    │    Redis    │
+                    │   Pub/Sub   │
+                    └─────────────┘
+           session:session_A:events
+           session:session_B:events
+```
+
+**Key benefit:** Load balancer can route SSE connections to any API container.
+
+### Redis Security Configuration
+
+**Port Binding (Localhost Only):**
+```yaml
+# docker-compose.yml
+ports:
+  - "127.0.0.1:46379:6379"  # External: localhost only, Internal: Docker network
+```
+
+| Interface | Port | Access Level |
+|-----------|------|-------------|
+| **External** | `127.0.0.1:46379` | Localhost only (no external access) |
+| **Internal** | `redis:6379` | Docker network only |
+
+**Security Measures:**
+
+1. **Network Security**:
+   - Port bound to `127.0.0.1` interface (localhost only)
+   - External connections automatically blocked at network level
+   - No external network exposure possible
+
+2. **Memory Protection**:
+   - 256MB memory limit with LRU eviction policy
+   - Prevents memory exhaustion attacks
+   - Auto-evicts least recently used keys when limit reached
+
+3. **Disabled Dangerous Commands**:
+   - `KEYS` disabled (prevents performance attacks)
+   - `SHUTDOWN` and `DEBUG` renamed (prevents service disruption)
+   - See `config/redis.conf` for complete configuration
+
+4. **No Persistence**:
+   - Redis used for ephemeral SSE events only
+   - SQLite stores persistent conversation history
+   - No disk I/O overhead, automatic cleanup
+
+**Feature Flag** (`config/api.yaml`):
+```yaml
+features:
+  redis_sse: false  # Default: in-memory EventHub (single-server)
+                    # Set true: RedisEventHub (horizontal scaling)
+
+redis:
+  url: "redis://redis:6379/0"  # Default Redis URL
+```
+
+**Documentation**: See `docs/redis_security.md` for detailed security configuration and testing procedures.
 
 ---
 
@@ -62,8 +199,9 @@ const source = new EventSource(url);
 
 **Backend Endpoint:** `GET /sessions/{id}/events`
 - Validates token and session ownership
-- Subscribes to EventHub for live events
-- Replays missed events from database
+- Subscribes to Redis Pub/Sub channel for live events
+- Replays missed events from SQLite database (with 10-event overlap buffer)
+- Deduplicates events by sequence number
 - Returns `StreamingResponse` with `text/event-stream` media type
 
 ### 3. Event Processing Architecture
@@ -113,38 +251,45 @@ const source = new EventSource(url);
 │  │                      persist_then_publish()                              │ │
 │  │                                                                          │ │
 │  │  async def persist_then_publish():                                      │ │
+│  │      # Publish to Redis FIRST (low latency ~1ms)                        │ │
+│  │      await event_queue.put(event)  # Redis Pub/Sub                      │ │
+│  │      # Then persist to SQLite (higher latency ~5-50ms)                  │ │
 │  │      if persist_event:                                                   │ │
 │  │          await event_sink(event)  # Write to SQLite                     │ │
-│  │      await event_queue.put(event)  # Publish to EventHub                │ │
 │  │                                                                          │ │
-│  │  CRITICAL: DB write completes BEFORE EventHub publish                   │ │
-│  │  This prevents race conditions where SSE misses events                  │ │
+│  │  ORDER CHANGED: Redis publish BEFORE DB persist for lower latency      │ │
+│  │  Overlap buffer in SSE replay prevents race conditions                 │ │
 │  └───────────┬──────────────────────────────────┬────────────────────────────┘ │
 │              ↓                                  ↓                             │
 │  ┌─────────────────────────┐     ┌────────────────────────────────────────┐  │
 │  │     EventService        │     │           EventSinkQueue               │  │
-│  │ (event_service.py)      │     │         (event_stream.py)              │  │
+│  │ (event_service.py)      │     │       (redis_event_hub.py)             │  │
 │  │                         │     │                                        │  │
-│  │ record_event() →        │     │ put_nowait() → EventHub.publish()     │  │
+│  │ record_event() →        │     │ put() → RedisEventHub.publish()       │  │
 │  │   _persist_event() →    │     │                                        │  │
 │  │   INSERT INTO events    │     └───────────────────┬────────────────────┘  │
 │  │                         │                         ↓                       │
 │  │ Features:               │     ┌────────────────────────────────────────┐  │
-│  │ - Retry logic (3x)      │     │              EventHub                  │  │
-│  │ - 10s timeout           │     │         (event_stream.py)              │  │
+│  │ - Retry logic (3x)      │     │           RedisEventHub                │  │
+│  │ - 10s timeout           │     │       (redis_event_hub.py)             │  │
 │  │ - Skip partial messages │     │                                        │  │
-│  │ - Extract full_text     │     │ Pub/sub fanout per session:           │  │
-│  │ - Update resume_id      │     │ - subscribers: Dict[session, Set[Q]]  │  │
-│  │                         │     │ - max_queue_size: 500                  │  │
-│  └─────────────────────────┘     │ - Backpressure: drop oldest           │  │
+│  │ - Extract full_text     │     │ Redis Pub/Sub per session:             │  │
+│  │ - Update resume_id      │     │ - Channel: session:{id}:events         │  │
+│  │                         │     │ - Local queue per subscriber (500)     │  │
+│  └─────────────────────────┘     │ - Background Redis listener task       │  │
+│                                  │ - Backpressure: drop oldest            │  │
 │                                  │ - Stats tracking per subscriber        │  │
+│                                  │ - Horizontal scaling support           │  │
 │                                  │                                        │  │
 │                                  │  publish(session_id, event):          │  │
-│                                  │    for queue in subscribers[session]: │  │
-│                                  │      if queue.full():                  │  │
-│                                  │        queue.get_nowait()  # drop     │  │
-│                                  │        stats.events_dropped += 1       │  │
-│                                  │      queue.put_nowait(event)           │  │
+│                                  │    channel = session:{id}:events       │  │
+│                                  │    redis.publish(channel, json(event)) │  │
+│                                  │                                        │  │
+│                                  │  Background listener per subscriber:   │  │
+│                                  │    async for msg in redis.subscribe(): │  │
+│                                  │      if local_queue.full():            │  │
+│                                  │        drop_oldest()                   │  │
+│                                  │      local_queue.put(event)            │  │
 │                                  └───────────────────┬────────────────────┘  │
 │                                                      ↓                       │
 │  ┌──────────────────────────────────────────────────────────────────────────┐ │
@@ -152,20 +297,27 @@ const source = new EventSource(url);
 │  │  (src/api/routes/sessions.py:stream_events)                              │ │
 │  │                                                                          │ │
 │  │  async def event_generator():                                           │ │
-│  │    # 1. Subscribe to EventHub FIRST                                     │ │
+│  │    # 1. Subscribe to Redis Pub/Sub FIRST                                │ │
 │  │    queue = await agent_runner.subscribe(session_id)                     │ │
 │  │                                                                          │ │
-│  │    # 2. Replay missed events from DB                                    │ │
-│  │    replay_events = await event_service.list_events(after_sequence)      │ │
+│  │    # 2. Replay missed events from DB with OVERLAP BUFFER                │ │
+│  │    replay_start = max(0, last_sequence - 10)  # 10-event overlap       │ │
+│  │    replay_events = await event_service.list_events(replay_start)        │ │
+│  │    seen_sequences = set()  # Deduplication                              │ │
 │  │    for event in replay_events:                                          │ │
-│  │      yield f"id: {sequence}\ndata: {json}\n\n"                          │ │
+│  │      seq = event['sequence']                                            │ │
+│  │      if seq in seen_sequences or seq <= original_last: continue         │ │
+│  │      seen_sequences.add(seq)                                            │ │
+│  │      yield f"id: {seq}\ndata: {json}\n\n"                               │ │
 │  │      if event.type in terminal_events: return                           │ │
 │  │                                                                          │ │
-│  │    # 3. Stream live events from queue                                   │ │
+│  │    # 3. Stream live events from Redis (via local queue)                │ │
 │  │    while True:                                                           │ │
 │  │      event = await asyncio.wait_for(queue.get(), timeout=30)            │ │
-│  │      if sequence <= last_sequence: continue  # Skip replayed           │ │
-│  │      yield f"id: {sequence}\ndata: {json}\n\n"                          │ │
+│  │      seq = event['sequence']                                            │ │
+│  │      if seq in seen_sequences or seq <= last_sequence: continue         │ │
+│  │      seen_sequences.add(seq)                                            │ │
+│  │      yield f"id: {seq}\ndata: {json}\n\n"                               │ │
 │  │      if event.type in terminal_events: break                            │ │
 │  │                                                                          │ │
 │  │    # 4. Cleanup                                                          │ │
@@ -186,7 +338,7 @@ const source = new EventSource(url);
    - Wraps BackendConsoleTracer for logging
    - Buffers streaming text to extract structured output headers
    - Emits partial events without persistence, final events with persistence
-   - Uses `persist_then_publish()` pattern for race-condition-free delivery
+   - Uses `persist_then_publish()` pattern: **Redis first (fast), then SQLite (durable)**
 
 3. **EventService** (`event_service.py`): Database persistence with robustness
    - Retry logic (3 attempts with exponential backoff)
@@ -194,16 +346,20 @@ const source = new EventSource(url);
    - Skips partial messages to reduce writes
    - Updates resume_id on agent_start events
 
-4. **EventHub** (`event_stream.py`): Pub/sub fanout
-   - Per-session subscriber management
-   - Bounded queues (500 events max)
+4. **RedisEventHub** (`redis_event_hub.py`): Redis Pub/Sub fanout for horizontal scaling
+   - Per-session Redis channels: `session:{id}:events`
+   - Background listener task per subscriber (asyncio)
+   - Local asyncio.Queue buffer (500 events max)
    - Backpressure handling via dropping oldest events
    - Statistics tracking per subscriber
+   - Cross-container event delivery (horizontally scalable)
+   - Connection pooling and automatic reconnection
 
 5. **SSE Generator** (`sessions.py:stream_events`): HTTP streaming
-   - Subscribe-then-replay pattern for guaranteed delivery
+   - Subscribe-then-replay pattern with **10-event overlap buffer**
+   - Deduplication by sequence number to prevent duplicates
    - Heartbeats every 30 seconds
-   - Sequence-based deduplication
+   - Handles Redis-published-but-not-yet-persisted events
 
 ### Event Persistence Strategy
 
@@ -388,10 +544,11 @@ data: {"type":"tool_start","data":{...},"timestamp":"...","sequence":42}
        }
 
        async def persist_then_publish():
-           # Persist BEFORE publish - critical for race-free delivery
+           # Publish to Redis FIRST for low latency (~1ms)
+           await self._event_queue.put(event)  # Redis Pub/Sub publish
+           # Then persist to SQLite (higher latency ~5-50ms)
            if self._event_sink and persist_event:
                await self._event_sink(event)  # DB write
-           await self._event_queue.put(event)  # EventHub publish
 
        loop.create_task(persist_then_publish())
    ```
@@ -399,20 +556,30 @@ data: {"type":"tool_start","data":{...},"timestamp":"...","sequence":42}
 2. **SSE Generator** (FastAPI endpoint):
    ```python
    async def event_generator():
-       # Subscribe FIRST to catch live events
+       # Subscribe FIRST to catch live events from Redis
        queue = await agent_runner.subscribe(session_id)
 
        try:
-           # Replay missed events from DB
+           # Replay missed events from DB with OVERLAP BUFFER
+           original_last_sequence = last_sequence
+           replay_start_sequence = max(0, last_sequence - 10)  # 10-event overlap
+
            replay_events = await event_service.list_events(
-               session_id, after_sequence=last_sequence, limit=2000
+               session_id, after_sequence=replay_start_sequence, limit=2000
            )
+
+           # Deduplicate events in overlap window
+           seen_sequences = set()
            for event in replay_events:
-               yield f"id: {event['sequence']}\ndata: {json.dumps(event)}\n\n"
+               seq = event['sequence']
+               if seq in seen_sequences or seq <= original_last_sequence:
+                   continue  # Skip duplicates
+               seen_sequences.add(seq)
+               yield f"id: {seq}\ndata: {json.dumps(event)}\n\n"
                if event['type'] in terminal_events:
                    return
 
-           # Stream live events
+           # Stream live events from Redis
            while True:
                try:
                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -422,10 +589,12 @@ data: {"type":"tool_start","data":{...},"timestamp":"...","sequence":42}
                        break
                    continue
 
-               if event['sequence'] <= last_sequence:
-                   continue  # Skip already-sent events
+               seq = event['sequence']
+               if seq in seen_sequences or seq <= last_sequence:
+                   continue  # Skip duplicates from overlap
 
-               yield f"id: {event['sequence']}\ndata: {json.dumps(event)}\n\n"
+               seen_sequences.add(seq)
+               yield f"id: {seq}\ndata: {json.dumps(event)}\n\n"
 
                if event['type'] in ('agent_complete', 'error', 'cancelled'):
                    break
@@ -441,29 +610,34 @@ The backend sends SSE heartbeat comments (`: heartbeat\n\n`) every 30 seconds to
 
 ### Event Delivery Guarantee
 
-The system guarantees no events are lost:
+The system guarantees no events are lost using **Redis-first publish + overlap buffer**:
 
 ```
 Timeline:
   T1: EventingTracer calls persist_then_publish()
-  T2: Event written to SQLite (await event_sink)
-  T3: Event published to EventHub (await event_queue.put)
+  T2: Event published to Redis (~1ms latency)
+  T3: Event written to SQLite (~5-50ms latency)
 
 If SSE subscribes at T0 (before T1):
-  → Event arrives via EventHub queue
+  → Event arrives via Redis subscription
 
-If SSE subscribes at T2.5 (during persist):
-  → Event in DB, will be replayed
+If SSE subscribes at T2.5 (after Redis, before DB persist):
+  → Event arrives via Redis subscription
+  → May miss if Redis listener not yet active
+  → PROTECTED by 10-event overlap buffer in replay
 
-If SSE subscribes at T4 (after publish):
+If SSE subscribes at T4 (after DB persist):
   → Event in DB, will be replayed
 ```
 
-**Key insight:** By awaiting DB persistence before EventHub publish, events are either:
-1. In the subscriber's queue (subscribed before publish), or
-2. In the database (subscribed after publish)
+**Key insight:** By publishing to Redis first, events arrive faster (~1ms vs ~50ms). The **10-event overlap buffer** in replay prevents race conditions:
 
-No race condition is possible.
+1. SSE replays from `sequence - 10` instead of `sequence`
+2. Deduplication by sequence number prevents duplicates
+3. Events published to Redis but not yet in DB are caught by overlap
+4. Events in DB are always replayed correctly
+
+**Trade-off:** Small chance of duplicate events (handled by deduplication) in exchange for 10x lower latency.
 
 ### Error Handling
 
@@ -674,50 +848,64 @@ X-Accel-Buffering: no  # Disable nginx buffering
 ## Sequence Diagram: Complete Task Flow
 
 ```
-Frontend                          Backend                           Agent
-   │                                 │                                 │
-   │──POST /sessions/run─────────────▶                                 │
-   │                                 │──create_session()               │
-   │                                 │──record_user_message()          │
-   │                                 │──start_task()──────────────────▶│
-   │◀──{ session_id, status }────────│                                 │
-   │                                 │                                 │
-   │──GET /sessions/{id}/events──────▶                                 │
-   │                                 │──subscribe(EventHub)            │
-   │                                 │──replay_from_db()               │
-   │◀══user_message═════════════════││                                 │
-   │                                 │                                 │
-   │                                 │◀──SDK:SystemMessage.init────────│
-   │                                 │──TraceProcessor.process()       │
-   │                                 │──EventingTracer.on_agent_start()│
-   │                                 │──persist_then_publish()         │
-   │◀══agent_start═══════════════════│                                 │
+Frontend                          Backend                           Agent        Redis
+   │                                 │                                 │           │
+   │──POST /sessions/run─────────────▶                                 │           │
+   │                                 │──create_session()               │           │
+   │                                 │──record_user_message()          │           │
+   │                                 │──start_task()──────────────────▶│           │
+   │◀──{ session_id, status }────────│                                 │           │
+   │                                 │                                 │           │
+   │──GET /sessions/{id}/events──────▶                                 │           │
+   │                                 │──subscribe(RedisEventHub)───────────────────▶
+   │                                 │──replay_from_db(overlap=10)     │           │
+   │◀══user_message═════════════════││                                 │           │
+   │                                 │                                 │           │
+   │                                 │◀──SDK:SystemMessage.init────────│           │
+   │                                 │──TraceProcessor.process()       │           │
+   │                                 │──EventingTracer.on_agent_start()│           │
+   │                                 │──persist_then_publish()         │           │
+   │                                 │  (1) publish to Redis────────────────────────▶
+   │◀══agent_start═══════════════════│◀─────────────────────────────────────────────┘
+   │                                 │  (2) persist to SQLite          │
    │                                 │                                 │
    │                                 │◀──SDK:ToolUseBlock──────────────│
    │                                 │──on_tool_start()                │
-   │◀══tool_start════════════════════│                                 │
+   │                                 │──publish Redis──────────────────────────────▶
+   │◀══tool_start════════════════════│◀─────────────────────────────────────────────┘
+   │                                 │──persist SQLite                 │
    │                                 │                                 │
    │                                 │◀──SDK:ToolResultBlock───────────│
    │                                 │──on_tool_complete()             │
-   │◀══tool_complete═════════════════│                                 │
+   │                                 │──publish Redis──────────────────────────────▶
+   │◀══tool_complete═════════════════│◀─────────────────────────────────────────────┘
+   │                                 │──persist SQLite                 │
    │                                 │                                 │
    │                                 │◀──SDK:StreamEvent (partial)─────│
    │                                 │──on_message(is_partial=True)    │
-   │◀══message (partial)═════════════│  (NOT persisted)                │
+   │                                 │──publish Redis──────────────────────────────▶
+   │◀══message (partial)═════════════│◀─────────────────────────────────────────────┘
+   │                                 │  (NOT persisted to SQLite)      │
    │                                 │                                 │
    │                                 │◀──SDK:TextBlock (final)─────────│
    │                                 │──on_message(is_partial=False)   │
-   │◀══message (final)═══════════════│  (persisted with full_text)     │
+   │                                 │──publish Redis──────────────────────────────▶
+   │◀══message (final)═══════════════│◀─────────────────────────────────────────────┘
+   │                                 │──persist SQLite (with full_text)│
    │                                 │                                 │
    │                                 │◀──SDK:ResultMessage─────────────│
    │                                 │──on_agent_complete()            │
-   │◀══agent_complete════════════════│                                 │
+   │                                 │──publish Redis──────────────────────────────▶
+   │◀══agent_complete════════════════│◀─────────────────────────────────────────────┘
+   │                                 │──persist SQLite                 │
    │                                 │                                 │
    │──close EventSource──────────────│                                 │
-   │                                 │──unsubscribe(EventHub)          │
+   │                                 │──unsubscribe(RedisEventHub)─────────────────▶
    │                                 │──update_session(complete)       │
    │                                 │                                 │
 ```
+
+**Note:** Events are published to Redis FIRST (~1ms), then persisted to SQLite (~5-50ms). The overlap buffer in SSE replay prevents race conditions where SSE subscribes after Redis publish but before SQLite persist.
 
 ---
 
@@ -729,25 +917,27 @@ Frontend                          Backend                           Agent
 | EventingTracer | `src/core/tracer.py` (lines 2420-2991) |
 | BackendConsoleTracer | `src/core/tracer.py` |
 | TracerBase | `src/core/tracer.py` (lines 143-279) |
-| EventHub | `src/services/event_stream.py` |
-| EventSinkQueue | `src/services/event_stream.py` |
+| **RedisEventHub** | `src/services/redis_event_hub.py` |
+| **EventSinkQueue** | `src/services/redis_event_hub.py` |
 | EventService | `src/services/event_service.py` |
 | AgentRunner | `src/services/agent_runner.py` |
 | SSE endpoint | `src/api/routes/sessions.py` (stream_events) |
 | History endpoint | `src/api/routes/sessions.py` (list_events) |
 | Frontend SSE client | `src/web_terminal_client/src/sse.ts` |
 | Frontend types | `src/web_terminal_client/src/types.ts` |
+| Redis config | `config/api.yaml` (redis section) |
 
 ---
 
 ## End-to-End Summary
 
-1. **Start**: Session created (DB + file), user_message persisted, agent starts in background, SSE stream subscribes to EventHub then replays from DB
-2. **Run**: SDK messages → TraceProcessor → EventingTracer → persist to DB → publish to EventHub → SSE generator yields to frontend
-3. **Streaming**: Partial messages streamed immediately (not persisted), final messages persisted with full_text
+1. **Start**: Session created (DB + file), user_message persisted, agent starts in background, SSE stream subscribes to Redis Pub/Sub then replays from DB with overlap buffer
+2. **Run**: SDK messages → TraceProcessor → EventingTracer → **publish to Redis** (~1ms) → **persist to SQLite** (~5-50ms) → SSE generator yields to frontend
+3. **Streaming**: Partial messages streamed via Redis immediately (not persisted), final messages persisted to SQLite with full_text for history
 4. **Cancel**: Agent cancels, cancelled event emitted with resumable flag based on agent_start presence
 5. **Resume**: Session uses stored resume_id to continue from same Claude context, resume context prepended
 6. **Reload**: UI fetches history from `/events/history`, connects SSE if session is running
+7. **Scaling**: Multiple API containers share Redis Pub/Sub channels, events delivered across all containers (horizontal scaling)
 
 ---
 
@@ -758,10 +948,19 @@ Frontend                          Backend                           Agent
 - **Timeout**: 10 seconds per DB operation
 - **Integrity handling**: Duplicate sequences logged but don't fail
 
-### EventHub
-- **Bounded queues**: 500 events max per subscriber
-- **Backpressure**: Drops oldest event when queue full
+### RedisEventHub
+- **Connection pooling**: Shared Redis connection pool across all subscribers
+- **Automatic reconnection**: Redis client handles connection failures transparently
+- **Bounded queues**: 500 events max per subscriber (local asyncio.Queue)
+- **Backpressure**: Drops oldest event from local queue when full
 - **Stats tracking**: Events received/dropped per subscriber
+- **Horizontal scaling**: Cross-container event delivery via Redis Pub/Sub
+- **Background listeners**: Dedicated asyncio task per subscriber for Redis → local queue
+
+### SSE Endpoint
+- **Overlap buffer**: 10-event replay overlap to catch Redis-published-but-not-yet-persisted events
+- **Deduplication**: Sequence-based deduplication prevents duplicate events
+- **Heartbeats**: 30-second keepalive to detect disconnections
 
 ### Frontend SSE Client
 - **Reconnection**: 5 attempts with exponential backoff

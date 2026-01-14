@@ -306,3 +306,95 @@ docker logs project-ag3ntum-api-1 2>&1 | grep -E "PathValidationError|BLOCKED|SA
 ./deploy.sh shell
 tail -f /logs/backend.log
 ```
+
+### Analyzing Events (Redis & SQLite)
+
+The system uses a **hybrid event architecture**:
+- **Redis Pub/Sub**: Real-time event delivery to SSE subscribers (ephemeral, no persistence)
+- **SQLite**: Permanent event storage for replay and history
+
+**Key files**:
+- `src/services/redis_event_hub.py` - Redis Pub/Sub implementation
+- `src/services/event_service.py` - SQLite event persistence
+- `src/api/routes/sessions.py:541-656` - SSE streaming with replay logic
+
+#### SQLite Event Analysis
+
+```bash
+# Database location
+Project/data/ag3ntum.db
+
+# List tables
+sqlite3 Project/data/ag3ntum.db ".tables"
+# Output: events    sessions    tokens    users
+
+# Check event schema
+sqlite3 Project/data/ag3ntum.db ".schema events"
+
+# Count events for a session
+sqlite3 Project/data/ag3ntum.db \
+  "SELECT COUNT(*) FROM events WHERE session_id = 'SESSION_ID';"
+
+# Event breakdown by type
+sqlite3 Project/data/ag3ntum.db \
+  "SELECT event_type, COUNT(*) as count FROM events
+   WHERE session_id = 'SESSION_ID'
+   GROUP BY event_type ORDER BY count DESC;"
+
+# List events with truncated data
+sqlite3 Project/data/ag3ntum.db \
+  "SELECT id, sequence, event_type, substr(data, 1, 60) as data_preview, timestamp
+   FROM events WHERE session_id = 'SESSION_ID' ORDER BY sequence;"
+
+# Full event data (JSON)
+sqlite3 Project/data/ag3ntum.db \
+  "SELECT data FROM events WHERE session_id = 'SESSION_ID' AND event_type = 'message';"
+```
+
+#### Redis Event Analysis
+
+Redis uses Pub/Sub (ephemeral) - events are only delivered to connected subscribers.
+
+```bash
+# Find Redis container
+docker ps --format "{{.Names}} {{.Image}}" | grep redis
+# Output: project-redis-1 redis:7-alpine
+
+# Check if Redis is responding
+docker exec project-redis-1 redis-cli PING
+
+# Check active Pub/Sub channels
+docker exec project-redis-1 redis-cli PUBSUB CHANNELS "session:*"
+
+# Check subscriber count for a session channel
+docker exec project-redis-1 redis-cli PUBSUB NUMSUB "session:SESSION_ID:events"
+
+# Scan for any ag3ntum keys (if using Lists instead of Pub/Sub)
+docker exec project-redis-1 redis-cli SCAN 0 MATCH "ag3ntum:*" COUNT 100
+```
+
+#### Event Flow Architecture
+
+```
+Agent Execution → EventingTracer.emit_event()
+                       ↓
+              1. Publish to Redis Pub/Sub (~1ms)
+                       ↓
+              2. Persist to SQLite (~5-50ms)
+
+SSE Client Connects → subscribe to Redis Pub/Sub
+                           ↓
+                      Replay from SQLite (with 10-event overlap buffer)
+                           ↓
+                      Stream live events from Redis
+                           ↓
+                      Deduplicate by sequence number
+```
+
+**Why Redis shows 0 events**: Redis Pub/Sub is ephemeral. Once events are delivered to subscribers, they're gone. If no subscribers are connected, events are published but not stored. SQLite is the source of truth for event history.
+
+**Late-joining clients**: The SSE endpoint (`GET /sessions/{id}/events`) handles this by:
+1. Subscribing to Redis first (catches future events)
+2. Replaying all events from SQLite (with 10-event overlap buffer)
+3. Deduplicating by sequence number
+4. All clients see identical content regardless of when they connect

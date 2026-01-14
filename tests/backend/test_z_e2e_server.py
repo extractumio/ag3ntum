@@ -462,10 +462,27 @@ class TestRealEndpoints:
     def test_auth_token_endpoint(self, running_server: dict) -> None:
         """Can login with email/password from real server."""
         base_url = running_server["base_url"]
-        
-        # For E2E tests, use a known test user (should be created beforehand)
-        # Or skip this test if no user exists
-        pytest.skip("Authentication requires pre-existing users - use test_authenticated_request instead")
+        test_user = running_server["test_user"]
+
+        # Login with test user credentials
+        response = httpx.post(
+            f"{base_url}/api/v1/auth/login",
+            json={
+                "email": test_user["email"],
+                "password": test_user["password"]
+            },
+            timeout=5.0
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert isinstance(data["access_token"], str)
+        assert len(data["access_token"]) > 0
+
+        # Verify the token is a valid JWT (has 3 parts separated by dots)
+        token_parts = data["access_token"].split(".")
+        assert len(token_parts) == 3, "Token should be a valid JWT with 3 parts"
 
     @pytest.mark.integration
     def test_authenticated_request(self, running_server: dict) -> None:

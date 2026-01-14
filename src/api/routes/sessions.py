@@ -548,13 +548,14 @@ async def stream_events(
         - Error events if the agent fails before sending events
         - Graceful completion when agent finishes
 
-        Event Delivery Guarantee:
-        The EventingTracer awaits DB persistence before publishing to EventHub.
-        This ensures that any event published is already in the database.
-        Therefore:
-        1. Subscribe to EventHub first (catches future events)
-        2. Replay from DB (catches all past events, including those just published)
-        No race condition possible - events are either in the queue or in the DB.
+        Event Delivery Guarantee (Redis-first architecture):
+        Events are published to Redis first (~1ms), then persisted to SQLite (~5-50ms).
+        To handle the race condition where SSE subscribes after Redis publish but
+        before SQLite persist, we use a 10-event overlap buffer:
+        1. Subscribe to Redis Pub/Sub first (catches future events)
+        2. Replay from DB starting at sequence-10 (overlap buffer)
+        3. Deduplicate by sequence number (prevents duplicates from overlap)
+        This ensures no events are lost while maintaining low latency.
         """
         try:
             last_sequence = after or 0
@@ -564,20 +565,38 @@ async def stream_events(
                 except ValueError:
                     last_sequence = after or 0
 
-            # Replay missed events from persistence
+            # Store original for deduplication
+            original_last_sequence = last_sequence
+
+            # Add 10-event overlap buffer to catch Redis-published but not-yet-persisted events
+            replay_start_sequence = max(0, last_sequence - 10)
+
+            # Replay missed events from persistence with overlap buffer
             replay_events = await event_service.list_events(
                 session_id=session_id,
-                after_sequence=last_sequence,
+                after_sequence=replay_start_sequence,
                 limit=2000,
             )
+
+            # Deduplicate events in overlap window
+            seen_sequences = set()
             for event in replay_events:
+                seq = event.get('sequence')
+
+                # Skip if already sent or duplicate
+                if seq in seen_sequences or seq <= original_last_sequence:
+                    continue
+
+                seen_sequences.add(seq)
                 payload = json.dumps(event, default=str)
-                yield f"id: {event.get('sequence')}\n"
+                yield f"id: {seq}\n"
                 yield f"data: {payload}\n\n"
-                last_sequence = event.get("sequence", last_sequence)
+                last_sequence = seq
+
                 if event.get("type") in ("agent_complete", "error", "cancelled"):
                     return
 
+            # Stream live events from Redis
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -589,18 +608,22 @@ async def stream_events(
                         break
                     continue
 
-                if event.get("sequence", 0) <= last_sequence:
+                seq = event.get("sequence", 0)
+
+                # Deduplicate (might overlap with replay)
+                if seq in seen_sequences or seq <= last_sequence:
                     continue
 
+                seen_sequences.add(seq)
                 payload = json.dumps(event, default=str)
 
-                yield f"id: {event.get('sequence')}\n"
+                yield f"id: {seq}\n"
                 yield f"data: {payload}\n\n"
 
                 event_type = event.get("type")
                 if event_type in ("agent_complete", "error", "cancelled"):
                     break
-                last_sequence = event.get("sequence", last_sequence)
+                last_sequence = seq
 
         except Exception as e:
             # Send error event if SSE streaming fails

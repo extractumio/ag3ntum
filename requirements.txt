@@ -19,6 +19,6 @@ bcrypt==4.2.1
 cryptography==44.0.0
 pytest==9.0.2
 pytest-asyncio==1.3.0
-# Pandas is used for large dataset management
 pandas==2.3.3
+redis==7.1.0
 

@@ -53,14 +53,12 @@ services:
 
   redis:
     image: redis:7-alpine
-    command:
-      - redis-server
-      - --save
-      - ""
-      - --appendonly
-      - "no"
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
     ports:
       - "127.0.0.1:46379:6379"
+    restart: unless-stopped
 
 volumes:
   web_node_modules:

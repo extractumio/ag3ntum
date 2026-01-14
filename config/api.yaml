@@ -32,3 +32,19 @@ jwt:
 
   # Token expiry in hours (7 days default)
   expiry_hours: 168
+
+# Redis configuration (required for SSE event streaming)
+redis:
+  # Redis connection URL
+  # Format: redis://[host]:[port]/[db]
+  url: "redis://redis:6379/0"
+
+  # Connection pool settings
+  max_connections: 50
+
+  # Timeout settings (in seconds)
+  socket_timeout: 5.0
+  socket_connect_timeout: 5.0
+
+  # Decode responses as UTF-8 strings (false for binary JSON)
+  decode_responses: false

@@ -14,7 +14,7 @@ from typing import Any, Optional
 import yaml
 from sqlalchemy import select
 
-from ..config import AGENT_DIR, CONFIG_DIR, USERS_DIR
+from ..config import CONFIG_DIR
 from ..core.schemas import TaskExecutionParams
 from ..core.task_runner import execute_agent_task
 from ..core.tracer import BackendConsoleTracer, EventingTracer
@@ -22,7 +22,7 @@ from ..db.database import AsyncSessionLocal
 from ..db.models import Token, User
 from ..services import event_service
 from ..services.encryption_service import encryption_service
-from ..services.event_stream import EventHub, EventSinkQueue
+from ..services.redis_event_hub import RedisEventHub, EventSinkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +77,64 @@ class AgentRunner:
     """
 
     def __init__(self) -> None:
-        """Initialize the agent runner."""
+        """Initialize the agent runner.
+
+        Requires Redis for SSE event streaming. Will fail with a clear error
+        if Redis is unavailable.
+        """
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._cancel_flags: dict[str, bool] = {}
         self._results: dict[str, dict[str, Any]] = {}
-        self._event_hub = EventHub()
+
+        # Load Redis URL from config (required)
+        api_config_path = CONFIG_DIR / "api.yaml"
+        try:
+            with open(api_config_path) as f:
+                api_config = yaml.safe_load(f)
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Configuration file not found: {api_config_path}\n"
+                f"Please ensure config/api.yaml exists with Redis configuration."
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load configuration: {api_config_path}\n"
+                f"Error: {e}"
+            ) from e
+
+        redis_config = api_config.get("redis", {})
+        redis_url = redis_config.get("url")
+        if not redis_url:
+            raise RuntimeError(
+                f"Redis URL not configured in {api_config_path}\n"
+                f"Please add 'redis.url' to config/api.yaml, e.g.:\n"
+                f"  redis:\n"
+                f"    url: \"redis://redis:6379/0\""
+            )
+
+        # Initialize RedisEventHub (required)
+        self._event_hub = RedisEventHub(redis_url=redis_url, max_queue_size=500)
+        self._redis_url = redis_url
+        self._redis_verified = False
+
+    async def _ensure_redis_connection(self) -> None:
+        """Verify Redis connection on first use (lazy initialization)."""
+        if self._redis_verified:
+            return
+
+        import redis.asyncio as redis_client
+        try:
+            pool = await self._event_hub._ensure_pool()
+            async with redis_client.Redis(connection_pool=pool) as conn:
+                await conn.ping()
+            logger.info("Redis connection verified - SSE streaming ready")
+            self._redis_verified = True
+        except Exception as e:
+            raise RuntimeError(
+                f"Redis is required for SSE event streaming but connection failed: {e}\n"
+                f"Please ensure Redis is running and accessible at: {self._redis_url}\n"
+                f"Check config/api.yaml for Redis configuration."
+            ) from e
 
     async def _update_session_status(
         self,
@@ -136,6 +189,9 @@ class AgentRunner:
             RuntimeError: If task is already running for this session.
         """
         session_id = params.session_id
+
+        # Verify Redis connection on first use
+        await self._ensure_redis_connection()
 
         if session_id in self._running_tasks:
             raise RuntimeError(f"Task already running for session: {session_id}")

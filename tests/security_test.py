@@ -20,6 +20,10 @@ def test_permission_mode_is_rejected():
     config = AgentConfig(
         model="claude-haiku-4-5-20251001",
         max_turns=10,
+        timeout_seconds=300,
+        enable_skills=False,
+        enable_file_checkpointing=False,
+        role="default",
         permission_mode="default",  # This should be rejected
     )
 
@@ -48,6 +52,10 @@ def test_permission_mode_none_is_accepted():
     config = AgentConfig(
         model="claude-haiku-4-5-20251001",
         max_turns=10,
+        timeout_seconds=300,
+        enable_skills=False,
+        enable_file_checkpointing=False,
+        role="default",
         permission_mode=None,  # This is correct
     )
 
@@ -75,6 +83,10 @@ def test_permission_mode_empty_string_is_accepted():
     config = AgentConfig(
         model="claude-haiku-4-5-20251001",
         max_turns=10,
+        timeout_seconds=300,
+        enable_skills=False,
+        enable_file_checkpointing=False,
+        role="default",
         permission_mode="",  # Empty string should be treated as None
     )
 

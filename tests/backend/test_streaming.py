@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.tracer import EventingTracer, NullTracer
 from src.services import event_service
-from src.services.event_stream import EventHub, EventSinkQueue
+from src.services.redis_event_hub import RedisEventHub, EventSinkQueue
 
 
 # =============================================================================
@@ -349,17 +349,17 @@ class TestSequenceNumbers:
 
 class TestPersistThenPublish:
     """
-    Tests for the persist-then-publish pattern that prevents race conditions.
+    Tests for the publish-then-persist pattern with Redis SSE.
 
-    The fix ensures events are persisted to DB BEFORE being published to EventHub.
-    This guarantees that SSE subscribers will always find events either:
-    1. In the queue (if subscribed before publish), or
-    2. In the database (if subscribed after publish)
+    With Redis SSE, events are published to Redis/EventHub FIRST (~1ms),
+    then persisted to SQLite (~50ms). The 10-event overlap buffer in SSE
+    prevents race conditions where clients subscribe after Redis publish
+    but before DB persist.
     """
 
     @pytest.mark.asyncio
     async def test_event_sink_called_before_queue_put(self) -> None:
-        """Event sink (persistence) is called before queue put (publish)."""
+        """Queue put (publish to Redis) is called before event sink (persist to SQLite)."""
         call_order = []
 
         async def mock_sink(event):
@@ -380,27 +380,27 @@ class TestPersistThenPublish:
         tracer.emit_event("test_event", {"data": "value"})
         await asyncio.sleep(0.1)  # Wait for async task to complete
 
-        # Verify sink is called before queue
+        # Verify queue is called before sink (Redis first, SQLite second)
         assert len(call_order) == 2
-        assert call_order[0] == ("sink", "test_event")
-        assert call_order[1] == ("queue", "test_event")
+        assert call_order[0] == ("queue", "test_event")
+        assert call_order[1] == ("sink", "test_event")
 
     @pytest.mark.asyncio
     async def test_publish_waits_for_persistence_to_complete(self) -> None:
-        """Publishing waits for persistence to complete, not just start."""
-        persistence_completed = False
-        publish_started_before_persistence_done = False
+        """Publishing to Redis happens before persistence starts (doesn't wait)."""
+        persistence_started = False
+        publish_happened_before_persistence = False
 
         async def slow_sink(event):
-            nonlocal persistence_completed
+            nonlocal persistence_started
+            persistence_started = True
             await asyncio.sleep(0.05)  # Simulate slow DB write
-            persistence_completed = True
 
         class CheckingQueue:
             async def put(self, event):
-                nonlocal publish_started_before_persistence_done
-                if not persistence_completed:
-                    publish_started_before_persistence_done = True
+                nonlocal publish_happened_before_persistence
+                if not persistence_started:
+                    publish_happened_before_persistence = True
 
         tracer = EventingTracer(
             NullTracer(),
@@ -412,8 +412,8 @@ class TestPersistThenPublish:
         tracer.emit_event("test_event", {})
         await asyncio.sleep(0.2)  # Wait for async task to complete
 
-        assert persistence_completed
-        assert not publish_started_before_persistence_done
+        assert persistence_started
+        assert publish_happened_before_persistence  # Publish happened before persistence started
 
     @pytest.mark.asyncio
     async def test_persistence_failure_does_not_block_publish(self) -> None:
@@ -521,56 +521,81 @@ class TestPersistThenPublish:
         assert len(published) == 1  # But published
 
 
-class TestEventHubSubscription:
-    """Tests for EventHub subscription and event delivery."""
+@pytest.fixture
+def redis_url():
+    """Load Redis URL from config (uses DB 1 for tests)."""
+    from pathlib import Path
+    from urllib.parse import urlparse, urlunparse
+    import yaml
+
+    config_path = Path(__file__).parent.parent.parent / "config" / "api.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    base_url = config["redis"]["url"]
+
+    # Use DB 1 for tests instead of DB 0 (production)
+    parsed = urlparse(base_url)
+    return urlunparse(parsed._replace(path="/1"))
+
+
+@pytest.fixture
+async def redis_hub(redis_url):
+    """Create a RedisEventHub for testing (requires Redis to be running)."""
+    hub = RedisEventHub(redis_url=redis_url)
+    yield hub
+    await hub.close()
+
+
+class TestRedisEventHubSubscription:
+    """Tests for RedisEventHub subscription and event delivery (requires Redis)."""
 
     @pytest.mark.asyncio
-    async def test_subscriber_receives_events_after_subscribe(self) -> None:
+    async def test_subscriber_receives_events_after_subscribe(self, redis_hub) -> None:
         """Subscriber receives events published after subscription."""
-        hub = EventHub()
         session_id = "sub-test"
 
-        queue = await hub.subscribe(session_id)
+        queue = await redis_hub.subscribe(session_id)
+        await asyncio.sleep(0.1)  # Allow Redis subscription to establish
 
-        await hub.publish(session_id, {"type": "test", "sequence": 1})
+        await redis_hub.publish(session_id, {"type": "test", "sequence": 1})
 
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        event = await asyncio.wait_for(queue.get(), timeout=2.0)
         assert event["type"] == "test"
 
-        await hub.unsubscribe(session_id, queue)
+        await redis_hub.unsubscribe(session_id, queue)
 
     @pytest.mark.asyncio
-    async def test_subscriber_misses_events_before_subscribe(self) -> None:
+    async def test_subscriber_misses_events_before_subscribe(self, redis_hub) -> None:
         """Subscriber does not receive events published before subscription."""
-        hub = EventHub()
         session_id = "miss-test"
 
         # Publish before subscription
-        await hub.publish(session_id, {"type": "missed", "sequence": 1})
+        await redis_hub.publish(session_id, {"type": "missed", "sequence": 1})
 
         # Subscribe after
-        queue = await hub.subscribe(session_id)
+        queue = await redis_hub.subscribe(session_id)
+        await asyncio.sleep(0.1)  # Allow Redis subscription to establish
 
         # Queue should be empty (missed the event)
         assert queue.empty()
 
-        await hub.unsubscribe(session_id, queue)
+        await redis_hub.unsubscribe(session_id, queue)
 
     @pytest.mark.asyncio
-    async def test_event_sink_queue_integration(self) -> None:
-        """EventSinkQueue correctly publishes to EventHub."""
-        hub = EventHub()
+    async def test_event_sink_queue_integration(self, redis_hub) -> None:
+        """EventSinkQueue correctly publishes to RedisEventHub."""
         session_id = "sink-queue-test"
 
-        queue = await hub.subscribe(session_id)
-        sink_queue = EventSinkQueue(hub, session_id)
+        queue = await redis_hub.subscribe(session_id)
+        await asyncio.sleep(0.1)  # Allow Redis subscription to establish
+        sink_queue = EventSinkQueue(redis_hub, session_id)
 
         await sink_queue.put({"type": "test", "sequence": 1})
 
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        event = await asyncio.wait_for(queue.get(), timeout=2.0)
         assert event["type"] == "test"
 
-        await hub.unsubscribe(session_id, queue)
+        await redis_hub.unsubscribe(session_id, queue)
 
 
 class TestAgentRunnerEventEmission:
@@ -694,13 +719,14 @@ class TestSSEReplayWithPersistence:
         self,
         test_engine,
         monkeypatch: pytest.MonkeyPatch,
+        redis_hub,
     ) -> None:
         """
         Complete flow: persist event, subscribe to hub, replay from DB.
 
         This simulates the race condition scenario that was fixed:
         1. Event is persisted to DB
-        2. SSE subscribes to EventHub
+        2. SSE subscribes to RedisEventHub
         3. SSE replays from DB and finds the event
         """
         async_session = async_sessionmaker(
@@ -711,7 +737,6 @@ class TestSSEReplayWithPersistence:
         monkeypatch.setattr(event_service, "AsyncSessionLocal", async_session)
 
         session_id = "complete-flow-test"
-        hub = EventHub()
 
         # Step 1: Persist event (simulates agent emitting event)
         await event_service.record_event({
@@ -723,7 +748,8 @@ class TestSSEReplayWithPersistence:
         })
 
         # Step 2: Subscribe to hub (simulates SSE connection)
-        queue = await hub.subscribe(session_id)
+        queue = await redis_hub.subscribe(session_id)
+        await asyncio.sleep(0.1)  # Allow Redis subscription to establish
 
         # Step 3: Replay from DB (simulates SSE replay logic)
         replayed_events = await event_service.list_events(session_id, after_sequence=0)
@@ -735,4 +761,4 @@ class TestSSEReplayWithPersistence:
         # Queue should be empty (event was before subscription)
         assert queue.empty()
 
-        await hub.unsubscribe(session_id, queue)
+        await redis_hub.unsubscribe(session_id, queue)

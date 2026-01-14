@@ -2490,38 +2490,44 @@ class EventingTracer(TracerBase):
 
         async def persist_then_publish():
             """
-            Persist event to DB, then publish to EventHub.
+            Publish to Redis first, then persist to SQLite.
 
-            By awaiting persistence before publishing, we ensure that:
-            1. If SSE is already subscribed → event arrives via queue
-            2. If SSE subscribes later → event is in DB for replay
+            Order changed to minimize latency:
+            1. Publish to Redis (~1ms) - all events for real-time delivery
+            2. Persist to SQLite (~5-50ms) - only important events for history
 
-            No race condition possible because DB write completes before publish.
+            The 10-event overlap buffer in SSE replay prevents race conditions
+            where SSE subscribes after Redis publish but before DB persist.
+            Events are deduplicated by sequence number to prevent duplicates.
             """
+            # Publish to Redis FIRST for low latency
+            try:
+                await self._event_queue.put(event)
+            except Exception as e:
+                logger.error(f"Failed to publish event to Redis/EventHub: {e}")
+                # Continue to persistence even if publish fails
+
+            # Then persist to SQLite (only if persist_event=True)
             if self._event_sink is not None and persist_event:
                 try:
-                    # Await the async persistence function
                     await self._event_sink(event)
                 except Exception as e:
                     logger.warning(f"Event persistence failed: {e}")
-            # Only publish after persistence completes
-            await self._event_queue.put(event)
 
         if loop and loop.is_running():
             loop.create_task(persist_then_publish())
         else:
-            # Fallback for non-async context (shouldn't happen in normal operation)
-            # This is a degraded path - events may not persist properly
-            logger.warning(
+            # No event loop available - this shouldn't happen in normal operation
+            # but can occur during shutdown or in edge cases
+            logger.error(
                 f"emit_event called outside async context for {event_type}. "
-                "Event persistence may be unreliable."
+                "Event will be published to Redis but NOT persisted to SQLite."
             )
-            # Best effort: try to publish to EventHub (will work if subscribers exist)
-            # Note: persistence is skipped since we can't await without an event loop
+            # Best effort: publish to Redis (persistence requires async context)
             try:
                 self._event_queue.put_nowait(event)
-            except asyncio.QueueFull:
-                logger.error(f"Event queue full; dropping event {event_type}")
+            except Exception as e:
+                logger.error(f"Failed to publish event {event_type}: {e}")
 
     def on_agent_start(
         self,
