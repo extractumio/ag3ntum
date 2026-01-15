@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useState, useRef } from 'react';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
 import { sanitizeFilename } from './FileExplorer';
+import { renderMarkdown } from './MarkdownRenderer';
 
 // =============================================================================
 // Types
@@ -301,159 +302,6 @@ function getLanguageFromMimeType(mimeType: string, fileName: string): string {
 }
 
 // =============================================================================
-// Markdown Renderer
-// =============================================================================
-
-function renderMarkdown(content: string): JSX.Element {
-  const lines = content.split('\n');
-  const elements: JSX.Element[] = [];
-  let inCodeBlock = false;
-  let codeBlockContent: string[] = [];
-  let codeBlockLang = '';
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Code blocks
-    if (line.startsWith('```')) {
-      if (inCodeBlock) {
-        elements.push(
-          <pre key={`code-${i}`} className="md-code-block" data-lang={codeBlockLang}>
-            <code>{codeBlockContent.join('\n')}</code>
-          </pre>
-        );
-        codeBlockContent = [];
-        codeBlockLang = '';
-        inCodeBlock = false;
-      } else {
-        inCodeBlock = true;
-        codeBlockLang = line.slice(3).trim();
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeBlockContent.push(line);
-      continue;
-    }
-
-    // Headers
-    if (line.startsWith('# ')) {
-      elements.push(<h1 key={i} className="md-h1">{line.slice(2)}</h1>);
-    } else if (line.startsWith('## ')) {
-      elements.push(<h2 key={i} className="md-h2">{line.slice(3)}</h2>);
-    } else if (line.startsWith('### ')) {
-      elements.push(<h3 key={i} className="md-h3">{line.slice(4)}</h3>);
-    } else if (line.startsWith('#### ')) {
-      elements.push(<h4 key={i} className="md-h4">{line.slice(5)}</h4>);
-    }
-    // Horizontal rule
-    else if (line.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
-      elements.push(<hr key={i} className="md-hr" />);
-    }
-    // Unordered list
-    else if (line.match(/^[\s]*[-*+]\s/)) {
-      const indent = line.match(/^(\s*)/)?.[1].length || 0;
-      const text = line.replace(/^[\s]*[-*+]\s/, '');
-      elements.push(
-        <div key={i} className="md-li" style={{ marginLeft: `${indent * 8}px` }}>
-          • {renderInlineMarkdown(text)}
-        </div>
-      );
-    }
-    // Ordered list
-    else if (line.match(/^[\s]*\d+\.\s/)) {
-      const indent = line.match(/^(\s*)/)?.[1].length || 0;
-      const match = line.match(/^[\s]*(\d+)\.\s(.*)$/);
-      if (match) {
-        elements.push(
-          <div key={i} className="md-li" style={{ marginLeft: `${indent * 8}px` }}>
-            {match[1]}. {renderInlineMarkdown(match[2])}
-          </div>
-        );
-      }
-    }
-    // Blockquote
-    else if (line.startsWith('> ')) {
-      elements.push(
-        <blockquote key={i} className="md-blockquote">
-          {renderInlineMarkdown(line.slice(2))}
-        </blockquote>
-      );
-    }
-    // Empty line
-    else if (line.trim() === '') {
-      elements.push(<div key={i} className="md-spacer" />);
-    }
-    // Regular paragraph
-    else {
-      elements.push(<p key={i} className="md-p">{renderInlineMarkdown(line)}</p>);
-    }
-  }
-
-  return <div className="md-content">{elements}</div>;
-}
-
-function renderInlineMarkdown(text: string): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  let remaining = text;
-  let keyIndex = 0;
-
-  while (remaining.length > 0) {
-    // Inline code
-    const codeMatch = remaining.match(/^`([^`]+)`/);
-    if (codeMatch) {
-      parts.push(<code key={keyIndex++} className="md-inline-code">{codeMatch[1]}</code>);
-      remaining = remaining.slice(codeMatch[0].length);
-      continue;
-    }
-
-    // Bold
-    const boldMatch = remaining.match(/^\*\*([^*]+)\*\*/);
-    if (boldMatch) {
-      parts.push(<strong key={keyIndex++}>{boldMatch[1]}</strong>);
-      remaining = remaining.slice(boldMatch[0].length);
-      continue;
-    }
-
-    // Italic
-    const italicMatch = remaining.match(/^\*([^*]+)\*/);
-    if (italicMatch) {
-      parts.push(<em key={keyIndex++}>{italicMatch[1]}</em>);
-      remaining = remaining.slice(italicMatch[0].length);
-      continue;
-    }
-
-    // Link
-    const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
-    if (linkMatch) {
-      parts.push(
-        <a key={keyIndex++} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="md-link">
-          {linkMatch[1]}
-        </a>
-      );
-      remaining = remaining.slice(linkMatch[0].length);
-      continue;
-    }
-
-    // Regular text
-    const nextSpecial = remaining.search(/[`*\[]/);
-    if (nextSpecial === -1) {
-      parts.push(remaining);
-      break;
-    } else if (nextSpecial === 0) {
-      parts.push(remaining[0]);
-      remaining = remaining.slice(1);
-    } else {
-      parts.push(remaining.slice(0, nextSpecial));
-      remaining = remaining.slice(nextSpecial);
-    }
-  }
-
-  return parts.length === 1 ? parts[0] : <>{parts}</>;
-}
-
-// =============================================================================
 // Syntax Highlighted Code Renderer
 // =============================================================================
 
@@ -643,7 +491,7 @@ export function FileViewer({
                   type="button"
                   className="file-viewer-close-btn"
                   onClick={onClose}
-                  title="Close"
+                  title="Close (Esc)"
                 >
                   {ICONS.close}
                 </button>
@@ -708,6 +556,22 @@ export function FileViewerModal({
   className = '',
   isOpen = true,
 }: FileViewerModalProps): JSX.Element | null {
+  // Handle ESC key to close modal
+  useEffect(() => {
+    if (!isOpen && !file && !isLoading) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && onClose) {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, file, isLoading, onClose]);
+
   if (!isOpen && !file && !isLoading) return null;
 
   return (

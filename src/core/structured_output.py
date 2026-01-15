@@ -5,6 +5,42 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+# Placeholder values that should be treated as empty/no error
+_ERROR_PLACEHOLDERS = frozenset({
+    "none",
+    "none yet",
+    "no error",
+    "no errors",
+    "n/a",
+    "na",
+    "null",
+    "undefined",
+    "empty",
+    "-",
+    "",
+})
+
+
+def normalize_error_value(value: str) -> str:
+    """
+    Normalize an error field value, returning empty string for placeholder values.
+
+    This filters out common placeholder text like "None", "None yet", "No error", etc.
+    that don't represent actual errors.
+    """
+    if not value:
+        return ""
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    # Check exact matches against placeholders
+    if normalized in _ERROR_PLACEHOLDERS:
+        return ""
+    # Check if it starts with common "no error" patterns
+    if normalized.startswith("none yet") or normalized.startswith("no error"):
+        return ""
+    return value.strip()
+
 
 def parse_structured_output(text: str) -> Tuple[Dict[str, str], str]:
     """
@@ -51,6 +87,9 @@ def parse_structured_output(text: str) -> Tuple[Dict[str, str], str]:
         key = key.strip().lower()
         value = value.strip()
         if key:
+            # Normalize error field to filter out placeholder values
+            if key == "error":
+                value = normalize_error_value(value)
             fields[key] = value
 
     body_lines = lines[end_index + 1 :]

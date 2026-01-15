@@ -113,6 +113,7 @@ class AgentConfigLoader:
         self._config_path = config_path or AGENT_CONFIG_FILE
         self._secrets_path = secrets_path or SECRETS_FILE
         self._config: dict[str, Any] | None = None
+        self._full_config: dict[str, Any] | None = None  # Full YAML including all sections
         self._secrets: dict[str, Any] | None = None
         self._cli_overrides: dict[str, Any] = {}
         self._loaded = False
@@ -148,6 +149,7 @@ class AgentConfigLoader:
                     raise ConfigValidationError(
                         f"Agent configuration file is empty: {self._config_path}"
                     )
+                self._full_config = data  # Store full config for get_section()
                 self._config = data.get("agent", {})
                 if not self._config:
                     raise ConfigValidationError(
@@ -294,6 +296,25 @@ class AgentConfigLoader:
             raise ConfigNotFoundError("Secrets not loaded")
 
         return self._secrets.get("anthropic_api_key", "")
+
+    def get_section(self, section: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        Get a configuration section other than 'agent'.
+
+        Args:
+            section: Section name (e.g., 'large_input', 'file_explorer').
+            default: Default value if section not found.
+
+        Returns:
+            Configuration dictionary for the section.
+        """
+        if not self._loaded:
+            self.load()
+
+        if self._full_config is None:
+            return default or {}
+
+        return self._full_config.get(section, default or {})
 
     @property
     def config_path(self) -> Path:

@@ -26,6 +26,8 @@ tools:
     - mcp__ag3ntum__Bash
     # Ag3ntum network tool (uses domain blocklist)
     - mcp__ag3ntum__WebFetch
+    # Ag3ntum interactive tool (waits for user input via web UI)
+    - mcp__ag3ntum__AskUserQuestion
     # Native tools that don't need replacement
     - Task
     - Skill
@@ -45,6 +47,7 @@ tools:
     - Grep      # Use mcp__ag3ntum__Grep instead
     - LS        # Use mcp__ag3ntum__LS instead
     - WebFetch  # Use mcp__ag3ntum__WebFetch instead
+    - AskUserQuestion  # Use mcp__ag3ntum__AskUserQuestion instead
     
   # Legacy: permission checking is now done by tools themselves
   permission_checked: []
@@ -70,6 +73,7 @@ session_workspace:
     - mcp__ag3ntum__Grep(*)
     - mcp__ag3ntum__LS(*)
     - mcp__ag3ntum__WebFetch(*)
+    - mcp__ag3ntum__AskUserQuestion(*)
     # Other allowed tools
     - Task
     - Skill
@@ -89,6 +93,7 @@ session_workspace:
     - Grep(*)
     - LS(*)
     - WebFetch(*)
+    - AskUserQuestion(*)
     
   allowed_dirs:
     - "{workspace}"

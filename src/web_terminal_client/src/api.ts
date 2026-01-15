@@ -6,6 +6,7 @@ import type {
   ResultResponse,
   SessionListResponse,
   SessionResponse,
+  SkillsListResponse,
   SortOrder,
   SSEEvent,
   TaskStartedResponse,
@@ -228,4 +229,15 @@ export async function deleteFile(
     { method: 'DELETE' },
     token
   );
+}
+
+// =============================================================================
+// Skills API Functions
+// =============================================================================
+
+export async function getSkills(
+  baseUrl: string,
+  token: string
+): Promise<SkillsListResponse> {
+  return apiRequest<SkillsListResponse>(baseUrl, '/api/v1/skills', {}, token);
 }

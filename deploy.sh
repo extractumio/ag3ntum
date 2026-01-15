@@ -32,19 +32,10 @@ Options:
   --help             Show this help message
 
 Test Options (for 'test' command):
-  <pattern>          File pattern to match (e.g., "session*", "auth", "session*|streaming")
-  --all              Run all tests in tests/ directory
-  --backend          Run all backend tests (default if no pattern)
-  --sandboxing       Run sandboxing tests only
-  --security         Run security tests only (command filtering)
-  -k <pattern>       Pytest -k pattern for test name filtering
-  -v                 Verbose output (default)
-  -x                 Stop on first failure
-  
-Pattern Matching:
-  Patterns match test file names. Use | for OR matching.
-  Examples: "session*" matches test_sessions.py, test_session_service.py
-            "auth|health" matches test_auth.py and test_health.py
+  (no args)               Run ALL tests (backend + security + E2E)
+  --quick                 Run only quick tests (exclude E2E and slow tests)
+  --subset <names>        Run specific tests by name (comma-separated)
+                          Examples: "auth", "sessions,streaming", "ask_user_question"
 
 Examples:
   ./deploy.sh build
@@ -53,16 +44,17 @@ Examples:
   ./deploy.sh cleanup
   ./deploy.sh restart
   ./deploy.sh rebuild --no-cache
-  ./deploy.sh test                          # Run all backend tests
-  ./deploy.sh test --all                    # Run ALL tests (backend + core-tests + security)
-  ./deploy.sh test --security               # Run security tests only
-  ./deploy.sh test --sandboxing             # Run sandboxing tests only
-  ./deploy.sh test "session*"               # Run session-related tests
-  ./deploy.sh test "session*|streaming"     # Run session and streaming tests
-  ./deploy.sh test auth                     # Run auth tests
-  ./deploy.sh test -k "ps_command"          # Filter by test name pattern
-  ./deploy.sh test --security -x            # Run security tests, stop on first failure
+  ./deploy.sh test                          # Run ALL tests (including E2E)
+  ./deploy.sh test --quick                  # Run quick tests only (no E2E/slow)
+  ./deploy.sh test --subset auth            # Run auth tests only
+  ./deploy.sh test --subset sessions,auth   # Run sessions and auth tests
   ./deploy.sh shell                         # Open shell in container
+
+CLI Hints:
+  View logs:     docker compose logs -f ag3ntum-api
+  API health:    curl http://localhost:40080/api/v1/health
+  Redis CLI:     docker exec -it project-redis-1 redis-cli
+  Stop all:      docker compose down
 EOF
 }
 
@@ -369,135 +361,200 @@ fi
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests inside Docker container ==="
-  
+
   # Check if container is running
   if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./deploy.sh build"
     exit 1
   fi
-  
+
   # Build pytest command
   PYTEST_CMD="python -m pytest"
-  
-  # Parse test arguments and build final command
-  TEST_PATH=""
-  PYTEST_EXTRA_ARGS=()
-  FILE_PATTERNS=()
-  
-  # Use index-based loop to handle args that need next value (like -k PATTERN)
+
+  # Parse test arguments
+  QUICK_MODE=""
+  SUBSET=""
+
   ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
   i=0
   while [[ $i -lt ${#ARGS_ARRAY[@]} ]]; do
     arg="${ARGS_ARRAY[$i]}"
     case "${arg}" in
-      --all)
-        TEST_PATH="tests/"
+      --quick)
+        QUICK_MODE="1"
         ;;
-      --backend)
-        TEST_PATH="tests/backend/"
-        ;;
-      --sandboxing)
-        TEST_PATH="tests/backend/test_sandboxing.py"
-        ;;
-      --security)
-        TEST_PATH="tests/security/"
-        ;;
-      -k)
-        # -k requires a following pattern argument
-        PYTEST_EXTRA_ARGS+=("${arg}")
+      --subset)
         ((i++))
         if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
-          PYTEST_EXTRA_ARGS+=("${ARGS_ARRAY[$i]}")
+          SUBSET="${ARGS_ARRAY[$i]}"
+        else
+          echo "Error: --subset requires a comma-separated list of test names"
+          exit 1
         fi
         ;;
-      -k=*)
-        # -k=pattern format
-        PYTEST_EXTRA_ARGS+=("${arg}")
-        ;;
-      -x|-v|-q|--verbose|--tb=*)
-        PYTEST_EXTRA_ARGS+=("${arg}")
-        ;;
-      -*)
-        # Other pytest flags, pass through
-        PYTEST_EXTRA_ARGS+=("${arg}")
+      --subset=*)
+        SUBSET="${arg#--subset=}"
         ;;
       *)
-        # File pattern (e.g., "session*", "auth", "session*|streaming")
-        if [[ -n "${arg}" ]]; then
-          FILE_PATTERNS+=("${arg}")
-        fi
+        echo "Unknown test option: ${arg}"
+        echo "Usage: ./deploy.sh test [--quick] [--subset <names>]"
+        exit 1
         ;;
     esac
     ((i++))
   done
-  
-  # Build test file list from patterns
-  if [[ ${#FILE_PATTERNS[@]} -gt 0 ]]; then
-    # Convert patterns to pytest file args
-    # Handle patterns like "session*|streaming" or just "session*"
+
+  # Build test arguments
+  PYTEST_ARGS=()
+
+  if [[ -n "${SUBSET}" ]]; then
+    # Run specific tests by name pattern
+    # Convert comma-separated names to test file paths
     TEST_FILES=()
-    for pattern in "${FILE_PATTERNS[@]}"; do
-      # Split by | for OR patterns
-      IFS='|' read -ra PARTS <<< "${pattern}"
-      for part in "${PARTS[@]}"; do
-        # Find matching test files in container
-        # Strip * if present for matching
-        part_clean="${part%\*}"
-        # Look for test files matching the pattern
-        MATCHES=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -name "test_${part_clean}*.py" -o -name "test_*${part_clean}*.py" 2>/dev/null | sort -u)
-        if [[ -n "${MATCHES}" ]]; then
-          while IFS= read -r file; do
-            TEST_FILES+=("${file}")
-          done <<< "${MATCHES}"
-        fi
-      done
+    IFS=',' read -ra NAMES <<< "${SUBSET}"
+    for name in "${NAMES[@]}"; do
+      # Trim whitespace
+      name="${name// /}"
+      # Find matching test files in container
+      MATCHES=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
+      if [[ -n "${MATCHES}" ]]; then
+        while IFS= read -r file; do
+          TEST_FILES+=("${file}")
+        done <<< "${MATCHES}"
+      fi
     done
-    
-    if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
-      # Remove duplicates and set as test path
-      TEST_PATH=$(printf '%s\n' "${TEST_FILES[@]}" | sort -u | tr '\n' ' ')
-    else
-      echo "No test files found matching patterns: ${FILE_PATTERNS[*]}"
+
+    if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
+      echo "No test files found matching: ${SUBSET}"
+      echo ""
       echo "Available test files:"
       docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -name "test_*.py" | sort
       exit 1
     fi
+
+    # Add unique test files to args
+    for file in $(printf '%s\n' "${TEST_FILES[@]}" | sort -u); do
+      PYTEST_ARGS+=("${file}")
+    done
+
+    # Include --run-e2e if any subset test might have E2E tests
+    PYTEST_ARGS+=("--run-e2e")
+  else
+    # Run all tests - need separate runs for backend (with --run-e2e) and others
+    if [[ -n "${QUICK_MODE}" ]]; then
+      # Quick mode: exclude E2E and slow tests (all tests at once, no --run-e2e)
+      echo "Running quick tests (excluding E2E and slow tests)..."
+      PYTEST_ARGS+=("tests/" "-v" "--tb=short")
+
+      echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}"
+      echo ""
+
+      # Run tests in container (use -t only if TTY available)
+      if [ -t 0 ]; then
+        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+      else
+        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+      fi
+      exit $?
+    else
+      # Full mode: run backend tests with --run-e2e, then other tests without it
+      echo "Running ALL tests (backend with E2E + security + other tests)..."
+      echo ""
+
+      # First run: backend tests with --run-e2e flag
+      echo "=== Running backend tests (with E2E) ==="
+      if [ -t 0 ]; then
+        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+      else
+        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+      fi
+      BACKEND_RESULT=$?
+
+      # Second run: security tests (no --run-e2e flag)
+      echo ""
+      echo "=== Running security tests ==="
+      if [ -t 0 ]; then
+        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/security/ -v --tb=short
+      else
+        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/security/ -v --tb=short
+      fi
+      SECURITY_RESULT=$?
+
+      # Check for other test directories and run them
+      OTHER_DIRS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
+      OTHER_RESULT=0
+
+      if [[ -n "${OTHER_DIRS}" ]]; then
+        for dir in ${OTHER_DIRS}; do
+          dir_name=$(basename "${dir}")
+          if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
+            # Check if directory has any test files
+            HAS_TESTS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
+            if [[ -n "${HAS_TESTS}" ]]; then
+              echo ""
+              echo "=== Running ${dir_name} tests ==="
+              if [ -t 0 ]; then
+                docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${dir}/" -v --tb=short
+              else
+                docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${dir}/" -v --tb=short
+              fi
+              if [[ $? -ne 0 ]]; then
+                OTHER_RESULT=1
+              fi
+            fi
+          fi
+        done
+      fi
+
+      # Print combined summary
+      echo ""
+      echo "========================================"
+      echo "=== COMBINED TEST SUMMARY ==="
+      echo "========================================"
+      TOTAL_TESTS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+      echo "Total tests in suite: ${TOTAL_TESTS:-302}"
+      echo ""
+      if [[ ${BACKEND_RESULT} -eq 0 ]]; then
+        echo "  ✓ Backend tests:  PASSED"
+      else
+        echo "  ✗ Backend tests:  FAILED"
+      fi
+      if [[ ${SECURITY_RESULT} -eq 0 ]]; then
+        echo "  ✓ Security tests: PASSED"
+      else
+        echo "  ✗ Security tests: FAILED"
+      fi
+      if [[ ${OTHER_RESULT} -eq 0 ]]; then
+        echo "  ✓ Other tests:    PASSED"
+      else
+        echo "  ✗ Other tests:    FAILED"
+      fi
+      echo "========================================"
+
+      # Exit with error if any test suite failed
+      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 ]]; then
+        echo ""
+        echo "Some tests failed!"
+        exit 1
+      fi
+      echo ""
+      echo "All tests passed!"
+      exit 0
+    fi
   fi
-  
-  # Default to backend tests if no path specified
-  if [[ -z "${TEST_PATH}" ]]; then
-    TEST_PATH="tests/backend/"
-  fi
-  
-  # Build final TEST_ARGS
-  TEST_ARGS=()
-  for path in ${TEST_PATH}; do
-    TEST_ARGS+=("${path}")
-  done
-  
-  # Add extra args
-  for arg in "${PYTEST_EXTRA_ARGS[@]+"${PYTEST_EXTRA_ARGS[@]}"}"; do
-    TEST_ARGS+=("${arg}")
-  done
-  
-  # Add default flags if not specified
-  TEST_ARGS_STR=" ${TEST_ARGS[*]+"${TEST_ARGS[*]}"} "
-  if [[ ! "${TEST_ARGS_STR}" =~ " -v " && ! "${TEST_ARGS_STR}" =~ " --verbose " && ! "${TEST_ARGS_STR}" =~ " -q " ]]; then
-    TEST_ARGS+=("-v")
-  fi
-  if [[ ! "${TEST_ARGS_STR}" =~ " --tb=" ]]; then
-    TEST_ARGS+=("--tb=short")
-  fi
-  
-  echo "Running: ${PYTEST_CMD} ${TEST_ARGS[*]}"
+
+  # Add default flags (only reached for --subset mode)
+  PYTEST_ARGS+=("-v" "--tb=short")
+
+  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}"
   echo ""
-  
+
   # Run tests in container (use -t only if TTY available)
   if [ -t 0 ]; then
-    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${TEST_ARGS[@]}"
+    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   else
-    docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${TEST_ARGS[@]}"
+    docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   fi
   exit $?
 fi

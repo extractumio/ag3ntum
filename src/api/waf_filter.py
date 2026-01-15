@@ -20,15 +20,17 @@ logger = logging.getLogger(__name__)
 # Configuration Constants
 # =============================================================================
 
-# Maximum text content length (100,000 characters)
+# Maximum text content length (5MB)
 # Applies to: task descriptions, file content strings, etc.
-MAX_TEXT_CONTENT_LENGTH: int = 100_000
+# Note: This must be higher than large_input.threshold_bytes (200KB) in agent.yaml
+# so that large input processing can work correctly
+MAX_TEXT_CONTENT_LENGTH: int = 5 * 1024 * 1024  # 5MB
 
 # Maximum file upload size (10MB in bytes)
 MAX_FILE_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
 
-# Maximum JSON request body size (20MB - allows for large base64-encoded files)
-MAX_REQUEST_BODY_SIZE: int = 20 * 1024 * 1024  # 20MB
+# Maximum JSON request body size (15MB - allows for large base64-encoded files)
+MAX_REQUEST_BODY_SIZE: int = 15 * 1024 * 1024  # 15MB
 
 
 # =============================================================================

@@ -52,23 +52,23 @@ source venv/bin/activate
 ```bash
 # Simple request
 python scripts/ag3ntum_debug.py -r "who are you?" \
-  --user "info@extractum.io" --password bzzzzzzzz247824_
+  --email "info@extractum.io" --password bzzzzzzzz247824_
 
 # File creation task
 python scripts/ag3ntum_debug.py -r "create a python script to print HELLO WORLD" \
-  --user "info@extractum.io" --password bzzzzzzzz247824_
+  --email "info@extractum.io" --password bzzzzzzzz247824_
 
 # With verbose output (shows all events)
 python scripts/ag3ntum_debug.py -r "list files in workspace" \
-  --user "info@extractum.io" --password bzzzzzzzz247824_ --verbose
+  --email "info@extractum.io" --password bzzzzzzzz247824_ --verbose
 
 # Security-focused (shows only blocked operations)
 python scripts/ag3ntum_debug.py -r "read /etc/passwd" \
-  --user "info@extractum.io" --password bzzzzzzzz247824_ --security-only
+  --email "info@extractum.io" --password bzzzzzzzz247824_ --security-only
 
 # Dump session files after execution
 python scripts/ag3ntum_debug.py -r "create test.txt" \
-  --user "info@extractum.io" --password bzzzzzzzz247824_ --dump-session
+  --email "info@extractum.io" --password bzzzzzzzz247824_ --dump-session
 ```
 
 ### Command-Line Options
@@ -76,8 +76,8 @@ python scripts/ag3ntum_debug.py -r "create test.txt" \
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--request` | `-r` | Request to send to agent | **(required)** |
-| `--user` | `-u` | User email for authentication | `greg` |
-| `--password` | | Password for authentication | `bzzzzzzzz247824_` |
+| `--email` | `-e` | User email for authentication | **(required)** |
+| `--password` | | Password for authentication | `test123` |
 | `--host` | | API host | `localhost` |
 | `--port` | `-p` | API port | `40080` |
 | `--verbose` | `-v` | Show all SSE events | `false` |
@@ -336,7 +336,7 @@ Start with a basic request to verify the system is working:
 
 ```bash
 python scripts/ag3ntum_debug.py -r "who are you?" \
-  --user "head@extractum.io" --password sde45f
+  --email "head@extractum.io" --password sde45f
 ```
 
 Expected output:
@@ -358,7 +358,7 @@ Verify tools are working:
 
 ```bash
 python scripts/ag3ntum_debug.py -r "create a python script to print HELLO WORLD" \
-  --user "head@extractum.io" --password sde45f
+  --email "head@extractum.io" --password sde45f
 ```
 
 Expected: File created in workspace.
@@ -384,7 +384,7 @@ cat Project/users/greg/sessions/{SESSION_ID}/agent.jsonl | grep -i "error"
 ```bash
 # Run with verbose output
 python scripts/ag3ntum_debug.py -r "your request" \
-  --user "head@extractum.io" --password sde45f --verbose
+  --email "head@extractum.io" --password sde45f --verbose
 
 # Check permission logs in Docker
 docker logs project-ag3ntum-api-1 2>&1 | grep -i "permission\|denied" | tail -30
@@ -442,11 +442,11 @@ cat agent.jsonl | jq -r 'select(.type=="tool_start" or .type=="tool_complete") |
 ```bash
 # Try reading outside workspace
 python scripts/ag3ntum_debug.py -r "read /etc/passwd" \
-  --user "head@extractum.io" --password sde45f --security-only
+  --email "head@extractum.io" --password sde45f --security-only
 
 # Try dangerous commands
 python scripts/ag3ntum_debug.py -r "run: rm -rf /" \
-  --user "head@extractum.io" --password sde45f --security-only
+  --email "head@extractum.io" --password sde45f --security-only
 ```
 
 Expected: Operations should be blocked with clear denial messages.
@@ -465,7 +465,7 @@ The script returns different exit codes based on execution status:
 
 Use in scripts:
 ```bash
-python scripts/ag3ntum_debug.py -r "test" --user "head@extractum.io" --password sde45f
+python scripts/ag3ntum_debug.py -r "test" --email "head@extractum.io" --password sde45f
 if [ $? -eq 2 ]; then
     echo "Security blocks detected"
 fi
@@ -482,7 +482,7 @@ source venv/bin/activate                    # Activate Python env
 
 # Run agent
 python scripts/ag3ntum_debug.py -r "YOUR REQUEST" \
-  --user "head@extractum.io" --password sde45f
+  --email "head@extractum.io" --password sde45f
 
 # Find artifacts (replace SESSION_ID from output)
 cd Project/users/greg/sessions/{SESSION_ID}/

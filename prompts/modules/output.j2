@@ -32,7 +32,7 @@ error: <empty or concise error description>
 
 **Header Rules:**
 - The header must be the very first content in the response as plain text (NOT wrapped in code fences).
-- Always include `status` and `error`. Use an empty value for `error` when there is no error.
+- Always include `status` and `error`. **Leave `error:` empty (no value after the colon) when there is no error.** Do NOT write placeholder text like "None", "None yet", "No error", or similar - just leave it blank.
 - You may add additional `key: value` lines between the header delimiters for extra metadata.
 - After the closing `---`, include the normal response body in plain text or markdown.
 

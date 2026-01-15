@@ -455,6 +455,29 @@ May have its own permission set.""",
             "Agent(*)",
         ]
     ),
+    "AskUserQuestion": ToolDefinition(
+        name="AskUserQuestion",
+        description="""
+Ask the user multiple choice questions to gather information or clarify ambiguity.
+Presents options to the user and collects their response.
+Safe read-only operation - does not modify any state.
+NOTE: This native tool is BLOCKED - use mcp__ag3ntum__AskUserQuestion instead.""",
+        category=ToolCategory.MISC,
+        is_safe=True,
+        supports_patterns=False,
+        example_patterns=[]
+    ),
+    "mcp__ag3ntum__AskUserQuestion": ToolDefinition(
+        name="mcp__ag3ntum__AskUserQuestion",
+        description="""
+Ag3ntum interactive question tool. Asks users multiple choice questions via the web UI.
+Pauses execution until user responds through the frontend.
+Safe read-only operation - waits for user input.""",
+        category=ToolCategory.MISC,
+        is_safe=True,
+        supports_patterns=False,
+        example_patterns=[]
+    ),
 }
 
 # Safe tools that can be auto-approved in certain modes

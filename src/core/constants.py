@@ -251,6 +251,24 @@ class StatusIcons:
     SPINNER_LINE: tuple[str, ...] = ("—", "\\", "|", "/")
     SPINNER_ARROW: tuple[str, ...] = ("←", "↖", "↑", "↗", "→", "↘", "↓", "↙")
 
+    # Pulsing circle spinner for structured elements (tools, skills, subagents)
+    # Uses ANSI 256-color codes to create a smooth brightness pulse effect
+    # Grayscale values: 232 (darkest) to 255 (brightest)
+    SPINNER_PULSE_CIRCLE: tuple[str, ...] = (
+        # Fade in (dim to bright)
+        "\033[38;5;240m●\033[0m",  # dim
+        "\033[38;5;243m●\033[0m",
+        "\033[38;5;246m●\033[0m",
+        "\033[38;5;249m●\033[0m",
+        "\033[38;5;252m●\033[0m",
+        "\033[38;5;255m●\033[0m",  # bright
+        # Fade out (bright to dim)
+        "\033[38;5;252m●\033[0m",
+        "\033[38;5;249m●\033[0m",
+        "\033[38;5;246m●\033[0m",
+        "\033[38;5;243m●\033[0m",
+    )
+
 
 # =============================================================================
 # API Constants

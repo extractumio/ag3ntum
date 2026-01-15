@@ -20,6 +20,7 @@ from .ag3ntum_grep import create_grep_tool
 from .ag3ntum_ls import create_ls_tool
 from .ag3ntum_webfetch import create_webfetch_tool
 from .ag3ntum_bash import create_bash_tool
+from .ag3ntum_ask import create_ask_user_question_tool
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def create_ag3ntum_tools_mcp_server(
         - mcp__ag3ntum__Grep
         - mcp__ag3ntum__LS
         - mcp__ag3ntum__WebFetch
+        - mcp__ag3ntum__AskUserQuestion
     """
     tools = []
     
@@ -87,11 +89,14 @@ def create_ag3ntum_tools_mcp_server(
         create_grep_tool(session_id=session_id),
         create_ls_tool(session_id=session_id),
         create_webfetch_tool(),  # No session_id needed
+        create_ask_user_question_tool(session_id=session_id),
     ])
 
+    # Log each tool for debugging
+    tool_names = [getattr(t, '__name__', str(t)) for t in tools]
     logger.info(
         f"Created unified Ag3ntum MCP server for session {session_id} "
-        f"with {len(tools)} tools (Bash: {include_bash})"
+        f"with {len(tools)} tools (Bash: {include_bash}): {tool_names}"
     )
 
     return create_sdk_mcp_server(

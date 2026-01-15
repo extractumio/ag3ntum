@@ -78,6 +78,11 @@ body,
   letter-spacing: 0.4px;
 }
 
+.header-label a {
+  color: var(--color-cyan);
+  text-decoration: none;
+}
+
 .header-divider {
   color: var(--color-dim);
 }
@@ -93,6 +98,7 @@ body,
   border-radius: 4px;
   color: var(--color-dim);
   font-size: 12px;
+  font-weight: bold;
   padding: 3px 8px;
   cursor: pointer;
   font-family: inherit;
@@ -143,6 +149,7 @@ body,
   color: var(--color-dim);
   font-family: inherit;
   font-size: 11px;
+  font-weight: bold;
   padding: 5px 9px;
   border-radius: 2px;
   cursor: pointer;
@@ -179,11 +186,11 @@ body,
   border: 1px solid var(--color-border);
   color: var(--color-dim);
   font-family: inherit;
-  font-size: 12px;
-  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 5px 9px;
   border-radius: 2px;
   cursor: pointer;
-  min-width: 120px;
 }
 
 .session-new-button:hover {
@@ -572,6 +579,30 @@ body,
   color: var(--color-dim);
 }
 
+.message-size-badge {
+  color: var(--color-yellow);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.large-input-notice {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-dim);
+}
+
+.large-input-notice code {
+  color: var(--color-cyan);
+  background: var(--color-bg);
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
 .message-divider {
   color: var(--color-dim);
 }
@@ -801,6 +832,467 @@ body,
   color: var(--color-yellow);
   font-size: 13px;
   margin-top: 4px;
+}
+
+/* =============================================================================
+ * REUSABLE SELECTION WIDGETS
+ * Custom checkbox/radio controls for consistent UI across the application
+ * ============================================================================= */
+
+/* Base selection control - use for both single and multi-select */
+.select-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--color-bg-light);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.select-control:hover:not(.disabled) {
+  border-color: var(--color-blue);
+  background: var(--color-bg-lighter);
+}
+
+.select-control.selected {
+  border-color: var(--color-blue);
+  background: rgba(143, 184, 232, 0.08);
+}
+
+.select-control.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Custom indicator box (checkbox/radio replacement) */
+.select-indicator {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-dim);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.select-control:hover:not(.disabled) .select-indicator {
+  border-color: var(--color-blue);
+}
+
+.select-control.selected .select-indicator {
+  border-color: var(--color-blue);
+  background: var(--color-blue);
+}
+
+/* Inner mark for selected state */
+.select-indicator-mark {
+  display: none;
+  width: 8px;
+  height: 8px;
+  background: var(--color-bg);
+}
+
+.select-control.selected .select-indicator-mark {
+  display: block;
+}
+
+/* Multi-select uses square, single-select can optionally use different mark */
+.select-control.multi-select .select-indicator-mark {
+  /* Checkmark-style: smaller centered square */
+  width: 8px;
+  height: 8px;
+}
+
+.select-label {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.select-control.selected .select-label {
+  color: var(--color-text-bright);
+}
+
+.select-description {
+  color: var(--color-dim);
+  font-size: 12px;
+  margin-left: auto;
+  padding-left: 12px;
+}
+
+/* =============================================================================
+ * ASK USER QUESTION - Interactive question UI (Human-in-the-Loop)
+ * ============================================================================= */
+
+.ask-user-question {
+  margin-bottom: 8px;
+  border-left: 2px solid var(--color-blue);
+  padding-left: 4px;
+}
+
+.ask-user-question.tool-status-running {
+  border-left-color: var(--color-yellow);
+}
+
+.ask-user-question.tool-status-success {
+  border-left-color: var(--color-green);
+}
+
+.ask-question-icon {
+  margin-right: 6px;
+  font-size: 14px;
+  color: var(--color-blue);
+}
+
+.ask-user-question-body {
+  padding: 8px 8px 8px 44px;
+  border-left: 1px dashed var(--color-border);
+  margin-left: 6px;
+}
+
+.ask-question-block {
+  margin-bottom: 8px;
+}
+
+.ask-question-block:last-child {
+  margin-bottom: 0;
+}
+
+.ask-question-header {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  color: var(--color-blue);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-question-text {
+  color: var(--color-text-bright);
+  font-size: 14px;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.ask-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Option buttons use the reusable select-control base */
+.ask-option-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--color-bg-light);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ask-option-btn:hover:not(.disabled) {
+  border-color: var(--color-blue);
+  background: var(--color-bg-lighter);
+}
+
+.ask-option-btn.selected {
+  border-color: var(--color-blue);
+  background: rgba(143, 184, 232, 0.08);
+}
+
+.ask-option-btn.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Custom indicator (checkbox/radio style) */
+.ask-option-indicator {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-dim);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.ask-option-btn:hover:not(.disabled) .ask-option-indicator {
+  border-color: var(--color-blue);
+}
+
+.ask-option-btn.selected .ask-option-indicator {
+  border-color: var(--color-blue);
+  background: var(--color-blue);
+}
+
+/* Inner mark shown when selected */
+.ask-option-indicator::after {
+  content: '';
+  display: none;
+  width: 8px;
+  height: 8px;
+  background: var(--color-bg);
+}
+
+.ask-option-btn.selected .ask-option-indicator::after {
+  display: block;
+}
+
+.ask-option-label {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.ask-option-btn.selected .ask-option-label {
+  color: var(--color-text-bright);
+}
+
+.ask-option-description {
+  color: var(--color-dim);
+  font-size: 12px;
+  margin-left: auto;
+  padding-left: 12px;
+}
+
+.ask-question-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.ask-submit-btn {
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ask-submit-btn:hover:not(.disabled) {
+  border-color: var(--color-blue);
+  color: var(--color-text-bright);
+}
+
+.ask-submit-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ask-hint {
+  color: var(--color-dim);
+  font-size: 11px;
+}
+
+.ask-question-answer {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: rgba(125, 211, 163, 0.08);
+  border-left: 2px solid var(--color-green);
+}
+
+.ask-answer-label {
+  color: var(--color-green);
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 8px;
+  text-transform: uppercase;
+}
+
+.ask-answer-value {
+  color: var(--color-text-bright);
+  font-size: 13px;
+}
+
+/* AskUserQuestion inline mode - renders in message content area */
+.ask-user-question-inline {
+  margin: 10px 0;
+  padding: 12px;
+  background: var(--color-bg-lighter);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-blue);
+}
+
+.ask-user-question-inline.tool-status-running {
+  border-left-color: var(--color-yellow);
+  background: rgba(232, 211, 116, 0.03);
+}
+
+.ask-user-question-inline.tool-status-success {
+  border-left-color: var(--color-green);
+  background: rgba(125, 211, 163, 0.03);
+}
+
+.ask-user-question-inline .ask-question-block {
+  margin-bottom: 10px;
+}
+
+.ask-user-question-inline .ask-question-block:last-child {
+  margin-bottom: 0;
+}
+
+.ask-user-question-inline .ask-question-header {
+  display: inline-block;
+  padding: 2px 8px;
+  background: rgba(143, 184, 232, 0.12);
+  border: 1px solid rgba(143, 184, 232, 0.3);
+  color: var(--color-blue);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-user-question-inline .ask-question-text {
+  color: var(--color-text-bright);
+  font-size: 13px;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.ask-user-question-inline .ask-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ask-user-question-inline .ask-option-btn {
+  padding: 8px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
+.ask-user-question-inline .ask-option-btn:hover:not(.disabled) {
+  background: var(--color-bg-light);
+  border-color: var(--color-blue);
+}
+
+.ask-user-question-inline .ask-option-btn.selected {
+  background: rgba(143, 184, 232, 0.1);
+  border-color: var(--color-blue);
+}
+
+.ask-user-question-inline .ask-question-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.ask-user-question-inline .ask-submit-btn {
+  padding: 6px 16px;
+  font-size: 12px;
+}
+
+.ask-user-question-inline .ask-question-answer {
+  margin-top: 10px;
+  padding: 8px 12px;
+}
+
+/* Waiting for input status (human-in-the-loop) */
+.ask-user-question.tool-status-waiting,
+.ask-user-question-inline.tool-status-waiting {
+  border-left-color: var(--color-orange);
+  background: rgba(232, 168, 122, 0.05);
+}
+
+.ask-waiting-banner {
+  background: rgba(232, 168, 122, 0.12);
+  margin-bottom: 10px;
+  color: var(--color-orange-light);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ask-waiting-icon {
+  color: var(--color-orange);
+  font-weight: bold;
+}
+
+.ask-question-submitted {
+  background: rgba(125, 211, 163, 0.08);
+  border: 1px solid var(--color-green);
+  padding: 10px 14px;
+  margin-top: 16px;
+  color: var(--color-green);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ask-submitted-icon {
+  font-weight: bold;
+}
+
+/* Additional comments textarea */
+.ask-additional-comments {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.ask-additional-comments-label {
+  color: var(--color-dim);
+  font-size: 11px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-additional-comments-textarea {
+  width: 100%;
+  min-height: 54px;
+  padding: 8px 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.ask-additional-comments-textarea:focus {
+  outline: none;
+  border-color: var(--color-blue);
+}
+
+.ask-additional-comments-textarea::placeholder {
+  color: var(--color-dim);
+}
+
+/* Hide resume-context content in UI (LLM-only message) */
+resume-context {
+  display: none;
 }
 
 .agent-files {
@@ -1183,6 +1675,7 @@ body,
   padding: 5px 10px;
   color: var(--color-dim);
   font-size: 11px;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   transition: border-color 0.1s ease, color 0.1s ease;
@@ -1261,6 +1754,7 @@ body,
   height: 36px;
   border-radius: 4px;
   font-size: 16px;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1677,6 +2171,7 @@ body,
   padding: 2px 6px;
   color: var(--color-dim);
   font-size: 10px;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1730,6 +2225,7 @@ body,
   padding: 4px 10px;
   color: var(--color-dim);
   font-size: 11px;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1790,6 +2286,49 @@ body,
 .usage-bar-row .tool-usage-bar {
   border-top: none;
   padding: 0;
+}
+
+/* Skills bar */
+.skills-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  padding-right: 16px;
+  margin-right: 16px;
+  border-right: 1px solid var(--color-border);
+}
+
+.skills-label {
+  color: var(--color-dim);
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-magenta);
+  background: rgba(190, 131, 191, 0.1);
+  border: 1px solid rgba(190, 131, 191, 0.3);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.skill-tag:hover {
+  background: rgba(190, 131, 191, 0.2);
+  border-color: var(--color-magenta);
+}
+
+.skill-tag .skill-symbol {
+  font-size: 10px;
+}
+
+.skill-tag .skill-name {
+  font-weight: 500;
 }
 
 /* ==============================
@@ -1895,6 +2434,7 @@ body,
   padding: 3px 8px;
   color: var(--color-dim);
   font-size: 10px;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   margin-left: auto;
@@ -2153,7 +2693,7 @@ body,
   border-radius: 4px;
   padding: 10px 16px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: bold;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -2235,6 +2775,21 @@ body,
 
 .tool-status-icon.tool-status-running {
   color: var(--color-cyan);
+}
+
+/* Pulsing circle spinner for running tools/subagents */
+.pulsing-circle-spinner {
+  display: inline-block;
+  animation: pulse-brightness 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-brightness {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* Status borders removed - icons provide sufficient visual feedback */

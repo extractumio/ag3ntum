@@ -392,6 +392,22 @@ class AgentRunner:
             final_status = result.status.value.lower()
             if final_status == "error":
                 final_status = "failed"
+
+            # Check if agent stopped due to AskUserQuestion (human-in-the-loop)
+            # If a question_pending event was emitted without a matching question_answered,
+            # the session should be in "waiting_for_input" status
+            try:
+                from tools.ag3ntum.ag3ntum_ask.tool import get_pending_question_from_events
+                pending_question = await get_pending_question_from_events(session_id)
+                if pending_question:
+                    final_status = "waiting_for_input"
+                    logger.info(
+                        f"Session {session_id} waiting for user input "
+                        f"(question_id: {pending_question.get('question_id')})"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to check pending questions for {session_id}: {e}")
+
             await self._update_session_status(
                 session_id=session_id,
                 status=final_status,
@@ -401,7 +417,7 @@ class AgentRunner:
                 total_cost_usd=metrics.total_cost_usd if metrics else None,
             )
 
-            logger.info(f"Agent completed for session: {session_id}")
+            logger.info(f"Agent completed for session: {session_id} (status: {final_status})")
 
         except asyncio.CancelledError:
             logger.info(f"Agent cancelled for session: {session_id}")

@@ -37,13 +37,9 @@ async def get_config() -> ConfigResponse:
     loader = get_config_loader()
     config = loader.get_config()
 
-    # Get models_available and default_model from config, with fallbacks
-    models_available = config.get("models_available", [
-        "claude-haiku-4-5-20251001",
-        "claude-sonnet-4-5-20250929",
-        "claude-opus-4-5-20251101"
-    ])
-    default_model = config.get("default_model", config.get("model", "claude-haiku-4-5-20251001"))
+    # Get models_available and default_model from agent.yaml config
+    models_available = config.get("models_available", [])
+    default_model = config.get("default_model", config.get("model", ""))
 
     return ConfigResponse(
         models_available=models_available,

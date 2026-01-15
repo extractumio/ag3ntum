@@ -47,7 +47,7 @@ from .schemas import (
     TokenUsage,
 )
 from .sessions import SessionManager
-from .skills import SkillManager
+from .skills import SkillManager, discover_merged_skills
 from .tracer import ExecutionTracer, TracerBase, NullTracer
 from .trace_processor import TraceProcessor
 from .permissions import (
@@ -363,25 +363,10 @@ class ClaudeAgent:
             shutil.rmtree(skills_target)
         skills_target.mkdir(parents=True, exist_ok=True)
 
-        # Collect skills: global first, then user (user overrides)
-        skill_sources: dict[str, Path] = {}  # skill_name -> source_path
+        # Discover merged skills using shared function (global + user, with user overriding)
+        skill_sources = discover_merged_skills(username=username)
 
-        # 1. Add global skills
-        global_skills_dir = SKILLS_DIR / ".claude" / "skills"
-        if global_skills_dir.exists():
-            for skill_dir in global_skills_dir.iterdir():
-                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                    skill_sources[skill_dir.name] = skill_dir
-
-        # 2. Add user skills (overrides global)
-        if username:
-            user_skills_dir = USERS_DIR / username / ".claude" / "skills"
-            if user_skills_dir.exists():
-                for skill_dir in user_skills_dir.iterdir():
-                    if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-                        skill_sources[skill_dir.name] = skill_dir  # Override
-
-        # 3. Create symlinks
+        # Create symlinks to discovered skills
         for skill_name, source_path in skill_sources.items():
             link_path = skills_target / skill_name
             try:
@@ -390,7 +375,11 @@ class ClaudeAgent:
             except Exception as e:
                 logger.warning(f"Failed to create skill symlink {skill_name}: {e}")
 
-        logger.info(f"Merged {len(skill_sources)} skills into workspace/.claude/skills/")
+        skill_names = sorted(skill_sources.keys())
+        logger.info(
+            f"Refreshed skills ({len(skill_sources)}): {', '.join(skill_names) if skill_names else 'none'} "
+            f"-> {skills_target}"
+        )
 
     def _cleanup_session(self, session_id: str) -> None:
         """
@@ -571,7 +560,8 @@ class ClaudeAgent:
                 # Create unified MCP server with ALL Ag3ntum tools
                 # Tool names: mcp__ag3ntum__Bash, mcp__ag3ntum__Read, mcp__ag3ntum__Write,
                 #            mcp__ag3ntum__Edit, mcp__ag3ntum__MultiEdit, mcp__ag3ntum__Glob,
-                #            mcp__ag3ntum__Grep, mcp__ag3ntum__LS, mcp__ag3ntum__WebFetch
+                #            mcp__ag3ntum__Grep, mcp__ag3ntum__LS, mcp__ag3ntum__WebFetch,
+                #            mcp__ag3ntum__AskUserQuestion
                 ag3ntum_server = create_ag3ntum_tools_mcp_server(
                     session_id=session_id,
                     workspace_path=workspace_dir,
@@ -580,7 +570,7 @@ class ClaudeAgent:
                     server_name="ag3ntum"
                 )
                 mcp_servers["ag3ntum"] = ag3ntum_server
-                tool_count = 9 if include_bash else 8
+                tool_count = 10 if include_bash else 9
                 logger.info(
                     f"Ag3ntum unified MCP server configured ({tool_count} tools, "
                     f"Bash: {include_bash}, sandbox: {'ENABLED' if sandbox_executor else 'DISABLED'})"

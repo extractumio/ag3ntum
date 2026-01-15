@@ -44,6 +44,21 @@ agent:
   # Include partial/incomplete messages in output
   include_partial_messages: true
 
+# Large user input handling
+# When user submits input larger than the threshold, it's saved to a file
+# and the agent receives a reference to read from that file instead
+large_input:
+  # Size threshold in bytes (default: 200KB = 204800)
+  # Inputs larger than this are stored to file
+  threshold_bytes: 204800
+
+  # Filename to store large inputs in the workspace
+  filename: huge_user_input.txt
+
+  # Message template sent to agent when input exceeds threshold
+  # Placeholders: {filename}, {size}
+  message_template: "Run the user request from the file ./{filename} ({size})"
+
 # File Explorer settings
 file_explorer:
   # Show hidden files (starting with .) by default

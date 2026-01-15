@@ -57,7 +57,7 @@ from .output import (
     wrap_text,
 )
 from .schemas import get_model_context_size
-from .structured_output import parse_structured_output
+from .structured_output import normalize_error_value, parse_structured_output
 
 
 # Type aliases for backward compatibility
@@ -120,6 +120,7 @@ class Symbol:
     SPINNER_DOTS = list(StatusIcons.SPINNER)
     SPINNER_LINE = list(StatusIcons.SPINNER_LINE)
     SPINNER_ARROW = list(StatusIcons.SPINNER_ARROW)
+    SPINNER_PULSE_CIRCLE = list(StatusIcons.SPINNER_PULSE_CIRCLE)
 
     # Additional symbols not in constants (tracer-specific)
     TOOL = StatusIcons.GEAR
@@ -1039,9 +1040,16 @@ class ExecutionTracer(TracerBase):
     def _start_spinner(
         self,
         message: str,
-        frames: Optional[list[str]] = None
+        frames: Optional[list[str]] = None,
+        pre_colored: bool = False
     ) -> None:
-        """Start an animated spinner."""
+        """Start an animated spinner.
+
+        Args:
+            message: Text to display next to the spinner
+            frames: List of frame characters for animation
+            pre_colored: If True, frames already contain ANSI color codes
+        """
         if not self.use_colors or not sys.stdout.isatty():
             self._write(f"  {self._symbol(Symbol.GEAR, '*')} {message}...")
             return
@@ -1054,6 +1062,7 @@ class ExecutionTracer(TracerBase):
         self._spinner.frame_index = 0
         self._spinner.stop_event = threading.Event()
         stop_event = self._spinner.stop_event  # Capture for thread safety
+        is_pre_colored = pre_colored  # Capture for thread safety
 
         def spin() -> None:
             while not stop_event.is_set():
@@ -1065,8 +1074,10 @@ class ExecutionTracer(TracerBase):
                 with self._lock:
                     sys.stdout.write(TerminalControl.CLEAR_LINE)
                     sys.stdout.write(TerminalControl.CURSOR_START)
+                    # Use frame as-is if pre-colored, otherwise wrap with color
+                    frame_display = frame if is_pre_colored else self._color(frame, Color.CYAN)
                     sys.stdout.write(
-                        f"  {self._color(frame, Color.CYAN)} "
+                        f"  {frame_display} "
                         f"{self._color(self._spinner.message, Color.DIM)}"
                     )
                     sys.stdout.flush()
@@ -1372,7 +1383,11 @@ class ExecutionTracer(TracerBase):
                             indent=2
                         )
 
-        self._start_spinner(f"Executing {display_name}...")
+        self._start_spinner(
+            f"Executing {display_name}...",
+            frames=Symbol.SPINNER_PULSE_CIRCLE,
+            pre_colored=True
+        )
 
     def on_tool_complete(
         self,
@@ -1939,6 +1954,63 @@ class ExecutionTracer(TracerBase):
             f"{self._color(f'{total_turns} turns, {duration_str}', Color.WHITE)}"
         )
 
+    def on_subagent_start(
+        self,
+        task_id: str,
+        subagent_name: str,
+        prompt: str
+    ) -> None:
+        """Display subagent start notification."""
+        bar = self._symbol(Symbol.BOX_V, "|")
+        icon = self._symbol(Symbol.ARROW_RIGHT, ">")
+
+        prompt_preview = self._truncate(prompt.strip(), 60) if prompt else ""
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(icon, Color.BRIGHT_BLUE)} "
+            f"{self._color(f'Subagent: {subagent_name}', Color.BRIGHT_BLUE)}"
+        )
+        if prompt_preview:
+            self._write(
+                f"  {self._color(bar, Color.DIM)}   "
+                f"{self._color(prompt_preview, Color.DIM)}"
+            )
+
+    def on_subagent_message(
+        self,
+        task_id: str,
+        text: str,
+        is_partial: bool = False
+    ) -> None:
+        """Display subagent message (only non-partial messages in verbose mode)."""
+        if is_partial or not self.verbose:
+            return
+        bar = self._symbol(Symbol.BOX_V, "|")
+        preview = self._truncate(text.strip(), 60)
+        self._write(
+            f"  {self._color(bar, Color.DIM)}   "
+            f"{self._color(f'[subagent] {preview}', Color.DIM)}"
+        )
+
+    def on_subagent_stop(
+        self,
+        task_id: str,
+        result: Any,
+        duration_ms: int,
+        is_error: bool
+    ) -> None:
+        """Display subagent completion."""
+        bar = self._symbol(Symbol.BOX_V, "|")
+        icon = self._symbol(Symbol.CHECK, "v") if not is_error else self._symbol(Symbol.CROSS, "x")
+        color = Color.GREEN if not is_error else Color.RED
+        duration_str = self._format_duration(duration_ms)
+
+        self._write(
+            f"  {self._color(bar, Color.DIM)} "
+            f"{self._color(icon, color)} "
+            f"{self._color(f'Subagent complete ({duration_str})', Color.DIM)}"
+        )
+
 
 class QuietTracer(TracerBase):
     """
@@ -2111,7 +2183,11 @@ class QuietTracer(TracerBase):
         if prompt_preview:
             dim = Color.DIM if self.use_colors else ""
             print(f"    {dim}{prompt_preview}{reset}")
-        self._start_spinner(f"Running subagent: {subagent_name}")
+        self._start_spinner(
+            f"Running subagent: {subagent_name}",
+            frames=Symbol.SPINNER_PULSE_CIRCLE,
+            pre_colored=True
+        )
 
     def on_subagent_message(
         self,
@@ -2573,6 +2649,22 @@ class EventingTracer(TracerBase):
             },
         )
 
+    def on_tool_input_ready(
+        self,
+        tool_name: str,
+        tool_id: str,
+        tool_input: dict[str, Any],
+    ) -> None:
+        """Emit event when complete tool input is available (after streaming completes)."""
+        self.emit_event(
+            "tool_input_ready",
+            {
+                "tool_name": tool_name,
+                "tool_id": tool_id,
+                "tool_input": tool_input,
+            },
+        )
+
     def on_tool_complete(
         self,
         tool_name: str,
@@ -2754,6 +2846,9 @@ class EventingTracer(TracerBase):
             key = key.strip().lower()
             value = value.strip()
             if key:
+                # Normalize error field to filter out placeholder values
+                if key == "error":
+                    value = normalize_error_value(value)
                 fields[key] = value
 
         self._stream_structured_fields = fields or None

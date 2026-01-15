@@ -377,6 +377,8 @@ const source = new EventSource(url);
 | `profile_switch`, `hook_triggered` | ✅ Yes | ✅ Yes |
 | `conversation_turn` | ✅ Yes | ✅ Yes |
 | `metrics_update` | ✅ Yes | ✅ Yes |
+| `question_pending` | ✅ Yes | ✅ Yes |
+| `question_answered` | ✅ Yes | ✅ Yes |
 
 **Algorithm Notes:**
 - Streaming events are emitted as partial chunks to the UI for real-time feedback
@@ -475,6 +477,60 @@ A task terminates when:
 | `session_connect` | Session connected | `session_id` |
 | `session_disconnect` | Session disconnected | `session_id`, `total_turns`, `total_duration_ms` |
 | `metrics_update` | Metrics changed | Token counts, cost, turns |
+
+### Human-in-the-Loop Event Types
+
+| Event Type | When Emitted | Key Data Fields |
+|------------|--------------|-----------------|
+| `question_pending` | Agent asks user a question via AskUserQuestion tool | `question_id`, `questions` array, `session_id` |
+| `question_answered` | User submits answer via /sessions/{id}/answer | `question_id`, `answer`, `session_id` |
+
+**Human-in-the-Loop Flow:**
+1. Agent calls `mcp__ag3ntum__AskUserQuestion` tool
+2. Tool emits `question_pending` event and returns STOP signal
+3. Session status changes to `waiting_for_input`
+4. Frontend displays question UI (user can take hours/days to answer)
+5. User submits answer → `question_answered` event emitted
+6. User resumes session → agent continues with answer in context
+
+**Frontend Buffering for AskUserQuestion:**
+
+The frontend uses a special buffering mechanism to prevent the AskUserQuestion form from flickering or jumping between messages during live SSE streaming:
+
+```typescript
+// In App.tsx useMemo - conversation building from events
+let bufferedAskUserQuestions: ToolCallView[] = [];
+let lastAgentMessage: ConversationItem | null = null;
+
+// During streaming:
+case 'tool_start':
+  if (isAskUserQuestion(toolName)):
+    bufferedAskUserQuestions.push(newTool);  // Buffer, don't attach yet
+  else:
+    attach to lastAgentMessage;
+
+case 'agent_complete':
+  // FLUSH: Now attach buffered AskUserQuestion tools to message
+  if (bufferedAskUserQuestions.length > 0):
+    attach all to lastAgentMessage;
+    bufferedAskUserQuestions = [];
+```
+
+**Why Buffering?** During SSE streaming, the `useMemo` recalculates on every new event. If AskUserQuestion tools were attached immediately, the form would "jump" between messages as new events arrived. Buffering until `agent_complete` ensures the form appears exactly once at the end of streaming.
+
+**Resume Context Stripping:**
+
+When a session is resumed, the backend wraps context in `<resume-context>...</resume-context>` tags. This is LLM-only content that should not be displayed to users:
+
+```typescript
+function stripResumeContext(text: string): string {
+  return text.replace(/<resume-context>[\s\S]*?<\/resume-context>\s*/g, '').trim();
+}
+```
+
+This is applied to both user messages (MessageBlock) and agent messages (AgentMessageBlock).
+
+**Related Documentation:** See [docs/ask-user-question-logic.md](ask-user-question-logic.md) for the complete control flow including component hierarchy and API endpoints
 
 ### Terminal Events
 
@@ -734,18 +790,31 @@ function buildUrl(): string {
 │ pending │───────────────▶│ running │──────────────────▶│ complete │
 └─────────┘                └────┬────┘                   └──────────┘
                                │
-                               │ error event
-                               ▼
-                          ┌─────────┐
-                          │ failed  │
-                          └─────────┘
+                               ├──── error event ────▶ ┌─────────┐
+                               │                       │ failed  │
+                               │                       └─────────┘
                                │
-                               │ POST /cancel
-                               ▼
-                         ┌───────────┐
-                         │ cancelled │
-                         └───────────┘
+                               ├──── POST /cancel ───▶ ┌───────────┐
+                               │                       │ cancelled │
+                               │                       └───────────┘
+                               │
+                               └── AskUserQuestion ──▶ ┌───────────────────┐
+                                                       │ waiting_for_input │
+                                                       └─────────┬─────────┘
+                                                                 │
+                                                    POST /answer │
+                                                   + POST /task  │ (resume)
+                                                                 ▼
+                                                           ┌─────────┐
+                                                           │ running │
+                                                           └─────────┘
 ```
+
+**`waiting_for_input` Status:**
+- Session stopped, agent not running
+- Pending question waiting for user answer
+- Session is resumable after user answers
+- User can take hours/days to respond
 
 ### Cancellation Flow
 

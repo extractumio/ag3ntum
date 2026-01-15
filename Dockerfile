@@ -52,8 +52,8 @@ COPY entrypoint-web.sh /entrypoint-web.sh
 RUN chmod +x /entrypoint-web.sh
 
 # Create runtime directories and set ownership of application directories to ag3ntum_api
-RUN mkdir -p /data \
-    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv \
+RUN mkdir -p /data /sessions \
+    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions \
     && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /requirements.txt
 
 ENV AG3NTUM_ROOT=/

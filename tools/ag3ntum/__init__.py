@@ -52,6 +52,13 @@ from .ag3ntum_webfetch import (
     create_webfetch_tool,
     create_ag3ntum_webfetch_mcp_server,
 )
+from .ag3ntum_ask import (
+    create_ask_user_question_tool,
+    create_ag3ntum_ask_mcp_server,
+    AG3NTUM_ASK_TOOL,
+    get_pending_question,
+    submit_answer,
+)
 from .ag3ntum_file_tools import (
     create_ag3ntum_tools_mcp_server,
 )
@@ -85,4 +92,10 @@ __all__ = [
     "create_ag3ntum_grep_mcp_server",
     "create_ag3ntum_ls_mcp_server",
     "create_ag3ntum_webfetch_mcp_server",
+    # AskUserQuestion tool
+    "create_ask_user_question_tool",
+    "create_ag3ntum_ask_mcp_server",
+    "AG3NTUM_ASK_TOOL",
+    "get_pending_question",
+    "submit_answer",
 ]

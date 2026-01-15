@@ -613,8 +613,73 @@ All file and command operations use Ag3ntum MCP tools with built-in security:
 | `mcp__ag3ntum__LS` | PathValidator | List directory contents |
 | `mcp__ag3ntum__Bash` | Bubblewrap Sandbox | Execute shell commands |
 | `mcp__ag3ntum__WebFetch` | Domain Blocklist | Fetch web content |
+| `mcp__ag3ntum__AskUserQuestion` | Event-based HITL | Human-in-the-loop questions |
 
 **Native tools blocked:** `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `LS`, `WebFetch`
+
+### 4.5 Human-in-the-Loop (AskUserQuestion)
+
+The `mcp__ag3ntum__AskUserQuestion` tool enables true human-in-the-loop interactions where:
+
+1. **Agent STOPS execution** (not pause/poll) when calling AskUserQuestion
+2. **Question stored as event** in the session event stream
+3. **User can answer hours/days later** via the frontend
+4. **Session can be RESUMED** with the answer using Claude Code's resume capability
+
+**Flow:**
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     HUMAN-IN-THE-LOOP FLOW                                   │
+│                                                                              │
+│  1. Agent calls mcp__ag3ntum__AskUserQuestion(questions=[...])              │
+│     │                                                                        │
+│     ▼                                                                        │
+│  2. Tool emits "question_pending" event to SSE stream                       │
+│     │                                                                        │
+│     ▼                                                                        │
+│  3. Tool returns STOP signal → Agent execution ends gracefully              │
+│     │                                                                        │
+│     ▼                                                                        │
+│  4. Session status → "waiting_for_input"                                    │
+│     │                                                                        │
+│     ▼                                                                        │
+│  5. Frontend displays question UI (user can take hours/days)                │
+│     │                                                                        │
+│     ▼ (user answers)                                                         │
+│  6. Frontend POSTs to /api/v1/sessions/{id}/answer                          │
+│     │                                                                        │
+│     ▼                                                                        │
+│  7. API emits "question_answered" event                                     │
+│     │                                                                        │
+│     ▼                                                                        │
+│  8. User resumes session → Agent continues with answer in context           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Event Types:**
+| Event Type | When Emitted | Key Data Fields |
+|------------|--------------|-----------------|
+| `question_pending` | Agent asks a question | `question_id`, `questions` array, `session_id` |
+| `question_answered` | User submits answer | `question_id`, `answer`, `session_id` |
+
+**Session Status Addition:**
+- `waiting_for_input` - Session stopped, waiting for user answer, resumable
+
+**Frontend Implementation Details:**
+
+The frontend handles AskUserQuestion with special buffering logic to prevent UI flickering:
+
+1. **Buffering Algorithm**: AskUserQuestion tools are buffered during streaming and only attached to messages when `agent_complete` event is received. This prevents the form from "jumping" between messages during live streaming.
+
+2. **Resume Context Hiding**: When a session is resumed with answered questions, the context is wrapped in `<resume-context>...</resume-context>` tags. The frontend's `stripResumeContext()` function removes these tags from display since they are LLM-only content.
+
+3. **Form Interactivity**: The AskUserQuestionBlock form is interactive when:
+   - `tool.status === 'running'` (tool still executing), OR
+   - `sessionStatus === 'waiting_for_input'` (session waiting for user response)
+
+4. **Answer Submission**: User answers are POSTed to `/api/v1/sessions/{id}/answer`, which emits a `question_answered` event and allows the session to be resumed.
+
+**Related Documentation:** See [docs/ask-user-question-logic.md](ask-user-question-logic.md) for detailed control flow including buffering algorithm, component hierarchy, and API endpoints.
 
 ---
 
@@ -1153,6 +1218,9 @@ Project/
 │       ├── ag3ntum_webfetch/ # mcp__ag3ntum__WebFetch (domain blocklist)
 │       │   ├── __init__.py
 │       │   └── tool.py
+│       ├── ag3ntum_ask/      # mcp__ag3ntum__AskUserQuestion (HITL)
+│       │   ├── __init__.py
+│       │   └── tool.py       # Event-based question/answer flow
 │       └── system_write_output/  # ag3ntum:write_output tool
 │           ├── __init__.py
 │           └── tool.py

@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...config import USERS_DIR
+from ...config import USERS_DIR, get_config_loader
 from ...db.database import get_db
 from ...db.models import User
 from ...services.agent_runner import agent_runner, TaskParams
@@ -43,11 +43,85 @@ from ..models import (
     SessionListResponse,
     SessionResponse,
     StartTaskRequest,
+    SubmitAnswerRequest,
+    SubmitAnswerResponse,
     TaskStartedResponse,
     TokenUsageResponse,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+# Default values for large input handling (overridden by agent.yaml)
+_LARGE_INPUT_DEFAULTS = {
+    "threshold_bytes": 200 * 1024,  # 200KB
+    "filename": "huge_user_input.txt",
+    "message_template": "Run the user request from the file ./{filename} ({size})",
+}
+
+
+def _get_large_input_config() -> dict:
+    """Get large input configuration from agent.yaml with defaults."""
+    loader = get_config_loader()
+    return loader.get_section("large_input", _LARGE_INPUT_DEFAULTS)
+
+
+def process_large_user_input(task: str, workspace_dir: Path) -> str:
+    """
+    Process user input and store to file if it exceeds the configured size threshold.
+
+    If the task content exceeds the threshold configured in agent.yaml (large_input.threshold_bytes),
+    saves it to a file in the workspace and returns a transformed task instructing the agent
+    to read from that file.
+
+    Each large input gets a unique filename with timestamp to prevent collisions when
+    multiple large inputs are submitted to the same session.
+
+    Args:
+        task: The original user task/input text.
+        workspace_dir: Path to the session's workspace directory.
+
+    Returns:
+        Either the original task (if small) or a transformed task pointing to the file.
+    """
+    config = _get_large_input_config()
+    threshold_bytes = config.get("threshold_bytes", _LARGE_INPUT_DEFAULTS["threshold_bytes"])
+    base_filename = config.get("filename", _LARGE_INPUT_DEFAULTS["filename"])
+    message_template = config.get("message_template", _LARGE_INPUT_DEFAULTS["message_template"])
+
+    task_bytes = task.encode('utf-8')
+    task_size = len(task_bytes)
+
+    if task_size <= threshold_bytes:
+        return task
+
+    # Ensure workspace directory exists
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename with timestamp to avoid collisions
+    # Format: huge_user_input_20260115_123456.txt
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    name_parts = base_filename.rsplit('.', 1)
+    if len(name_parts) == 2:
+        filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+    else:
+        filename = f"{base_filename}_{timestamp}"
+
+    # Write the large input to file
+    input_file_path = workspace_dir / filename
+    input_file_path.write_text(task, encoding='utf-8')
+
+    # Format size for display
+    if task_size >= 1024 * 1024:
+        size_str = f"{task_size / (1024 * 1024):.1f}MB"
+    else:
+        size_str = f"{task_size / 1024:.0f}KB"
+
+    logger.info(
+        f"Large user input ({size_str}) stored to {input_file_path}"
+    )
+
+    # Return transformed task using configured template
+    return message_template.format(filename=filename, size=size_str)
 
 
 def session_to_response(session, resumable: bool | None = None) -> SessionResponse:
@@ -59,9 +133,13 @@ def session_to_response(session, resumable: bool | None = None) -> SessionRespon
         resumable: Optional override for resumability. If None, determined from session_info.
     """
     # Determine resumability if not explicitly provided
-    if resumable is None and session.status == "cancelled":
-        session_info = session_service.get_session_info(session.id)
-        resumable = bool(session_info.get("resume_id"))
+    if resumable is None:
+        if session.status == "waiting_for_input":
+            # Sessions waiting for user input are always resumable
+            resumable = True
+        elif session.status == "cancelled":
+            session_info = session_service.get_session_info(session.id)
+            resumable = bool(session_info.get("resume_id"))
 
     return SessionResponse(
         id=session.id,
@@ -78,11 +156,48 @@ def session_to_response(session, resumable: bool | None = None) -> SessionRespon
         resumable=resumable,
     )
 
-async def record_user_message_event(session_id: str, text: str) -> None:
+async def record_user_message_event(session_id: str, text: str, processed_text: str | None = None) -> None:
+    """
+    Record a user message event.
+
+    Args:
+        session_id: The session ID.
+        text: The original user message (for display, may be truncated).
+        processed_text: The processed message sent to LLM (if different from text).
+                       When large input is stored to file, this contains the redirect message.
+    """
     last_sequence = await event_service.get_last_sequence(session_id)
+
+    # Get large input config for threshold
+    config = _get_large_input_config()
+    threshold_bytes = config.get("threshold_bytes", _LARGE_INPUT_DEFAULTS["threshold_bytes"])
+
+    # Check if text exceeds threshold
+    text_bytes = text.encode('utf-8')
+    text_size = len(text_bytes)
+
+    # Build event data
+    event_data: dict[str, Any] = {"text": text, "session_id": session_id}
+
+    # If text is large, add truncation info for frontend
+    if text_size > threshold_bytes:
+        # Format size for display
+        if text_size >= 1024 * 1024:
+            size_str = f"{text_size / (1024 * 1024):.1f}MB"
+        else:
+            size_str = f"{text_size / 1024:.0f}KB"
+
+        event_data["is_large"] = True
+        event_data["size_display"] = size_str
+        event_data["size_bytes"] = text_size
+
+        # If processed_text is provided (file redirect), include it
+        if processed_text and processed_text != text:
+            event_data["processed_text"] = processed_text
+
     event = {
         "type": "user_message",
-        "data": {"text": text, "session_id": session_id},
+        "data": event_data,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "sequence": last_sequence + 1,
         "session_id": session_id,
@@ -91,13 +206,18 @@ async def record_user_message_event(session_id: str, text: str) -> None:
     await agent_runner.publish_event(session_id, event)
 
 
-async def build_resume_context(session_id: str) -> tuple[str | None, bool]:
+async def build_resume_context(session_id: str, is_waiting_for_input: bool = False) -> tuple[str | None, bool]:
     """
-    Build resume context for a cancelled session.
+    Build resume context for a cancelled or waiting_for_input session.
 
     Analyzes previous events to determine:
     - Whether session is resumable (has agent_start event)
     - What todo state was at cancellation
+    - User answers to pending questions (human-in-the-loop)
+
+    Args:
+        session_id: The session ID.
+        is_waiting_for_input: True if session was waiting for user input.
 
     Returns:
         Tuple of (context_string, is_resumable).
@@ -121,13 +241,36 @@ async def build_resume_context(session_id: str) -> tuple[str | None, bool]:
                 todos = data["todos"]
                 break
 
-    # Build context
-    context_lines = ["[RESUME CONTEXT]"]
-    context_lines.append("Previous execution was cancelled by user.")
+    # Build context wrapped in resume-context tags so it's not shown in UI
+    context_lines = ["<resume-context>"]
+
+    if is_waiting_for_input:
+        context_lines.append("Previous execution paused waiting for user input.")
+    else:
+        context_lines.append("Previous execution was cancelled by user.")
+
+    # Get answered questions from events (human-in-the-loop)
+    try:
+        from tools.ag3ntum.ag3ntum_ask.tool import get_answered_questions_from_events
+        answered_questions = await get_answered_questions_from_events(session_id)
+
+        if answered_questions:
+            context_lines.append("")
+            context_lines.append("User answered the following questions:")
+            for aq in answered_questions:
+                questions = aq.get("questions", [])
+                answer = aq.get("answer", "")
+                for q in questions:
+                    question_text = q.get("question", "Unknown question")
+                    context_lines.append(f"  Q: {question_text}")
+                context_lines.append(f"  A: {answer}")
+                context_lines.append("")
+    except Exception as e:
+        logger.warning(f"Failed to get answered questions from events: {e}")
 
     if todos:
         context_lines.append("")
-        context_lines.append("Todo state at cancellation:")
+        context_lines.append("Todo state at pause:")
         for todo in todos:
             status_icon = {
                 "completed": "✓",
@@ -144,7 +287,7 @@ async def build_resume_context(session_id: str) -> tuple[str | None, bool]:
             context_lines.append("")
             context_lines.append("Note: Task(s) marked in_progress were interrupted and may be incomplete.")
 
-    context_lines.append("[END RESUME CONTEXT]")
+    context_lines.append("</resume-context>")
     context_lines.append("")
 
     return "\n".join(context_lines), True
@@ -237,11 +380,15 @@ async def run_task(
         sessions_dir=user_sessions_dir,
     )
 
+    # Process large user input: if task exceeds 200KB, store to file
+    workspace_dir = user_sessions_dir / session.id / "workspace"
+    task_for_agent = process_large_user_input(request.task, workspace_dir)
+
     # Build task parameters (pass same sessions_dir through the chain)
     params = build_task_params(
         session_id=session.id,
         user_id=user_id,
-        task=request.task,
+        task=task_for_agent,
         additional_dirs=request.additional_dirs,
         resume_session_id=request.resume_session_id,
         fork_session=request.fork_session,
@@ -249,7 +396,12 @@ async def run_task(
         sessions_dir=user_sessions_dir,
     )
 
-    await record_user_message_event(session.id, request.task)
+    # Record user message event with processed text for LLM reference
+    await record_user_message_event(
+        session.id,
+        request.task,
+        processed_text=task_for_agent if task_for_agent != request.task else None
+    )
 
     # Start the agent in background
     await agent_runner.start_task(params)
@@ -424,12 +576,17 @@ async def start_task(
         )
 
     # Use request.task if provided, otherwise fall back to session.task
-    task_to_run = request.task or session.task
-    if not task_to_run:
+    original_task = request.task or session.task
+    if not original_task:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No task specified. Provide task in request or create session with task.",
         )
+
+    # Process large user input: if task exceeds 200KB, store to file
+    workspace_dir = user_sessions_dir / session_id / "workspace"
+    processed_task = process_large_user_input(original_task, workspace_dir)
+    task_to_run = processed_task
 
     # Determine resume session:
     # - If request.resume_session_id is set, resume from that session
@@ -441,10 +598,14 @@ async def start_task(
             # This session has history, resume from itself
             resume_from = session_id
 
-    # Check if resuming a cancelled session and build resume context
+    # Check if resuming a cancelled or waiting_for_input session and build resume context
     is_resumable = True
-    if session.status == "cancelled" and resume_from:
-        resume_context, is_resumable = await build_resume_context(session_id)
+    if session.status in ("cancelled", "waiting_for_input") and resume_from:
+        is_waiting_for_input = session.status == "waiting_for_input"
+        resume_context, is_resumable = await build_resume_context(
+            session_id,
+            is_waiting_for_input=is_waiting_for_input
+        )
 
         if not is_resumable:
             # Session was cancelled before agent_start - not resumable
@@ -470,7 +631,12 @@ async def start_task(
         sessions_dir=user_sessions_dir,
     )
 
-    await record_user_message_event(session_id, task_to_run)
+    # Record user message event with processed text for LLM reference
+    await record_user_message_event(
+        session_id,
+        original_task,
+        processed_text=processed_task if processed_task != original_task else None
+    )
 
     # Start the agent in background
     await agent_runner.start_task(params)
@@ -905,3 +1071,109 @@ async def get_session_file(
         )
 
     return FileResponse(file_path, filename=file_path.name)
+
+
+# =============================================================================
+# POST /sessions/{id}/answer - Submit answer to AskUserQuestion
+# =============================================================================
+
+@router.post("/{session_id}/answer", response_model=SubmitAnswerResponse)
+async def submit_answer(
+    session_id: str,
+    request: SubmitAnswerRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> SubmitAnswerResponse:
+    """
+    Submit an answer to a pending AskUserQuestion tool call.
+
+    This endpoint is called by the frontend when the user selects options
+    and clicks submit on an AskUserQuestion interactive UI.
+
+    The answer is stored as a question_answered event in the session's
+    event stream. After submitting, the session can be resumed to continue
+    agent execution with the user's answer in context.
+    """
+    # Verify session exists and belongs to user
+    session = await session_service.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    # Use the event-based submit function
+    from tools.ag3ntum.ag3ntum_ask.tool import submit_answer_as_event
+
+    success = await submit_answer_as_event(
+        session_id=session_id,
+        question_id=request.question_id,
+        answer=request.answer,
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No pending question found with ID: {request.question_id}",
+        )
+
+    logger.info(
+        f"Answer submitted for session {session_id}, question {request.question_id}"
+    )
+
+    # Session can be resumed now that the answer is submitted
+    return SubmitAnswerResponse(
+        success=True,
+        message="Answer submitted successfully. You can now resume the session.",
+        can_resume=True,
+    )
+
+
+# =============================================================================
+# GET /sessions/{id}/pending-question - Get pending question for session
+# =============================================================================
+
+@router.get("/{session_id}/pending-question")
+async def get_pending_question(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Get the current pending question for a session.
+
+    Returns the pending question if one exists and is waiting for an answer.
+    Reads from the session's event stream (question_pending events).
+    """
+    # Verify session exists and belongs to user
+    session = await session_service.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    # Use the event-based query function
+    from tools.ag3ntum.ag3ntum_ask.tool import get_pending_question_from_events
+
+    pending = await get_pending_question_from_events(session_id)
+
+    if not pending:
+        return {"has_pending_question": False}
+
+    return {
+        "has_pending_question": True,
+        "question_id": pending["question_id"],
+        "questions": pending["questions"],
+        "created_at": pending.get("timestamp"),
+    }

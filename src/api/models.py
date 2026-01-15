@@ -358,3 +358,19 @@ class ErrorResponse(BaseModel):
     """Standard error response."""
     detail: str = Field(description="Error message")
     code: Optional[str] = Field(default=None, description="Error code")
+
+
+class SubmitAnswerRequest(BaseModel):
+    """Request body for POST /sessions/{id}/answer."""
+    question_id: str = Field(description="ID of the question being answered")
+    answer: str = Field(description="User's answer to the question")
+
+
+class SubmitAnswerResponse(BaseModel):
+    """Response from POST /sessions/{id}/answer."""
+    success: bool = Field(description="Whether the answer was submitted successfully")
+    message: str = Field(description="Status message")
+    can_resume: bool = Field(
+        default=False,
+        description="Whether the session can be resumed now that the answer is submitted"
+    )

@@ -36,7 +36,7 @@ from typing import Optional
 import yaml
 
 # Import paths from central config
-from ..config import SKILLS_DIR
+from ..config import SKILLS_DIR, USERS_DIR
 from .exceptions import SkillError
 from .tool_utils import build_script_command
 
@@ -45,6 +45,46 @@ logger = logging.getLogger(__name__)
 # Constants for text truncation limits
 DESCRIPTION_PREVIEW_LENGTH = 50
 BODY_PREVIEW_LENGTH = 200
+
+
+def discover_merged_skills(username: str | None = None) -> dict[str, Path]:
+    """
+    Discover skills from global and user directories with proper merging.
+
+    Skills are discovered from:
+    1. Global skills: SKILLS_DIR/.claude/skills/
+    2. User skills: USERS_DIR/<username>/.claude/skills/
+
+    User skills with the same name override global skills.
+
+    This function is used by both:
+    - agent_core._setup_workspace_skills() for setting up session workspaces
+    - API endpoints for listing available skills
+
+    Args:
+        username: Optional username for user-specific skills.
+
+    Returns:
+        Dict mapping skill_name -> source_path, with user skills overriding global.
+    """
+    skill_sources: dict[str, Path] = {}
+
+    # 1. Add global skills
+    global_skills_dir = SKILLS_DIR / ".claude" / "skills"
+    if global_skills_dir.exists():
+        for skill_dir in global_skills_dir.iterdir():
+            if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                skill_sources[skill_dir.name] = skill_dir
+
+    # 2. Add user skills (overrides global)
+    if username:
+        user_skills_dir = USERS_DIR / username / ".claude" / "skills"
+        if user_skills_dir.exists():
+            for skill_dir in user_skills_dir.iterdir():
+                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                    skill_sources[skill_dir.name] = skill_dir  # Override
+
+    return skill_sources
 
 
 def _parse_skill_frontmatter(content: str) -> tuple[str, str, str]:

@@ -35,6 +35,7 @@ interface FileExplorerProps {
   showHiddenFiles?: boolean;
   className?: string;
   onError?: (error: string) => void;
+  onModalStateChange?: (isModalOpen: boolean) => void;
 }
 
 interface ExpandedFolders {
@@ -288,6 +289,20 @@ function DeleteConfirmModal({
   onConfirm,
   onCancel,
 }: DeleteConfirmModalProps): JSX.Element {
+  // Handle ESC key to close modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isDeleting) {
+        e.preventDefault();
+        e.stopPropagation();
+        onCancel();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isDeleting, onCancel]);
+
   return (
     <div className="file-delete-overlay" onClick={onCancel}>
       <div className="file-delete-modal" onClick={(e) => e.stopPropagation()}>
@@ -457,6 +472,7 @@ export function FileExplorer({
   showHiddenFiles = false,
   className = '',
   onError,
+  onModalStateChange,
 }: FileExplorerProps): JSX.Element {
   // State
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -479,6 +495,12 @@ export function FileExplorer({
   // Delete modal state
   const [deleteTarget, setDeleteTarget] = useState<FileInfo | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Notify parent when modal state changes (for ESC key handling)
+  useEffect(() => {
+    const isModalOpen = previewFile !== null || isLoadingPreview || deleteTarget !== null;
+    onModalStateChange?.(isModalOpen);
+  }, [previewFile, isLoadingPreview, deleteTarget, onModalStateChange]);
 
   // Load root directory
   const loadRootFiles = useCallback(async () => {

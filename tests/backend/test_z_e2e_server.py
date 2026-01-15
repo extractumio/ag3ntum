@@ -150,6 +150,9 @@ def test_environment() -> Generator[dict, None, None]:
             "algorithm": "HS256",
             "expiry_hours": 168,
         },
+        "redis": {
+            "url": "redis://redis:6379/0",  # Use Docker redis service name
+        },
     }
     with open(temp_config / "api.yaml", "w") as f:
         yaml.dump(api_config, f)
@@ -179,7 +182,11 @@ SERVER_RUNNER_SCRIPT = '''
 """Standalone server runner for E2E tests with full config support."""
 import sys
 import os
+import logging
 from pathlib import Path
+
+# Set up logging to see errors
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s - %(name)s - %(message)s")
 
 # Get config from environment
 config_dir = Path(os.environ["AG3NTUM_E2E_CONFIG_DIR"])
@@ -239,7 +246,7 @@ import uvicorn
 from src.api.main import create_app
 
 app = create_app()
-uvicorn.run(app, host=host, port=port, log_level="warning")
+uvicorn.run(app, host=host, port=port, log_level="debug")
 '''
 
 
@@ -286,24 +293,27 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
     env["AG3NTUM_E2E_HOST"] = host
     env["AG3NTUM_E2E_PROJECT_ROOT"] = str(PROJECT_ROOT)
 
-    # Start server as subprocess
+    # Start server as subprocess - write stderr to file for debugging
+    stderr_log = temp_base / "server_stderr.log"
+    stderr_file = open(stderr_log, "w")
+
     python_executable = sys.executable
     process = subprocess.Popen(
         [python_executable, str(runner_script)],
         env=env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_file,
         cwd=str(PROJECT_ROOT),
     )
 
     # Wait for server to be ready
     if not wait_for_server(host, port, timeout=15.0):
-        stdout, stderr = process.communicate(timeout=2)
         process.terminate()
+        stderr_file.close()
+        stderr_content = stderr_log.read_text() if stderr_log.exists() else "(no stderr)"
         pytest.fail(
             f"Server failed to start on {host}:{port}\n"
-            f"stdout: {stdout.decode()}\n"
-            f"stderr: {stderr.decode()}"
+            f"stderr:\n{stderr_content}"
         )
 
     time.sleep(0.3)
@@ -381,6 +391,7 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
         **test_environment,
         "process": process,
         "test_user": test_user_credentials,
+        "stderr_log": stderr_log,
     }
 
     # Shutdown server
@@ -391,6 +402,9 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
+
+    # Close stderr file
+    stderr_file.close()
 
 
 class TestServerStartup:
@@ -780,8 +794,16 @@ class TestAgentExecution:
             timeout=10.0,
         )
 
-        assert run_response.status_code == 201, \
-            f"Failed to start task: {run_response.json()}"
+        if run_response.status_code != 201:
+            # Read server stderr log for debugging
+            stderr_log = running_server.get("stderr_log")
+            if stderr_log and stderr_log.exists():
+                stderr_content = stderr_log.read_text()
+                # Print last 2000 chars to avoid overwhelming output
+                if len(stderr_content) > 2000:
+                    stderr_content = f"...(truncated)...\n{stderr_content[-2000:]}"
+                print(f"\n=== Server stderr log ===\n{stderr_content}\n========================")
+            pytest.fail(f"Failed to start task (status {run_response.status_code}): {run_response.text}")
         session_id = run_response.json()["session_id"]
 
         # Wait for agent to complete (poll with timeout)

@@ -48,6 +48,9 @@ _SYSTEM_REMINDER_PATTERN = re.compile(
     re.DOTALL
 )
 
+# Pattern to match mcp__ag3ntum__ToolName and capture just ToolName
+_MCP_TOOL_NAME_PATTERN = re.compile(r'mcp__ag3ntum__(\w+)')
+
 
 def strip_system_reminders(text: str) -> str:
     """
@@ -64,6 +67,44 @@ def strip_system_reminders(text: str) -> str:
     if '<system-reminder>' not in text:
         return text
     return _SYSTEM_REMINDER_PATTERN.sub('', text)
+
+
+def sanitize_tool_names_in_text(text: str) -> str:
+    """
+    Replace internal MCP tool names with user-friendly names in text.
+
+    Converts mcp__ag3ntum__ToolName to just ToolName for display to users.
+    The actual tool IDs in messages remain unchanged - this only affects
+    text content shown to end users.
+
+    Args:
+        text: Input text that may contain MCP tool name references.
+
+    Returns:
+        Text with tool names sanitized for user display.
+    """
+    if 'mcp__ag3ntum__' not in text:
+        return text
+    return _MCP_TOOL_NAME_PATTERN.sub(r'\1', text)
+
+
+def sanitize_text_for_display(text: str) -> str:
+    """
+    Apply all text sanitization filters for user-facing display.
+
+    Combines multiple filters:
+    - Removes <system-reminder> blocks
+    - Converts mcp__ag3ntum__ToolName to ToolName
+
+    Args:
+        text: Input text from agent output.
+
+    Returns:
+        Sanitized text suitable for display to end users.
+    """
+    result = strip_system_reminders(text)
+    result = sanitize_tool_names_in_text(result)
+    return result
 
 
 # Type alias for SDK messages
@@ -280,7 +321,7 @@ class TraceProcessor:
     def _process_content_block(self, block: ContentBlock) -> None:
         """Process a single content block."""
         if isinstance(block, TextBlock):
-            self.tracer.on_message(strip_system_reminders(block.text))
+            self.tracer.on_message(sanitize_text_for_display(block.text))
 
         elif isinstance(block, ThinkingBlock):
             self.tracer.on_thinking(block.thinking)
@@ -346,7 +387,7 @@ class TraceProcessor:
     def _process_dict_block(self, block: dict[str, Any]) -> None:
         """Process a dictionary-style content block."""
         if "text" in block:
-            self.tracer.on_message(strip_system_reminders(block["text"]))
+            self.tracer.on_message(sanitize_text_for_display(block["text"]))
         elif "thinking" in block:
             self.tracer.on_thinking(block["thinking"])
         elif "name" in block and "input" in block:
@@ -354,31 +395,46 @@ class TraceProcessor:
             tool_id = block.get("id", "unknown")
             tool_name = block["name"]
             tool_input = block["input"]
-            self._pending_tool_calls[tool_id] = {
-                "name": tool_name,
-                "input": tool_input,
-            }
-            self.tracer.on_tool_start(
-                tool_name=tool_name,
-                tool_input=tool_input,
-                tool_id=tool_id
-            )
 
-            # Track Task tool invocations for subagent tracing
-            if tool_name == "Task":
-                input_dict = tool_input if isinstance(tool_input, dict) else {}
-                subagent_name = input_dict.get("subagent_type", "unknown")
-                prompt = input_dict.get("prompt", "")
-                self._active_subagents[tool_id] = {
-                    "name": subagent_name,
-                    "start_time": time.time(),
-                    "prompt": prompt,
+            # Check if this tool was already started (from streaming)
+            # If so, emit tool_input_ready with the complete input instead of another tool_start
+            if tool_id in self._pending_tool_calls:
+                # Tool was already started during streaming - emit update with complete input
+                if hasattr(self.tracer, 'on_tool_input_ready') and tool_input:
+                    self.tracer.on_tool_input_ready(
+                        tool_name=tool_name,
+                        tool_id=tool_id,
+                        tool_input=tool_input,
+                    )
+                # Update the stored input
+                self._pending_tool_calls[tool_id]["input"] = tool_input
+            else:
+                # New tool - emit tool_start
+                self._pending_tool_calls[tool_id] = {
+                    "name": tool_name,
+                    "input": tool_input,
                 }
-                self.tracer.on_subagent_start(
-                    task_id=tool_id,
-                    subagent_name=subagent_name,
-                    prompt=prompt
+                self.tracer.on_tool_start(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_id=tool_id
                 )
+
+                # Track Task tool invocations for subagent tracing
+                if tool_name == "Task":
+                    input_dict = tool_input if isinstance(tool_input, dict) else {}
+                    subagent_name = input_dict.get("subagent_type", "unknown")
+                    prompt = input_dict.get("prompt", "")
+                    self._active_subagents[tool_id] = {
+                        "name": subagent_name,
+                        "start_time": time.time(),
+                        "prompt": prompt,
+                    }
+                    self.tracer.on_subagent_start(
+                        task_id=tool_id,
+                        subagent_name=subagent_name,
+                        prompt=prompt
+                    )
         elif "tool_use_id" in block:
             # Tool result
             tool_id = block["tool_use_id"]
@@ -536,8 +592,8 @@ class TraceProcessor:
             if isinstance(content_block, dict) and content_block.get("type") == "text":
                 text = content_block.get("text")
                 if isinstance(text, str) and text:
-                    # Filter out system-reminder tags from streaming text
-                    filtered_text = strip_system_reminders(text)
+                    # Sanitize text for display (removes system-reminders, cleans tool names)
+                    filtered_text = sanitize_text_for_display(text)
                     if filtered_text:
                         self._stream_has_text = True
                         # Route to subagent handler if in subagent context
@@ -555,8 +611,8 @@ class TraceProcessor:
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 text = delta.get("text")
                 if isinstance(text, str) and text:
-                    # Filter out system-reminder tags from streaming text
-                    filtered_text = strip_system_reminders(text)
+                    # Sanitize text for display (removes system-reminders, cleans tool names)
+                    filtered_text = sanitize_text_for_display(text)
                     if filtered_text:
                         self._stream_has_text = True
                         # Route to subagent handler if in subagent context
@@ -759,8 +815,28 @@ class TraceProcessor:
         self.tracer.on_metrics_update(payload)
 
     def _handle_unknown_message(self, message: Any) -> None:
-        """Handle unknown message types."""
+        """Handle unknown message types including SDK summary messages."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Check if this is an SDK summary message with complete tool content
+        # These have 'content' list but are not AssistantMessage instances
+        if hasattr(message, 'content') and isinstance(message.content, list):
+            logger.debug(f"Processing SDK summary message with {len(message.content)} content blocks")
+            for block in message.content:
+                if isinstance(block, dict):
+                    self._process_dict_block(block)
+            return
+
         if hasattr(message, '__dict__'):
+            # Try to extract content from __dict__ for SDK summary messages
+            msg_dict = message.__dict__
+            if 'content' in msg_dict and isinstance(msg_dict['content'], list):
+                logger.debug(f"Processing SDK summary message (from __dict__) with {len(msg_dict['content'])} content blocks")
+                for block in msg_dict['content']:
+                    if isinstance(block, dict):
+                        self._process_dict_block(block)
+                return
             self.tracer.on_message(f"[UNKNOWN] {type(message).__name__}")
 
 

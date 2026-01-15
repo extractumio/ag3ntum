@@ -8,15 +8,17 @@ import {
   getConfig,
   getSession,
   getSessionEvents,
+  getSkills,
   listSessions,
   runTask,
 } from './api';
 import { AuthProvider, useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import { FileExplorer } from './FileExplorer';
+import { renderMarkdownElements } from './MarkdownRenderer';
 import { ProtectedRoute } from './ProtectedRoute';
 import { connectSSE } from './sse';
-import type { AppConfig, SessionResponse, TerminalEvent } from './types';
+import type { AppConfig, SessionResponse, SkillInfo, TerminalEvent } from './types';
 
 type ResultStatus = 'complete' | 'partial' | 'failed' | 'running' | 'cancelled';
 
@@ -26,6 +28,10 @@ type ConversationItem =
       id: string;
       time: string;
       content: string;
+      isLarge?: boolean;
+      sizeDisplay?: string;
+      sizeBytes?: number;
+      processedText?: string;
     }
   | {
       type: 'agent_message';
@@ -66,6 +72,21 @@ type ToolCallView = {
   thinking?: string;
   error?: string;
   suggestion?: string;
+};
+
+// AskUserQuestion tool input structure (from Claude Agent SDK)
+type AskUserQuestionOption = {
+  label: string;
+  description?: string;
+};
+
+type AskUserQuestionInput = {
+  questions: Array<{
+    question: string;
+    header?: string;
+    options: AskUserQuestionOption[];
+    multiSelect?: boolean;
+  }>;
 };
 
 type SystemEventView = {
@@ -256,6 +277,75 @@ function normalizeStatus(value: string): string {
   return statusValue || 'idle';
 }
 
+/**
+ * Truncate session title to prevent UI breakage from huge inputs.
+ * - Removes all whitespace characters (\r\n, tabs, multiple spaces)
+ * - Takes first 80 chars max
+ * - Forces word break after 40 chars to prevent overflow
+ */
+function truncateSessionTitle(title: string | null | undefined): string {
+  if (!title) return 'No task';
+  // Normalize whitespace: replace all \r\n, tabs, and multiple spaces with single space
+  const normalized = title.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalized) return 'No task';
+  // Take first 80 chars
+  let truncated = normalized.slice(0, 80);
+  // Force word break after 40 chars by inserting zero-width space
+  if (truncated.length > 40) {
+    // Find a good break point (space) near the 40 char mark, or force break
+    const breakPoint = truncated.lastIndexOf(' ', 45);
+    if (breakPoint > 30) {
+      // There's a space reasonably close to 40 chars, keep it
+      truncated = truncated.slice(0, breakPoint) + ' ' + truncated.slice(breakPoint + 1);
+    } else {
+      // No good break point, insert zero-width space at 40 chars to allow wrapping
+      truncated = truncated.slice(0, 40) + '\u200B' + truncated.slice(40);
+    }
+  }
+  // Add ellipsis if we truncated
+  if (normalized.length > 80) {
+    truncated += '…';
+  }
+  return truncated;
+}
+
+/**
+ * Check if an error string represents a meaningful error that should be displayed.
+ * Filters out empty values and placeholder text like "None", "None yet", "No error", etc.
+ */
+function isMeaningfulError(error: string | undefined | null): boolean {
+  if (!error) {
+    return false;
+  }
+  const normalized = error.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  // Filter out common placeholder values that don't represent real errors
+  const placeholders = [
+    'none',
+    'none yet',
+    'no error',
+    'no errors',
+    'n/a',
+    'na',
+    'null',
+    'undefined',
+    'empty',
+    '-',
+    '',
+  ];
+  // Check exact matches
+  if (placeholders.includes(normalized)) {
+    return false;
+  }
+  // Check if it starts with common "no error" patterns
+  if (normalized.startsWith('none yet') || normalized.startsWith('no error')) {
+    return false;
+  }
+  return true;
+}
+
 type StructuredMessage = {
   body: string;
   fields: Record<string, string>;
@@ -396,212 +486,9 @@ function formatTimestamp(timestamp?: string): string {
   return date.toLocaleTimeString('en-US', { hour12: false });
 }
 
+// Wrapper for shared markdown renderer - uses 'md' class prefix for agent messages
 function renderMarkdown(text: string): JSX.Element[] {
-  const lines = text.split('\n');
-  const elements: JSX.Element[] = [];
-  let inCodeBlock = false;
-  let codeLines: string[] = [];
-
-  const isTableSeparator = (line: string): boolean => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return false;
-    }
-    const normalized = trimmed.startsWith('|') ? trimmed : `|${trimmed}`;
-    return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(normalized);
-  };
-
-  const splitTableRow = (line: string): string[] => {
-    const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-    return trimmed.split('|').map((cell) => cell.trim());
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    if (line.trim().startsWith('```')) {
-      if (inCodeBlock) {
-        elements.push(
-          <pre key={`code-${i}`} className="md-code-block">
-            {codeLines.join('\n')}
-          </pre>
-        );
-        codeLines = [];
-        inCodeBlock = false;
-      } else {
-        inCodeBlock = true;
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeLines.push(line);
-      continue;
-    }
-
-    let element: JSX.Element;
-
-    if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
-      const headerCells = splitTableRow(line);
-      const rows: string[][] = [];
-      i += 2;
-      while (i < lines.length && lines[i].includes('|')) {
-        rows.push(splitTableRow(lines[i]));
-        i += 1;
-      }
-      i -= 1;
-
-      element = (
-        <table key={`table-${i}`} className="md-table">
-          <thead>
-            <tr>
-              {headerCells.map((cell, idx) => (
-                <th key={`th-${idx}`}>{renderInlineMarkdown(cell)}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, rowIndex) => (
-              <tr key={`tr-${rowIndex}`}>
-                {row.map((cell, cellIndex) => (
-                  <td key={`td-${rowIndex}-${cellIndex}`}>{renderInlineMarkdown(cell)}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      );
-      elements.push(element);
-      continue;
-    }
-
-    if (line.startsWith('### ')) {
-      element = (
-        <div key={i} className="md-h3">
-          {renderInlineMarkdown(line.slice(4))}
-        </div>
-      );
-    } else if (line.startsWith('## ')) {
-      element = (
-        <div key={i} className="md-h2">
-          {renderInlineMarkdown(line.slice(3))}
-        </div>
-      );
-    } else if (line.startsWith('# ')) {
-      element = (
-        <div key={i} className="md-h1">
-          {renderInlineMarkdown(line.slice(2))}
-        </div>
-      );
-    } else if (/^[-—─]{3,}$/.test(line.trim())) {
-      element = <hr key={i} className="md-hr" />;
-    } else if (line.trimStart().startsWith('- ') || line.trimStart().startsWith('* ')) {
-      const indent = line.length - line.trimStart().length;
-      element = (
-        <div key={i} className="md-li" style={{ marginLeft: indent * 4 }}>
-          • {renderInlineMarkdown(line.trimStart().slice(2))}
-        </div>
-      );
-    } else if (/^\s*\d+\.\s/.test(line)) {
-      const match = line.match(/^(\s*)(\d+)\.\s(.*)$/);
-      if (match) {
-        const [, spaces, num, content] = match;
-        element = (
-          <div key={i} className="md-li" style={{ marginLeft: (spaces?.length ?? 0) * 4 }}>
-            {num}. {renderInlineMarkdown(content)}
-          </div>
-        );
-      } else {
-        element = <div key={i}>{renderInlineMarkdown(line)}</div>;
-      }
-    } else if (line.trim() === '') {
-      element = <div key={i} className="md-spacer" />;
-    } else {
-      element = <div key={i}>{renderInlineMarkdown(line)}</div>;
-    }
-
-    elements.push(element);
-  }
-
-  if (inCodeBlock && codeLines.length > 0) {
-    elements.push(
-      <pre key="code-final" className="md-code-block">
-        {codeLines.join('\n')}
-      </pre>
-    );
-  }
-
-  return elements;
-}
-
-function renderInlineMarkdown(text: string): (string | JSX.Element)[] {
-  const result: (string | JSX.Element)[] = [];
-  let key = 0;
-
-  const regex = /(!\[(.*?)\]\(([^)]+)\)|\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      result.push(text.slice(lastIndex, match.index));
-    }
-
-    const [
-      fullMatch,
-      ,
-      imageAlt,
-      imageUrl,
-      bold,
-      italic,
-      code,
-      linkText,
-      linkUrl,
-    ] = match;
-
-    if (imageUrl) {
-      result.push(
-        <img
-          key={key++}
-          src={imageUrl}
-          alt={imageAlt ?? ''}
-          className="md-image"
-        />
-      );
-    } else if (bold) {
-      result.push(
-        <strong key={key++} className="md-bold">
-          {bold}
-        </strong>
-      );
-    } else if (italic) {
-      result.push(
-        <em key={key++} className="md-italic">
-          {italic}
-        </em>
-      );
-    } else if (code) {
-      result.push(
-        <code key={key++} className="md-code">
-          {code}
-        </code>
-      );
-    } else if (linkText && linkUrl) {
-      result.push(
-        <a key={key++} href={linkUrl} className="md-link" target="_blank" rel="noopener noreferrer">
-          {linkText}
-        </a>
-      );
-    }
-
-    lastIndex = match.index + fullMatch.length;
-  }
-
-  if (lastIndex < text.length) {
-    result.push(text.slice(lastIndex));
-  }
-
-  return result.length > 0 ? result : [text];
+  return renderMarkdownElements(text, 'md');
 }
 
 function isSafeRelativePath(path: string): boolean {
@@ -903,6 +790,29 @@ function SubagentTag({ name, count }: { name: string; count?: number }): JSX.Ele
   );
 }
 
+function SkillTag({
+  id,
+  name,
+  description,
+  onClick
+}: {
+  id: string;
+  name: string;
+  description: string;
+  onClick: () => void;
+}): JSX.Element {
+  return (
+    <span
+      className="skill-tag"
+      onClick={onClick}
+      title={description || `Run /${id}`}
+    >
+      <span className="skill-symbol">⚡</span>
+      <span className="skill-name">{name}</span>
+    </span>
+  );
+}
+
 function generateConversationMarkdown(conversation: ConversationItem[]): string {
   const lines: string[] = [];
   
@@ -1024,6 +934,11 @@ function StatusSpinner(): JSX.Element {
   return <span className="status-spinner">{SPINNER_FRAMES[frame]}</span>;
 }
 
+// Pulsing filled circle spinner for structured elements (tools, skills, subagents)
+function PulsingCircleSpinner(): JSX.Element {
+  return <span className="pulsing-circle-spinner">●</span>;
+}
+
 function TodoProgressList({
   todos,
   overallStatus,
@@ -1073,23 +988,69 @@ function TodoProgressList({
   );
 }
 
-function MessageBlock({ 
-  sender, 
-  time, 
+// Strip <resume-context>...</resume-context> from display (LLM-only content)
+function stripResumeContext(text: string): string {
+  return text.replace(/<resume-context>[\s\S]*?<\/resume-context>\s*/g, '').trim();
+}
+
+// Number of lines to show for collapsed large user messages
+const USER_MESSAGE_COLLAPSED_LINES = 10;
+// Threshold for auto-collapsing user messages (in lines) - any message with more lines gets collapsed
+const USER_MESSAGE_AUTO_COLLAPSE_THRESHOLD = 20;
+
+function MessageBlock({
+  sender,
+  time,
   content,
   rightPanelCollapsed,
   isMobile,
-}: { 
-  sender: string; 
-  time: string; 
+  isLarge,
+  sizeDisplay,
+  processedText,
+}: {
+  sender: string;
+  time: string;
   content: string;
   rightPanelCollapsed: boolean;
   isMobile: boolean;
+  isLarge?: boolean;
+  sizeDisplay?: string;
+  processedText?: string;
 }): JSX.Element {
   const contentRef = useRef<HTMLDivElement>(null);
-  
+  const [isExpanded, setIsExpanded] = useState(false);
+
   // Match the layout of agent messages
   const showRightPanel = isMobile ? false : !rightPanelCollapsed;
+
+  // Strip resume-context tags (LLM-only content, not for display)
+  const fullContent = stripResumeContext(content);
+
+  // For large messages, truncate to first N lines when collapsed
+  // Collapse if: backend flagged as large OR content exceeds line threshold
+  const lines = fullContent.split('\n');
+  const totalLines = lines.length;
+  const needsCollapse = (isLarge || totalLines > USER_MESSAGE_AUTO_COLLAPSE_THRESHOLD) && totalLines > USER_MESSAGE_COLLAPSED_LINES;
+
+  // Compute size display if not provided by backend but message is large
+  const computedSizeDisplay = useMemo(() => {
+    if (sizeDisplay) return sizeDisplay;
+    if (!needsCollapse) return undefined;
+    const bytes = new Blob([fullContent]).size;
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    } else if (bytes >= 1024) {
+      return `${Math.round(bytes / 1024)}KB`;
+    }
+    return `${bytes}B`;
+  }, [sizeDisplay, needsCollapse, fullContent]);
+
+  const displayContent = useMemo(() => {
+    if (!needsCollapse || isExpanded) {
+      return fullContent;
+    }
+    return lines.slice(0, USER_MESSAGE_COLLAPSED_LINES).join('\n');
+  }, [fullContent, lines, needsCollapse, isExpanded]);
 
   return (
     <div className={`message-block user-message ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
@@ -1097,15 +1058,362 @@ function MessageBlock({
         <span className="message-icon">⟩</span>
         <span className="message-sender">{sender}</span>
         <span className="message-time">@ {time}</span>
-        <CopyButtons contentRef={contentRef} markdown={content} className="message-header-copy-buttons" />
+        {computedSizeDisplay && (
+          <span className="message-size-badge">({computedSizeDisplay})</span>
+        )}
+        <CopyButtons contentRef={contentRef} markdown={fullContent} className="message-header-copy-buttons" />
       </div>
       <div className="message-body">
         <div className={`message-column-left ${!showRightPanel ? 'full-width' : ''}`}>
-          <div ref={contentRef} className="message-content">{content}</div>
+          <div className="collapsible-output">
+            <div ref={contentRef} className="message-content">{displayContent}</div>
+            {needsCollapse && (
+              <button
+                className="output-expand-toggle"
+                onClick={() => setIsExpanded(!isExpanded)}
+                type="button"
+              >
+                {isExpanded
+                  ? '▲ Collapse'
+                  : `▼ Expand All (${totalLines} lines)`
+                }
+              </button>
+            )}
+          </div>
+          {isLarge && processedText && (
+            <div className="large-input-notice">
+              📁 Sent to agent as: <code>{processedText}</code>
+            </div>
+          )}
         </div>
         {showRightPanel && (
           <div className="message-column-right">
             {/* Empty right panel for consistent layout */}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Interactive component for AskUserQuestion tool calls
+// When inline=true, renders in message content area without tool panel styling
+// Human-in-the-loop: The tool may "complete" but still need user input
+function AskUserQuestionBlock({
+  tool,
+  onSubmitAnswer,
+  isLast,
+  inline = false,
+  sessionStatus,
+}: {
+  tool: ToolCallView;
+  onSubmitAnswer: (answer: string) => void;
+  isLast: boolean;
+  inline?: boolean;
+  sessionStatus?: string;
+}): JSX.Element {
+  const isRunning = tool.status === 'running';
+  const [selectedOptions, setSelectedOptions] = useState<Record<number, Set<string>>>({});
+  const [hasAnswered, setHasAnswered] = useState(false);
+  const [additionalComments, setAdditionalComments] = useState('');
+
+  // Parse the input to get questions
+  // Handle both direct input and JSON string format from MCP tools
+  // Note: tool.input may be '' (empty string) if tool_input was undefined in the event
+  const rawInput = tool.input;
+  let input: AskUserQuestionInput | Record<string, unknown> | undefined;
+
+  // Handle case where input is a string (could be empty or JSON stringified)
+  if (typeof rawInput === 'string') {
+    if (rawInput.trim() === '') {
+      input = undefined;
+    } else {
+      // Try to parse JSON string
+      try {
+        input = JSON.parse(rawInput);
+      } catch {
+        input = undefined;
+      }
+    }
+  } else {
+    input = rawInput as AskUserQuestionInput | Record<string, unknown> | undefined;
+  }
+
+  let questions: AskUserQuestionInput['questions'] = [];
+
+  if (input?.questions) {
+    if (Array.isArray(input.questions)) {
+      questions = input.questions;
+    } else if (typeof input.questions === 'string') {
+      // MCP tools may send questions as JSON string - parse it
+      try {
+        const parsed = JSON.parse(input.questions);
+        if (Array.isArray(parsed)) {
+          questions = parsed;
+        }
+      } catch {
+        // Ignore parse errors - questions may be incomplete during streaming
+      }
+    }
+  }
+
+  // Human-in-the-loop: Tool may complete but session is waiting for input
+  // In this case, we still want to allow user interaction
+  const isWaitingForInput = sessionStatus === 'waiting_for_input' ||
+    (tool.status === 'complete' && !tool.output?.includes('User has answered'));
+
+  // Show as interactive if tool is running OR waiting for human input
+  const isInteractive = tool.status === 'running' || (isWaitingForInput && !hasAnswered);
+
+  // Status icon (only show in non-inline mode) - no emojis, use text symbols
+  // Running state uses PulsingCircleSpinner component instead
+  const statusIcon =
+    isWaitingForInput ? '...' :
+    tool.status === 'complete' ? '[ok]' :
+    tool.status === 'failed' ? '[x]' : null;
+
+  const statusClass =
+    isWaitingForInput ? 'tool-status-waiting' :
+    tool.status === 'complete' ? 'tool-status-success' :
+    tool.status === 'failed' ? 'tool-status-error' :
+    tool.status === 'running' ? 'tool-status-running' : '';
+
+  const handleOptionClick = (questionIdx: number, optionLabel: string, multiSelect: boolean) => {
+    if (!isInteractive) return;
+
+    setSelectedOptions(prev => {
+      const current = prev[questionIdx] || new Set<string>();
+      const newSet = new Set(current);
+
+      if (multiSelect) {
+        if (newSet.has(optionLabel)) {
+          newSet.delete(optionLabel);
+        } else {
+          newSet.add(optionLabel);
+        }
+      } else {
+        // Single select - clear and set
+        newSet.clear();
+        newSet.add(optionLabel);
+      }
+
+      return { ...prev, [questionIdx]: newSet };
+    });
+  };
+
+  const handleSubmit = () => {
+    if (!isInteractive) return;
+
+    // Build answer from selected options
+    const answers: string[] = [];
+    questions.forEach((q, idx) => {
+      const selected = selectedOptions[idx];
+      if (selected && selected.size > 0) {
+        answers.push(Array.from(selected).join(', '));
+      }
+    });
+
+    if (answers.length > 0) {
+      setHasAnswered(true);
+      // Include additional comments if provided
+      const fullAnswer = additionalComments.trim()
+        ? `${answers.join('\n')}\n\nAdditional Comments: ${additionalComments.trim()}`
+        : answers.join('\n');
+      onSubmitAnswer(fullAnswer);
+    }
+  };
+
+  const hasSelection = Object.values(selectedOptions).some(s => s && s.size > 0);
+
+  // Inline rendering for message content area
+  if (inline) {
+    // If no questions parsed, show a loading/debug state
+    if (questions.length === 0) {
+      return (
+        <div className={`ask-user-question-inline ${statusClass}`}>
+          <div className="ask-waiting-banner">
+            <span className="ask-waiting-icon">[...]</span>
+            Loading questions...
+          </div>
+          {tool.input && (
+            <div className="ask-question-answer">
+              <span className="ask-answer-label">Debug input:</span>
+              <span className="ask-answer-value">{typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input)}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className={`ask-user-question-inline ${statusClass}`}>
+        {isWaitingForInput && !hasAnswered && (
+          <div className="ask-waiting-banner">
+            <span className="ask-waiting-icon">[...]</span>
+            The session is paused until you answer. 
+          </div>
+        )}
+
+        {questions.map((q, qIdx) => (
+          <div key={qIdx} className="ask-question-block">
+            {q.header && <div className="ask-question-header">{q.header}</div>}
+            <div className="ask-question-text">{q.question}</div>
+            <div className="ask-question-options">
+              {q.options.map((opt, optIdx) => {
+                const isSelected = selectedOptions[qIdx]?.has(opt.label) || false;
+                const isDisabled = !isInteractive;
+                return (
+                  <button
+                    key={optIdx}
+                    className={`ask-option-btn ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}`}
+                    onClick={() => handleOptionClick(qIdx, opt.label, q.multiSelect || false)}
+                    disabled={isDisabled}
+                    title={opt.description || opt.label}
+                  >
+                    <span className="ask-option-indicator"></span>
+                    <span className="ask-option-label">{opt.label}</span>
+                    {opt.description && (
+                      <span className="ask-option-description">{opt.description}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+
+        {isInteractive && (
+          <>
+            <div className="ask-additional-comments">
+              <div className="ask-additional-comments-label">Additional Comments</div>
+              <textarea
+                className="ask-additional-comments-textarea"
+                placeholder="Optional: Add any additional context or comments..."
+                value={additionalComments}
+                onChange={(e) => setAdditionalComments(e.target.value)}
+                rows={3}
+              />
+            </div>
+            <div className="ask-question-actions">
+              <button
+                className={`ask-submit-btn ${!hasSelection ? 'disabled' : ''}`}
+                onClick={handleSubmit}
+                disabled={!hasSelection}
+              >
+                [ Submit Answer ]
+              </button>
+              <span className="ask-hint">Select an option above to submit your answer</span>
+            </div>
+          </>
+        )}
+
+        {hasAnswered && (
+          <div className="ask-question-submitted">
+            <span className="ask-submitted-icon">[ok]</span> Answer submitted - resuming session...
+          </div>
+        )}
+
+        {tool.output && !isWaitingForInput && (
+          <div className="ask-question-answer">
+            <span className="ask-answer-label">Answer:</span>
+            <span className="ask-answer-value">{tool.output}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Tool panel rendering (original style)
+  const treeChar = isLast ? '└──' : '├──';
+  return (
+    <div className={`tool-call ask-user-question ${statusClass}`}>
+      <div className="tool-call-header">
+        <span className="tool-tree">{treeChar}</span>
+        {isRunning && (
+          <span className={`tool-status-icon ${statusClass}`}><PulsingCircleSpinner /></span>
+        )}
+        {statusIcon && (
+          <span className={`tool-status-icon ${statusClass}`}>{statusIcon}</span>
+        )}
+        <span className="ask-question-icon">[?]</span>
+        <span className="tool-name">AskUserQuestion</span>
+        <span className="tool-time">@ {tool.time}</span>
+        {!isInteractive && tool.durationMs !== undefined && (
+          <span className="tool-duration">({formatDuration(tool.durationMs)})</span>
+        )}
+      </div>
+
+      <div className="ask-user-question-body">
+        {isWaitingForInput && !hasAnswered && (
+          <div className="ask-waiting-banner">
+            <span className="ask-waiting-icon">[...]</span>
+            Waiting for your response - the session is paused until you answer
+          </div>
+        )}
+
+        {questions.map((q, qIdx) => (
+          <div key={qIdx} className="ask-question-block">
+            {q.header && <div className="ask-question-header">{q.header}</div>}
+            <div className="ask-question-text">{q.question}</div>
+            <div className="ask-question-options">
+              {q.options.map((opt, optIdx) => {
+                const isSelected = selectedOptions[qIdx]?.has(opt.label) || false;
+                const isDisabled = !isInteractive;
+                return (
+                  <button
+                    key={optIdx}
+                    className={`ask-option-btn ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}`}
+                    onClick={() => handleOptionClick(qIdx, opt.label, q.multiSelect || false)}
+                    disabled={isDisabled}
+                    title={opt.description || opt.label}
+                  >
+                    <span className="ask-option-indicator"></span>
+                    <span className="ask-option-label">{opt.label}</span>
+                    {opt.description && (
+                      <span className="ask-option-description">{opt.description}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+
+        {isInteractive && (
+          <>
+            <div className="ask-additional-comments">
+              <div className="ask-additional-comments-label">Additional Comments</div>
+              <textarea
+                className="ask-additional-comments-textarea"
+                placeholder="Optional: Add any additional context or comments..."
+                value={additionalComments}
+                onChange={(e) => setAdditionalComments(e.target.value)}
+                rows={3}
+              />
+            </div>
+            <div className="ask-question-actions">
+              <button
+                className={`ask-submit-btn ${!hasSelection ? 'disabled' : ''}`}
+                onClick={handleSubmit}
+                disabled={!hasSelection}
+              >
+                [ Submit Answer ]
+              </button>
+              <span className="ask-hint">Select an option above to submit your answer</span>
+            </div>
+          </>
+        )}
+
+        {hasAnswered && (
+          <div className="ask-question-submitted">
+            <span className="ask-submitted-icon">[ok]</span> Answer submitted - resuming session...
+          </div>
+        )}
+
+        {tool.output && !isWaitingForInput && (
+          <div className="ask-question-answer">
+            <span className="ask-answer-label">Answer:</span>
+            <span className="ask-answer-value">{tool.output}</span>
           </div>
         )}
       </div>
@@ -1124,72 +1432,74 @@ function ToolCallBlock({
   onToggle: () => void;
   isLast: boolean;
 }): JSX.Element {
-  const frame = useSpinnerFrame();
   const hasContent = Boolean(tool.thinking || tool.input || tool.output || tool.error);
   const treeChar = isLast ? '└──' : '├──';
-  
-  // Status icon: spinner while running, checkmark/cross when done
-  const statusIcon = 
-    tool.status === 'running' ? SPINNER_FRAMES[frame] :
+  const isRunning = tool.status === 'running';
+
+  // Status icon: pulsing circle while running, checkmark/cross when done
+  const statusIcon =
     tool.status === 'complete' ? '✓' :
     tool.status === 'failed' ? '✗' : null;
-  
-  const statusClass = 
+
+  const statusClass =
     tool.status === 'complete' ? 'tool-status-success' :
-    tool.status === 'failed' ? 'tool-status-error' : 
-    tool.status === 'running' ? 'tool-status-running' : '';
+    tool.status === 'failed' ? 'tool-status-error' :
+    isRunning ? 'tool-status-running' : '';
 
   // Tool-specific input preview (only while running)
   const getRunningPreview = (): string | null => {
-    if (tool.status !== 'running' || !tool.input) return null;
-    
+    if (!isRunning || !tool.input) return null;
+
     const input = tool.input as Record<string, unknown>;
     const toolName = tool.tool.toLowerCase();
-    
+
     // Ag3ntumWebFetch - show URL
     if (toolName.includes('webfetch') || toolName.includes('fetch')) {
       const url = input.url as string | undefined;
       return url ? url.slice(0, 60) + (url.length > 60 ? '...' : '') : null;
     }
-    
+
     // Ag3ntumBash - show first 40 chars of command
     if (toolName.includes('bash') || toolName.includes('shell')) {
       const cmd = input.command as string | undefined;
       return cmd ? cmd.split('\n')[0].slice(0, 40) + (cmd.length > 40 ? '...' : '') : null;
     }
-    
+
     // Ag3ntumRead/Write/Edit - show file path
     if (toolName.includes('read') || toolName.includes('write') || toolName.includes('edit')) {
       const path = (input.file_path || input.path || input.file) as string | undefined;
       return path ? path.slice(0, 50) + (path.length > 50 ? '...' : '') : null;
     }
-    
+
     // Ag3ntumGrep - show pattern
     if (toolName.includes('grep')) {
       const pattern = input.pattern as string | undefined;
       return pattern ? `/${pattern.slice(0, 30)}${pattern.length > 30 ? '...' : ''}/` : null;
     }
-    
+
     // Ag3ntumGlob/LS - show path
     if (toolName.includes('glob') || toolName.includes('ls')) {
       const path = (input.path || input.pattern || input.directory) as string | undefined;
       return path ? path.slice(0, 50) + (path.length > 50 ? '...' : '') : null;
     }
-    
+
     return null;
   };
-  
+
   const runningPreview = getRunningPreview();
 
   return (
     <div className={`tool-call ${statusClass}`}>
       <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button">
         <span className="tool-tree">{treeChar}</span>
+        {isRunning && (
+          <span className={`tool-status-icon ${statusClass}`}><PulsingCircleSpinner /></span>
+        )}
         {statusIcon && (
           <span className={`tool-status-icon ${statusClass}`}>{statusIcon}</span>
         )}
-        {hasContent && !statusIcon && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
-        {hasContent && statusIcon && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
+        {hasContent && !isRunning && !statusIcon && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
+        {hasContent && (isRunning || statusIcon) && <span className="tool-toggle">{expanded ? '▼' : '▶'}</span>}
         <ToolTag type={tool.tool} showSymbol={false} />
         <span className="tool-time">@ {tool.time}</span>
         {tool.status !== 'running' && tool.durationMs !== undefined && (
@@ -1253,25 +1563,26 @@ function SubagentBlock({
   const hasContent = Boolean(subagent.promptPreview || subagent.resultPreview || subagent.messageBuffer);
   const treeChar = isLast ? '└──' : '├──';
   const isRunning = subagent.status === 'running';
-  const frame = useSpinnerFrame();
   const rawPreview = subagent.resultPreview || subagent.messageBuffer || subagent.promptPreview || '';
   const previewText = extractSubagentPreview(rawPreview);
 
-  // Status icon: spinner while running, checkmark/cross when done
-  const statusIcon = 
-    isRunning ? SPINNER_FRAMES[frame] :
+  // Status icon: pulsing circle while running, checkmark/cross when done
+  const statusIcon =
     subagent.status === 'complete' ? '✓' :
     subagent.status === 'failed' ? '✗' : null;
-  
-  const statusClass = 
+
+  const statusClass =
     subagent.status === 'complete' ? 'subagent-status-success' :
-    subagent.status === 'failed' ? 'subagent-status-error' : 
+    subagent.status === 'failed' ? 'subagent-status-error' :
     isRunning ? 'subagent-status-running' : '';
 
   return (
     <div className={`subagent-call ${statusClass}`}>
       <div className="subagent-call-header" onClick={hasContent ? onToggle : undefined} role="button">
         <span className="tool-tree">{treeChar}</span>
+        {isRunning && (
+          <span className={`subagent-status-icon ${statusClass}`}><PulsingCircleSpinner /></span>
+        )}
         {statusIcon && (
           <span className={`subagent-status-icon ${statusClass}`}>{statusIcon}</span>
         )}
@@ -1513,6 +1824,7 @@ function AgentMessageBlock({
   isMobile,
   mobileExpanded,
   onToggleMobileExpand,
+  onSubmitAnswer,
 }: {
   id: string;
   time: string;
@@ -1539,8 +1851,11 @@ function AgentMessageBlock({
   isMobile: boolean;
   mobileExpanded: boolean;
   onToggleMobileExpand: () => void;
+  onSubmitAnswer?: (answer: string) => void;
 }): JSX.Element {
   const contentRef = useRef<HTMLDivElement>(null);
+  // Strip resume-context tags (LLM-only content, not for display)
+  const displayContent = stripResumeContext(content);
   const statusClass = status ? `agent-status-${status}` : '';
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
@@ -1551,7 +1866,7 @@ function AgentMessageBlock({
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
   // Show trailing wait spinner when message content is complete but session is still running
   // This indicates "more processing happening" even when tools are running (they have their own spinners too)
-  const showTrailingWait = Boolean(content) && !isStreaming && sessionRunning;
+  const showTrailingWait = Boolean(displayContent) && !isStreaming && sessionRunning;
 
   const hasRightContent = toolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
   
@@ -1565,48 +1880,70 @@ function AgentMessageBlock({
     showRightPanel = !rightPanelCollapsed;
   }
 
+  // Separate AskUserQuestion tools from other tools - they render inline in message
+  // Handle both native SDK tool name and MCP tool name
+  const askUserQuestionTools = toolCalls.filter(t =>
+    t.tool === 'AskUserQuestion' || t.tool === 'mcp__ag3ntum__AskUserQuestion'
+  );
+  const otherToolCalls = toolCalls.filter(t =>
+    t.tool !== 'AskUserQuestion' && t.tool !== 'mcp__ag3ntum__AskUserQuestion'
+  );
+
+  const hasOtherRightContent = otherToolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
+
   return (
     <div className={`message-block agent-message ${statusClass} ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
         <span className="message-icon">◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
-        {content && <CopyButtons contentRef={contentRef} markdown={content} className="message-header-copy-buttons" />}
-        {isMobile && hasRightContent && (
-          <button 
-            type="button" 
+        {displayContent && <CopyButtons contentRef={contentRef} markdown={displayContent} className="message-header-copy-buttons" />}
+        {isMobile && hasOtherRightContent && (
+          <button
+            type="button"
             className={`mobile-expand-button ${mobileExpanded ? 'expanded' : ''}`}
             onClick={onToggleMobileExpand}
             title={mobileExpanded ? 'Hide details' : 'Show details'}
           >
-            {mobileExpanded ? '▲ Hide' : '▼ Details'} ({toolCalls.length + subagents.length})
+            {mobileExpanded ? '▲ Hide' : '▼ Details'} ({otherToolCalls.length + subagents.length})
           </button>
         )}
       </div>
       <div className="message-body">
         <div className={`message-column-left ${!showRightPanel ? 'full-width' : ''}`}>
           <div ref={contentRef} className="message-content md-container">
-            {content ? (
+            {displayContent ? (
               <>
-                {renderMarkdown(content)}
+                {renderMarkdown(displayContent)}
                 {showInlineSpinner && <InlineStreamSpinner />}
                 {showTrailingWait && <TrailingWaitSpinner />}
               </>
             ) : null}
-            {!content && !isTerminalStatus && !showInlineSpinner && <AgentSpinner />}
-            {!content && isTerminalStatus && showFailureStatus && (
+            {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && <AgentSpinner />}
+            {!displayContent && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
-            {((structuredStatusLabel && structuredStatus === 'failed') || structuredError) && (
+            {((structuredStatusLabel && structuredStatus === 'failed') || isMeaningfulError(structuredError)) && (
               <div className="agent-structured-meta">
                 {structuredStatusLabel && structuredStatus === 'failed' && (
                   <div className="agent-structured-status">Status: {structuredStatusLabel}</div>
                 )}
-                {structuredError && (
+                {isMeaningfulError(structuredError) && (
                   <div className="agent-structured-error">Error: {structuredError}</div>
                 )}
               </div>
             )}
+            {/* Render AskUserQuestion inline in message content */}
+            {askUserQuestionTools.map((tool) => (
+              <AskUserQuestionBlock
+                key={tool.id}
+                tool={tool}
+                onSubmitAnswer={onSubmitAnswer || (() => {})}
+                isLast={true}
+                inline={true}
+                sessionStatus={status}
+              />
+            ))}
             {todos && todos.length > 0 && (
               <TodoProgressList todos={todos} overallStatus={normalizedStatus} />
             )}
@@ -1614,16 +1951,16 @@ function AgentMessageBlock({
         </div>
         {showRightPanel && (
           <div className={`message-column-right ${isMobile ? 'mobile-stacked' : ''}`}>
-            {toolCalls.length > 0 && (
+            {otherToolCalls.length > 0 && (
               <div className="tool-call-section">
-                <div className="tool-call-title">Tool Calls ({toolCalls.length})</div>
-                {toolCalls.map((tool, index) => (
+                <div className="tool-call-title">Tool Calls ({otherToolCalls.length})</div>
+                {otherToolCalls.map((tool, index) => (
                   <ToolCallBlock
                     key={tool.id}
                     tool={tool}
                     expanded={toolExpanded.has(tool.id)}
                     onToggle={() => onToggleTool(tool.id)}
-                    isLast={index === toolCalls.length - 1}
+                    isLast={index === otherToolCalls.length - 1}
                   />
                 ))}
               </div>
@@ -1758,12 +2095,7 @@ type AttachedFile = {
   id: string;
 };
 
-// Models will be loaded from the API config endpoint
-const DEFAULT_AVAILABLE_MODELS = [
-  'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-5-20250929',
-  'claude-opus-4-5-20251101',
-];
+// Models are loaded dynamically from agent.yaml via the API config endpoint
 
 function InputField({
   value,
@@ -2118,13 +2450,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
-  const [availableModels, setAvailableModels] = useState<string[]>(DEFAULT_AVAILABLE_MODELS);
-  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_AVAILABLE_MODELS[0]);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => getStoredPanelCollapsed());
   const [mobileExpandedMessages, setMobileExpandedMessages] = useState<Set<string>>(new Set());
   const [systemEventsExpanded, setSystemEventsExpanded] = useState(false);
   const [fileExplorerVisible, setFileExplorerVisible] = useState(false);
   const [fileExplorerRefreshKey, setFileExplorerRefreshKey] = useState(0);
+  const [fileExplorerModalOpen, setFileExplorerModalOpen] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [stats, setStats] = useState({
     turns: 0,
@@ -2135,6 +2468,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     model: '',
   });
   const [runningStartTime, setRunningStartTime] = useState<string | null>(null);
+  const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
 
   const isMobile = useIsMobile();
 
@@ -2162,9 +2496,22 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       })
       .catch((err) => {
         console.error('Failed to load API config:', err);
-        // Keep defaults on error
       });
   }, [config]);
+
+  // Load available skills
+  useEffect(() => {
+    if (!config || !token) {
+      return;
+    }
+    getSkills(config.api.base_url, token)
+      .then((response) => {
+        setLoadedSkills(response.skills);
+      })
+      .catch((err) => {
+        console.error('Failed to load skills:', err);
+      });
+  }, [config, token]);
 
   const refreshSessions = useCallback(() => {
     if (!config || !token) {
@@ -2216,19 +2563,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       });
     },
     [config]
-  );
-
-  const syncSessionEvents = useCallback(
-    async (sessionId: string, sessionOverride?: SessionResponse) => {
-      if (!config || !token) {
-        return;
-      }
-      const session = sessionOverride ?? (await getSession(config.api.base_url, token, sessionId));
-      const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
-      setEvents(seedSessionEvents(session, historyEvents));
-      return { session, historyEvents };
-    },
-    [config, token]
   );
 
   const handleEvent = useCallback(
@@ -2300,8 +2634,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           cost: event.data.total_cost_usd !== undefined
             ? cumulativeCost || Number(event.data.total_cost_usd ?? 0)
             : prev.cost,
-          tokensIn: usage ? newTokensIn : prev.tokensIn,
-          tokensOut: usage ? newTokensOut : prev.tokensOut,
+          tokensIn: usage ? prev.tokensIn + newTokensIn : prev.tokensIn,
+          tokensOut: usage ? prev.tokensOut + newTokensOut : prev.tokensOut,
         }));
         setStatus(normalizedStatus);
         setRunningStartTime(null);
@@ -2325,9 +2659,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         );
 
         refreshSessions();
-        if (currentSession) {
-          void syncSessionEvents(currentSession.id, currentSession);
-        }
       }
 
       if (event.type === 'cancelled') {
@@ -2345,9 +2676,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             : null
         );
         refreshSessions();
-        if (currentSession) {
-          void syncSessionEvents(currentSession.id, currentSession);
-        }
       }
 
       if (event.type === 'metrics_update') {
@@ -2381,12 +2709,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               : session
           )
         );
-        if (currentSession) {
-          void syncSessionEvents(currentSession.id, currentSession);
-        }
       }
     },
-    [appendEvent, currentSession, refreshSessions, syncSessionEvents]
+    [appendEvent, currentSession, refreshSessions]
   );
 
   const startSSE = useCallback(
@@ -2535,6 +2860,83 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     }
   };
 
+  // Handler for AskUserQuestion tool responses (human-in-the-loop)
+  // Submits answer to the database, then resumes the session
+  const handleSubmitAnswer = useCallback(async (answer: string): Promise<void> => {
+    if (!config || !token || !currentSession || !answer.trim()) {
+      return;
+    }
+
+    const answerText = answer.trim();
+
+    try {
+      // Step 1: Submit answer to the API endpoint (stores in database)
+      const response = await fetch(
+        `${config.api.base_url}/api/v1/sessions/${currentSession.id}/answer`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            question_id: 'latest',
+            answer: answerText,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      // Step 2: If the session can be resumed, resume it automatically
+      if (result.can_resume) {
+        // Add an event showing the user's answer
+        const answerEvent: TerminalEvent = {
+          type: 'user_message',
+          data: { text: `[Answer submitted: ${answerText}]` },
+          timestamp: new Date().toISOString(),
+          sequence: Date.now(),
+        };
+        appendEvent(answerEvent);
+
+        // Resume the session to continue agent execution
+        setStatus('running');
+        setRunningStartTime(new Date().toISOString());
+
+        try {
+          const resumeResponse = await continueTask(
+            config.api.base_url,
+            token,
+            currentSession.id,
+            // Send a simple resume message - the answer is already in context
+            'Continue with the user\'s answer.',
+            selectedModel
+          );
+
+          setCurrentSession((prev) => ({
+            ...prev!,
+            status: resumeResponse.status,
+            updated_at: new Date().toISOString(),
+          }));
+
+          // Start SSE to receive agent's continued response
+          const lastSequence = getLastServerSequence(events);
+          startSSE(currentSession.id, lastSequence);
+        } catch (resumeErr) {
+          setStatus('failed');
+          setError(`Failed to resume session: ${(resumeErr as Error).message}`);
+        }
+      }
+    } catch (err) {
+      setError(`Failed to submit answer: ${(err as Error).message}`);
+    }
+  }, [config, token, currentSession, selectedModel, events, appendEvent, startSSE]);
+
   const handleCancel = async (): Promise<void> => {
     if (!config || !token || !currentSession) {
       return;
@@ -2580,27 +2982,42 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       const lastSequence = getLastServerSequence(historyEvents);
       setEvents(seedSessionEvents(session, historyEvents));
 
-      const lastCompletion = [...historyEvents].reverse().find((event) => event.type === 'agent_complete');
-      if (lastCompletion) {
-        const usage = (lastCompletion.data.usage ?? null) as
-          | {
-              input_tokens?: number;
-              output_tokens?: number;
-              cache_creation_input_tokens?: number;
-              cache_read_input_tokens?: number;
-            }
-          | null;
-        const tokensIn =
-          (usage?.input_tokens ?? 0) +
-          (usage?.cache_creation_input_tokens ?? 0) +
-          (usage?.cache_read_input_tokens ?? 0);
-        const tokensOut = usage?.output_tokens ?? 0;
+      // Sum up stats from ALL agent_complete events (for multi-turn/resumed sessions)
+      const completionEvents = historyEvents.filter((event) => event.type === 'agent_complete');
+      if (completionEvents.length > 0) {
+        let totalTokensIn = 0;
+        let totalTokensOut = 0;
+        let totalDurationMs = 0;
+        completionEvents.forEach((event) => {
+          const usage = (event.data.usage ?? null) as
+            | {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_creation_input_tokens?: number;
+                cache_read_input_tokens?: number;
+              }
+            | null;
+          if (usage) {
+            totalTokensIn +=
+              (usage.input_tokens ?? 0) +
+              (usage.cache_creation_input_tokens ?? 0) +
+              (usage.cache_read_input_tokens ?? 0);
+            totalTokensOut += usage.output_tokens ?? 0;
+          }
+          totalDurationMs += Number(event.data.duration_ms ?? 0);
+        });
+
+        // Use the last completion event for cumulative turns/cost (backend provides these)
+        const lastCompletion = completionEvents[completionEvents.length - 1];
+        const cumulativeTurns = Number(lastCompletion.data.cumulative_turns ?? 0);
+        const cumulativeCost = Number(lastCompletion.data.cumulative_cost_usd ?? 0);
+
         setStats({
-          turns: Number(lastCompletion.data.num_turns ?? session.num_turns),
-          cost: Number(lastCompletion.data.total_cost_usd ?? session.total_cost_usd ?? 0),
-          durationMs: Number(lastCompletion.data.duration_ms ?? session.duration_ms ?? 0),
-          tokensIn,
-          tokensOut,
+          turns: cumulativeTurns || Number(lastCompletion.data.num_turns ?? session.num_turns),
+          cost: cumulativeCost || Number(lastCompletion.data.total_cost_usd ?? session.total_cost_usd ?? 0),
+          durationMs: totalDurationMs || Number(session.duration_ms ?? 0),
+          tokensIn: totalTokensIn,
+          tokensOut: totalTokensOut,
           model: String(lastCompletion.data.model ?? session.model ?? ''),
         });
       } else {
@@ -2630,7 +3047,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     }
   };
 
-  const handleNewSession = (): void => {
+  const handleNewSession = useCallback((): void => {
     if (cleanupRef.current) {
       cleanupRef.current();
     }
@@ -2653,7 +3070,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     });
     // Navigate to root URL for new session
     navigate('/', { replace: true });
-  };
+  }, [navigate]);
 
   const toggleRightPanel = useCallback(() => {
     setRightPanelCollapsed((prev) => {
@@ -2696,6 +3113,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     let streamBuffer = '';
     let lastAgentMessage: ConversationItem | null = null;
     let streamMessageSeeded = false;
+
+    // Buffer for AskUserQuestion tools - displayed at end of streaming (flushed on agent_complete)
+    let bufferedAskUserQuestions: ToolCallView[] = [];
 
     const fileToolPattern = /(write|edit|save|apply|move|copy)/i;
 
@@ -2829,12 +3249,26 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           lastAgentMessage = null;
           streamMessageSeeded = false;
           const content = String(event.data.text ?? '');
-          items.push({
+          const userItem: ConversationItem = {
             type: 'user',
             id: `user-${items.length}`,
             time: formatTimestamp(event.timestamp),
             content,
-          });
+          };
+          // Add large input metadata if present
+          if (event.data.is_large) {
+            (userItem as { isLarge: boolean }).isLarge = true;
+            if (event.data.size_display) {
+              (userItem as { sizeDisplay: string }).sizeDisplay = String(event.data.size_display);
+            }
+            if (event.data.size_bytes) {
+              (userItem as { sizeBytes: number }).sizeBytes = Number(event.data.size_bytes);
+            }
+            if (event.data.processed_text) {
+              (userItem as { processedText: string }).processedText = String(event.data.processed_text);
+            }
+          }
+          items.push(userItem);
           break;
         }
         case 'thinking': {
@@ -2860,7 +3294,15 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         case 'tool_start': {
           const toolName = String(event.data.tool_name ?? 'Tool');
           const toolId = String(event.data.tool_id ?? `tool-${toolIdCounter}`);
-          const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
+          // Handle tool_input that may come as string (JSON) or object
+          let toolInput: Record<string, unknown> | string | undefined = event.data.tool_input;
+          if (typeof toolInput === 'string' && toolInput.trim().startsWith('{')) {
+            try {
+              toolInput = JSON.parse(toolInput);
+            } catch {
+              // Keep as string if parse fails
+            }
+          }
           const newTool: ToolCallView = {
             id: toolId,
             tool: toolName,
@@ -2870,17 +3312,22 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           };
           toolIdCounter++;
 
-          // Attach tool to the current or last agent message if one exists
-          // This ensures tools appear under the message that invoked them
-          if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
-            currentStreamMessage.toolCalls.push(newTool);
-            (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
-          } else if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
-            (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(newTool);
-            (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
+          // Buffer AskUserQuestion tools to display at end of streaming
+          if (toolName === 'AskUserQuestion' || toolName === 'mcp__ag3ntum__AskUserQuestion') {
+            bufferedAskUserQuestions.push(newTool);
           } else {
-            // No existing message - accumulate for next message
-            pendingTools.push(newTool);
+            // Attach tool to the current or last agent message if one exists
+            // This ensures tools appear under the message that invoked them
+            if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
+              currentStreamMessage.toolCalls.push(newTool);
+              (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
+            } else if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+              (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(newTool);
+              (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
+            } else {
+              // No existing message - accumulate for next message
+              pendingTools.push(newTool);
+            }
           }
 
           if (toolInput && fileToolPattern.test(toolName)) {
@@ -2888,27 +3335,55 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           }
           break;
         }
+        case 'tool_input_ready': {
+          // Update tool with complete input (arrives after streaming completes)
+          const toolName = String(event.data.tool_name ?? 'Tool');
+          const toolId = event.data.tool_id ? String(event.data.tool_id) : undefined;
+          const toolInput = event.data.tool_input as Record<string, unknown> | undefined;
+
+          // Check buffered AskUserQuestion tools first
+          if (toolName === 'AskUserQuestion' || toolName === 'mcp__ag3ntum__AskUserQuestion') {
+            const bufferedTool = bufferedAskUserQuestions.find(t => t.id === toolId);
+            if (bufferedTool && toolInput) {
+              bufferedTool.input = toolInput;
+            }
+          } else {
+            const tool = findOpenTool(toolName, toolId);
+            if (tool && toolInput) {
+              tool.input = toolInput;
+            }
+          }
+          break;
+        }
         case 'tool_complete': {
           const MAX_OUTPUT_LINES = 100;
           const MAX_OUTPUT_CHARS = 10000;
-          
+
           const toolName = String(event.data.tool_name ?? 'Tool');
           const toolId = event.data.tool_id ? String(event.data.tool_id) : undefined;
           const durationMs = Number(event.data.duration_ms ?? 0);
           const isError = Boolean(event.data.is_error);
           const result = event.data.result;
-          const tool = findOpenTool(toolName, toolId);
+
+          // Check buffered AskUserQuestion tools first
+          let tool: ToolCallView | undefined;
+          if (toolName === 'AskUserQuestion' || toolName === 'mcp__ag3ntum__AskUserQuestion') {
+            tool = bufferedAskUserQuestions.find(t => t.id === toolId);
+          } else {
+            tool = findOpenTool(toolName, toolId);
+          }
+
           if (tool) {
             tool.status = isError ? 'failed' : 'complete';
             tool.durationMs = durationMs;
             if (result !== undefined && result !== null) {
-              const rawOutput = typeof result === 'string' 
-                ? result 
+              const rawOutput = typeof result === 'string'
+                ? result
                 : JSON.stringify(result, null, 2);
-              
+
               const lines = rawOutput.split('\n');
               tool.outputLineCount = lines.length;
-              
+
               if (lines.length > MAX_OUTPUT_LINES || rawOutput.length > MAX_OUTPUT_CHARS) {
                 let truncatedOutput = lines.slice(0, MAX_OUTPUT_LINES).join('\n');
                 if (truncatedOutput.length > MAX_OUTPUT_CHARS) {
@@ -3081,6 +3556,29 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             lastAgentMessage.status = lastAgentMessage.structuredStatus ?? statusValue;
             (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
           }
+
+          // Flush buffered AskUserQuestion tools at end of streaming
+          if (bufferedAskUserQuestions.length > 0) {
+            if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+              // Append to existing agent message
+              bufferedAskUserQuestions.forEach(tool => {
+                (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(tool);
+              });
+            } else {
+              // Create a new message for the buffered tools
+              const askMessage: ConversationItem = {
+                type: 'agent_message',
+                id: `agent-ask-${items.length}`,
+                time: formatTimestamp(event.timestamp),
+                content: '',
+                toolCalls: bufferedAskUserQuestions,
+                subagents: [],
+                isStreaming: false,
+              };
+              items.push(askMessage);
+            }
+            bufferedAskUserQuestions = [];
+          }
           break;
         }
         case 'error': {
@@ -3174,6 +3672,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     if (pendingTools.length > 0) {
       flushPendingTools();
     }
+
+    // Note: Buffered AskUserQuestion tools are flushed in the agent_complete case handler.
+    // We do NOT flush here during streaming to prevent flickering.
+    // For history replay, agent_complete is already in events so the case handler will flush.
 
     return items;
   }, [events]);
@@ -3357,7 +3859,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           <span className="session-id">{session.id.slice(0, 8)}...</span>
           <span className={`session-status ${session.status}`}>{session.status}</span>
         </div>
-        <div className="session-task">{session.task || 'No task'}</div>
+        <div className="session-task">{truncateSessionTitle(session.task)}</div>
       </button>
     ));
   }, [sessions]);
@@ -3486,17 +3988,48 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && isRunning) {
-        handleCancel();
+      // ESC key handling - close overlays first, then cancel running session
+      if (event.key === 'Escape') {
+        // Skip if a modal inside file explorer is open (let modal handle ESC)
+        if (fileExplorerModalOpen) {
+          return;
+        }
+        // Close file explorer overlay first if open
+        if (fileExplorerVisible) {
+          event.preventDefault();
+          setFileExplorerVisible(false);
+          return;
+        }
+        // Then cancel running session if active
+        if (isRunning) {
+          handleCancel();
+          return;
+        }
       }
-      if (event.key === '/' && event.ctrlKey) {
+      // Alt + [: Expand/Collapse all sections (use event.code for macOS compatibility)
+      if (event.code === 'BracketLeft' && event.altKey) {
         event.preventDefault();
         toggleAllSections();
+      }
+      // Alt + N: New session (use event.code for macOS compatibility where Option+N produces ñ)
+      if (event.code === 'KeyN' && event.altKey) {
+        event.preventDefault();
+        handleNewSession();
+      }
+      // Alt + E: Toggle file explorer
+      if (event.code === 'KeyE' && event.altKey) {
+        event.preventDefault();
+        setFileExplorerVisible((prev) => {
+          if (!prev) {
+            setFileExplorerRefreshKey((k) => k + 1);
+          }
+          return !prev;
+        });
       }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [handleCancel, isRunning, toggleAllSections]);
+  }, [handleCancel, isRunning, toggleAllSections, handleNewSession, fileExplorerVisible, fileExplorerModalOpen]);
 
   return (
     <div className="terminal-app">
@@ -3504,7 +4037,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         <div className="header-top">
           <div className="header-title">
             <span className="header-icon">◆</span>
-            <span className="header-label">Ag3ntum</span>
+            <span className="header-label"><a href="/" className="primary-text">AG3NTUM</a></span>
             <span className="header-divider">│</span>
             <span className="header-meta">user: {user?.username || 'unknown'}</span>
             <button
@@ -3531,8 +4064,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           <div className="session-selector">
             <span className="filter-label">Sessions:</span>
             <span className="session-current-id">{sessionIdLabel}</span>
-            <button className="session-new-button" type="button" onClick={handleNewSession}>
-              + New
+            <button className="session-new-button" type="button" onClick={handleNewSession} title="New session (Alt+N)">
+              [ +New ]
             </button>
             <div className="dropdown session-dropdown">
               <span className="dropdown-value">[...select]</span>
@@ -3545,10 +4078,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           <div className="filter-actions">
             {!fileExplorerVisible && (
               <>
-                <button className="filter-button" type="button" onClick={expandAllSections}>
+                <button className="filter-button" type="button" onClick={expandAllSections} title="Expand all sections (Alt+[)">
                   [expand all]
                 </button>
-                <button className="filter-button" type="button" onClick={collapseAllSections}>
+                <button className="filter-button" type="button" onClick={collapseAllSections} title="Collapse all sections (Alt+[)">
                   [collapse all]
                 </button>
               </>
@@ -3565,6 +4098,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                     setFileExplorerRefreshKey((k) => k + 1);
                   }
                 }}
+                title="Toggle File Explorer (Alt+E)"
               >
                 [File Explorer]
               </button>
@@ -3576,7 +4110,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       <main className={`terminal-body ${rightPanelCollapsed ? 'panel-collapsed' : ''}`}>
         {/* Panel toggle - vertical gutter or edge tab */}
         {!isMobile && (
-          <div 
+          <div
             className={`panel-toggle-edge ${rightPanelCollapsed ? 'collapsed' : ''}`}
             onClick={toggleRightPanel}
             title={rightPanelCollapsed ? 'Show details panel' : 'Hide details panel'}
@@ -3604,6 +4138,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                       content={item.content}
                       rightPanelCollapsed={rightPanelCollapsed}
                       isMobile={isMobile}
+                      isLarge={item.isLarge}
+                      sizeDisplay={item.sizeDisplay}
+                      processedText={item.processedText}
                     />
                   );
                 }
@@ -3644,6 +4181,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                       isMobile={isMobile}
                       mobileExpanded={mobileExpandedMessages.has(item.id)}
                       onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
+                      onSubmitAnswer={handleSubmitAnswer}
                     />
                   );
                 }
@@ -3692,7 +4230,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                 type="button"
                 className="file-explorer-overlay-close"
                 onClick={() => setFileExplorerVisible(false)}
-                title="Close file explorer"
+                title="Close file explorer (Esc)"
               >
                 [close]
               </button>
@@ -3704,6 +4242,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               token={token}
               showHiddenFiles={showHiddenFiles}
               onError={(err) => setError(err)}
+              onModalStateChange={setFileExplorerModalOpen}
             />
           </div>
         )}
@@ -3714,6 +4253,20 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           <FooterCopyButtons conversation={conversation} outputRef={outputRef} />
         </div>
         <div className="usage-bar-row">
+          {loadedSkills.length > 0 && (
+            <div className="skills-bar">
+              <span className="skills-label">Skills ({loadedSkills.length}):</span>
+              {loadedSkills.map((skill) => (
+                <SkillTag
+                  key={skill.id}
+                  id={skill.id}
+                  name={skill.name}
+                  description={skill.description}
+                  onClick={() => setInputValue(`/${skill.id} `)}
+                />
+              ))}
+            </div>
+          )}
           <div className="tool-usage-bar">
             <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
             {Object.keys(toolStats).map((tool) => (
@@ -3728,7 +4281,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               ))}
             </div>
           )}
-          <SystemEventsToggle 
+          <SystemEventsToggle
             count={systemEvents.length}
             deniedCount={systemEvents.filter(e => e.eventType === 'permission_denied').length}
             onClick={() => setSystemEventsExpanded(true)}

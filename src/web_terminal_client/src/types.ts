@@ -148,3 +148,17 @@ export interface FileContentResponse {
 
 export type FileSortField = 'name' | 'size' | 'created_at' | 'modified_at';
 export type SortOrder = 'asc' | 'desc';
+
+// =============================================================================
+// Skills Types
+// =============================================================================
+
+export interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface SkillsListResponse {
+  skills: SkillInfo[];
+}

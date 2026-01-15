@@ -19,8 +19,7 @@ import yaml
 # Path configuration
 TESTS_DIR: Path = Path(__file__).parent
 INPUT_DIR: Path = TESTS_DIR / "input"
-AGENT_DIR: Path = TESTS_DIR.parent.parent
-AGENT_PY: Path = AGENT_DIR / "agent.py"
+AGENT_DIR: Path = TESTS_DIR.parent.parent  # Root directory where src/ is located
 SESSIONS_DIR: Path = AGENT_DIR / "sessions"
 
 
@@ -117,12 +116,12 @@ class TestAgentCore:
         assert task_file.exists(), f"Task file not found: {task_file}"
         assert user_profile.exists(), f"User profile not found: {user_profile}"
 
-        # Run the agent
+        # Run the agent as a module (python -m src.core)
         cmd = [
             sys.executable,
-            str(AGENT_PY),
+            "-m", "src.core",
             "--task-file", str(task_file),
-            "--user-profile", str(user_profile),
+            "--profile", str(user_profile),
             "--timeout", "120",
             "--max-turns", "20",
         ]
@@ -159,24 +158,7 @@ class TestAgentCore:
         session_dir = find_latest_session_dir()
         assert session_dir is not None, "No session directory found"
 
-        # Verify output.yaml
-        output_yaml_path = session_dir / "workspace" / "output.yaml"
-        assert output_yaml_path.exists(), (
-            f"output.yaml not found in session workspace: {output_yaml_path}"
-        )
-
-        with open(output_yaml_path, "r") as f:
-            output_data = yaml.safe_load(f)
-
-        assert output_data is not None, "output.yaml is empty or invalid YAML"
-        assert output_data.get("status") == "COMPLETE", (
-            f"Expected status=COMPLETE, got: {output_data.get('status')}"
-        )
-        assert output_data.get("output"), (
-            f"Expected non-empty output field, got: {output_data.get('output')!r}"
-        )
-
-        # Verify agent.jsonl
+        # Verify agent.jsonl exists and has valid completion record
         agent_jsonl_path = session_dir / "agent.jsonl"
         assert agent_jsonl_path.exists(), (
             f"agent.jsonl not found in session: {agent_jsonl_path}"
@@ -214,9 +196,8 @@ class TestAgentCore:
         )
 
         print(f"\n✓ Session completed successfully: {session_dir.name}")
-        print(f"  Status: {output_data.get('status')}")
-        print(f"  Output: {output_data.get('output')[:100]}...")
         print(f"  Subtype: {subtype}")
+        print(f"  Result: {result_field[:100]}...")
 
 
 if __name__ == "__main__":

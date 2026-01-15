@@ -415,17 +415,17 @@ async def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s -r "Read /etc/passwd"
-  %(prog)s -r "Write test.txt with hello" --verbose
-  %(prog)s -r "rm -rf /" --security-only
-  %(prog)s -r "List files" --dump-session
+  %(prog)s -r "Read /etc/passwd" --email user@example.com --password secret
+  %(prog)s -r "Write test.txt with hello" --email user@example.com --password secret --verbose
+  %(prog)s -r "rm -rf /" --email user@example.com --password secret --security-only
+  %(prog)s -r "List files" --email user@example.com --password secret --dump-session
         """,
     )
     parser.add_argument(
         "--request", "-r", required=True, help="Request to send to agent"
     )
     parser.add_argument(
-        "--user", "-u", default="greg", help="Username (default: greg)"
+        "--email", "-e", required=True, help="User email for authentication"
     )
     parser.add_argument("--password", default="test123", help="Password")
     parser.add_argument("--host", default="localhost", help="API host")
@@ -456,7 +456,7 @@ Examples:
     console.print(f"[dim]Target: {cli.base_url}[/dim]\n")
 
     result = await cli.run_request(
-        args.request, user=args.user, password=args.password
+        args.request, user=args.email, password=args.password
     )
 
     if result.error and not result.events:
