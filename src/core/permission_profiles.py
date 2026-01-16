@@ -539,8 +539,21 @@ class PermissionManager:
             return None
         return self.get_sandbox_config()
 
-    def get_sandbox_config(self) -> Optional[SandboxConfig]:
-        """Resolve sandbox config placeholders using current session context."""
+    def get_sandbox_config(
+        self,
+        sandboxed_envs: Optional[dict[str, str]] = None,
+    ) -> Optional[SandboxConfig]:
+        """
+        Resolve sandbox config placeholders and inject sandboxed environment variables.
+
+        Args:
+            sandboxed_envs: Optional dictionary of environment variables to inject
+                           into the sandbox. These will be available via --setenv
+                           in the bubblewrap command.
+
+        Returns:
+            Resolved SandboxConfig with custom_env populated, or None if sandbox is disabled.
+        """
         self._ensure_profile_loaded()
         if self._profile_base is None or self._profile_base.sandbox is None:
             return None
@@ -565,7 +578,23 @@ class PermissionManager:
             "username": self._username or "",
             "session_id": self._session_id or "",
         }
-        return self._profile_base.sandbox.resolve(placeholders)
+        resolved = self._profile_base.sandbox.resolve(placeholders)
+
+        # SECURITY: Inject sandboxed environment variables for THIS session only
+        # The resolved config has a fresh SandboxEnvConfig with empty custom_env
+        # (created in SandboxConfig.resolve() to prevent cross-session leakage)
+        if sandboxed_envs and resolved.environment:
+            resolved.environment.custom_env = dict(sandboxed_envs)
+            logger.info(
+                f"Injected {len(sandboxed_envs)} sandboxed environment variables "
+                f"into sandbox config for session {self._session_id}"
+            )
+        elif resolved.environment:
+            # Ensure custom_env is empty if no sandboxed_envs provided
+            # This is defensive - resolve() already sets it to empty
+            resolved.environment.custom_env = {}
+
+        return resolved
 
     def activate(self) -> PermissionProfile:
         """

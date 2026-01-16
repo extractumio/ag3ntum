@@ -326,6 +326,32 @@ class AgentConfigLoader:
         """Return the path to the secrets file."""
         return self._secrets_path
 
+    def get_sandboxed_envs(self) -> dict[str, str]:
+        """
+        Get sandboxed environment variables from secrets.yaml.
+
+        These environment variables will be passed to the Bubblewrap sandbox
+        for use by Ag3ntumBash commands.
+
+        Returns:
+            Dictionary of environment variable name -> value.
+        """
+        if not self._loaded:
+            self.load()
+
+        if self._secrets is None:
+            return {}
+
+        sandboxed_envs = self._secrets.get("sandboxed_envs", {})
+        if sandboxed_envs is None:
+            return {}
+
+        # Ensure all values are strings
+        return {
+            str(k): str(v) for k, v in sandboxed_envs.items()
+            if k and v is not None
+        }
+
 
 # Global loader instance (lazy initialization)
 _global_loader: AgentConfigLoader | None = None
@@ -362,3 +388,95 @@ def ensure_dirs() -> None:
     """Ensure all required directories exist."""
     for dir_path in [LOGS_DIR, CONFIG_DIR, SKILLS_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
+
+
+def load_sandboxed_envs(
+    username: Optional[str] = None,
+    config_loader: Optional[AgentConfigLoader] = None,
+) -> dict[str, str]:
+    """
+    Load sandboxed environment variables with user-specific overrides.
+
+    This function loads sandboxed_envs from:
+    1. Global secrets.yaml (config/secrets.yaml)
+    2. User-specific secrets.yaml (/users/{username}/ag3ntum/secrets.yaml)
+
+    User-specific values override global values.
+
+    Args:
+        username: Username for user-specific overrides. If None, only global envs are loaded.
+        config_loader: Optional AgentConfigLoader instance. If None, uses global loader.
+
+    Returns:
+        Merged dictionary of environment variable name -> value.
+
+    Example:
+        # Global secrets.yaml:
+        # sandboxed_envs:
+        #   OPENAI_API_KEY: sk-global-key
+        #   SHARED_VAR: global_value
+
+        # User secrets.yaml (/users/greg/ag3ntum/secrets.yaml):
+        # sandboxed_envs:
+        #   OPENAI_API_KEY: sk-user-specific-key
+
+        load_sandboxed_envs("greg")
+        # Returns: {"OPENAI_API_KEY": "sk-user-specific-key", "SHARED_VAR": "global_value"}
+    """
+    # Load global sandboxed_envs
+    loader = config_loader or get_config_loader()
+    global_envs = loader.get_sandboxed_envs()
+    logger.debug(f"Loaded {len(global_envs)} global sandboxed_envs")
+
+    if not username:
+        return global_envs
+
+    # Check for user-specific secrets.yaml
+    # Path: /users/{username}/ag3ntum/secrets.yaml (inside Docker)
+    # This allows per-user overrides of sandboxed environment variables
+    user_secrets_path = USERS_DIR / username / "ag3ntum" / "secrets.yaml"
+
+    if not user_secrets_path.exists():
+        logger.debug(f"No user-specific secrets.yaml found at {user_secrets_path}")
+        return global_envs
+
+    # Load user-specific sandboxed_envs
+    try:
+        with user_secrets_path.open("r", encoding="utf-8") as f:
+            user_secrets = yaml.safe_load(f)
+
+        if user_secrets is None:
+            logger.debug(f"User secrets.yaml is empty: {user_secrets_path}")
+            return global_envs
+
+        user_envs = user_secrets.get("sandboxed_envs", {})
+        if user_envs is None:
+            user_envs = {}
+
+        # Convert to string dict
+        user_envs = {
+            str(k): str(v) for k, v in user_envs.items()
+            if k and v is not None
+        }
+
+        logger.info(
+            f"Loaded {len(user_envs)} user-specific sandboxed_envs from {user_secrets_path}"
+        )
+
+        # Merge: user-specific overrides global
+        merged = dict(global_envs)
+        merged.update(user_envs)
+
+        logger.info(
+            f"Merged sandboxed_envs: {len(global_envs)} global + {len(user_envs)} user = "
+            f"{len(merged)} total (after overrides)"
+        )
+
+        return merged
+
+    except yaml.YAMLError as e:
+        logger.warning(f"Failed to parse user secrets.yaml {user_secrets_path}: {e}")
+        return global_envs
+    except Exception as e:
+        logger.warning(f"Failed to load user secrets.yaml {user_secrets_path}: {e}")
+        return global_envs

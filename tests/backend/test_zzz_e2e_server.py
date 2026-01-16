@@ -341,6 +341,11 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
             bcrypt.gensalt()
         ).decode()
         
+        # Use the current process UID for the test user (typically 0 in Docker or user's UID locally)
+        # This allows the agent to run under the same user context as the test
+        import os as test_os
+        test_linux_uid = test_os.getuid()
+
         test_user_obj = User(
             id=str(uuid.uuid4()),
             username=test_user_credentials["username"],
@@ -348,7 +353,7 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
             password_hash=password_hash,
             role="user",
             jwt_secret=secrets.token_urlsafe(32),
-            linux_uid=None,
+            linux_uid=test_linux_uid,
             is_active=True,
         )
         session.add(test_user_obj)
@@ -358,7 +363,7 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
         created_user = session.query(User).filter_by(email=test_user_credentials["email"]).first()
         if created_user:
             print(f"✓ Created E2E test user: {test_user_credentials['username']} ({test_user_credentials['email']})")
-            print(f"  User ID: {created_user.id}, Active: {created_user.is_active}")
+            print(f"  User ID: {created_user.id}, Active: {created_user.is_active}, Linux UID: {created_user.linux_uid}")
             print(f"  Database: {db_path}")
             # Test the password hash immediately
             test_check = bcrypt.checkpw(

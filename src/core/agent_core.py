@@ -28,6 +28,7 @@ from ..config import (
     SESSIONS_DIR,
     SKILLS_DIR,
     USERS_DIR,
+    load_sandboxed_envs,
 )
 import shutil
 from .exceptions import (
@@ -48,6 +49,7 @@ from .schemas import (
 )
 from .sessions import SessionManager
 from .skills import SkillManager, discover_merged_skills
+from .skill_tools import SkillToolsManager
 from .tracer import ExecutionTracer, TracerBase, NullTracer
 from .trace_processor import TraceProcessor
 from .permissions import (
@@ -407,7 +409,8 @@ class ClaudeAgent:
         system_prompt: str,
         trace_processor: Optional[Any] = None,
         resume_id: Optional[str] = None,
-        fork_session: bool = False
+        fork_session: bool = False,
+        username: Optional[str] = None
     ) -> ClaudeAgentOptions:
         """
         Build ClaudeAgentOptions for the SDK.
@@ -418,6 +421,7 @@ class ClaudeAgent:
             trace_processor: Optional trace processor for permission denial tracking.
             resume_id: Claude's session ID for resuming conversations (optional).
             fork_session: If True, fork to new session when resuming (optional).
+            username: Optional username for loading user-specific sandboxed environment variables.
 
         Returns:
             ClaudeAgentOptions configured for execution.
@@ -493,7 +497,18 @@ class ClaudeAgent:
             session_info.session_id
         )
 
-        sandbox_config = self._permission_manager.get_sandbox_config()
+        # Load sandboxed environment variables (global + user-specific overrides)
+        # These will be available inside the bubblewrap sandbox for Ag3ntumBash commands
+        sandboxed_envs = load_sandboxed_envs(username=username)
+        if sandboxed_envs:
+            logger.info(
+                f"SANDBOX: Loaded {len(sandboxed_envs)} sandboxed env vars for user '{username}': "
+                f"{list(sandboxed_envs.keys())}"
+            )
+
+        sandbox_config = self._permission_manager.get_sandbox_config(
+            sandboxed_envs=sandboxed_envs
+        )
         self._sandbox_system_message = self._format_sandbox_system_message(
             sandbox_config=sandbox_config,
             workspace_dir=workspace_dir,
@@ -577,6 +592,37 @@ class ClaudeAgent:
                 )
             except Exception as e:
                 logger.warning(f"Failed to create Ag3ntum unified MCP server: {e}")
+
+        # Add skills MCP server for script-based skills
+        # SECURITY: Script skills MUST run inside the Bubblewrap sandbox
+        # Environment variables (sandboxed_envs) are injected via sandbox config's custom_env
+        if self._config.enable_skills and sandbox_executor is not None:
+            try:
+                skill_tools_manager = SkillToolsManager(
+                    skills_dir=self._skills_dir,
+                    workspace_dir=workspace_dir,
+                    sandbox_executor=sandbox_executor,
+                )
+                skill_tools_manager.initialize()
+
+                skill_tool_names = skill_tools_manager.get_tool_definitions()
+                if skill_tool_names:
+                    skills_server = skill_tools_manager.create_mcp_server(
+                        name="skills",
+                        version="1.0.0"
+                    )
+                    mcp_servers["skills"] = skills_server
+                    logger.info(
+                        f"Skills MCP server configured ({len(skill_tool_names)} script skills, "
+                        f"sandbox: ENABLED, envs via sandbox config)"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to create skills MCP server: {e}")
+        elif self._config.enable_skills and sandbox_executor is None:
+            logger.warning(
+                "Skills MCP server NOT created: SandboxExecutor is required for script-based skills. "
+                "Instruction-based skills (SKILL.md) can still use mcp__ag3ntum__Bash."
+            )
 
         # Get subagent overrides from the global SubagentManager singleton
         # These override Claude Code's built-in subagents (general-purpose, etc.)
@@ -1019,7 +1065,8 @@ class ClaudeAgent:
         options = self._build_options(
             session_info, system_prompt, trace_processor,
             resume_id=resume_id,
-            fork_session=fork_session
+            fork_session=fork_session,
+            username=username
         )
         user_prompt = self._build_user_prompt(task, session_info, parameters)
 

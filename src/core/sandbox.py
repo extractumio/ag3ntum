@@ -75,6 +75,10 @@ class SandboxEnvConfig(BaseModel):
     home: str = Field(default="/workspace", description="HOME inside sandbox")
     path: str = Field(default="/usr/bin:/bin", description="PATH inside sandbox")
     clear_env: bool = Field(default=True, description="Clear environment vars")
+    custom_env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Custom environment variables to pass to sandbox (from sandboxed_envs)"
+    )
 
 
 class ProcFilteringConfig(BaseModel):
@@ -133,6 +137,16 @@ class SandboxConfig(BaseModel):
                 for key, mount in mounts.items()
             }
 
+        # SECURITY: Create a fresh copy of environment to prevent cross-session leakage
+        # Each session must have its own SandboxEnvConfig instance so that
+        # user-specific sandboxed_envs don't leak between sessions
+        fresh_environment = SandboxEnvConfig(
+            home=self.environment.home,
+            path=self.environment.path,
+            clear_env=self.environment.clear_env,
+            custom_env={},  # Start empty - will be populated per-session
+        )
+
         return SandboxConfig(
             enabled=self.enabled,
             file_sandboxing=self.file_sandboxing,
@@ -143,7 +157,8 @@ class SandboxConfig(BaseModel):
             session_mounts=resolve_mounts(self.session_mounts),
             dynamic_mounts=[mount.resolve(placeholders) for mount in self.dynamic_mounts],
             network=self.network,
-            environment=self.environment,
+            environment=fresh_environment,
+            proc_filtering=self.proc_filtering,
             writable_paths=[
                 _resolve_placeholders(path, placeholders)
                 for path in self.writable_paths
@@ -286,6 +301,24 @@ class SandboxExecutor:
 
         cmd.extend(["--setenv", "HOME", config.environment.home])
         cmd.extend(["--setenv", "PATH", config.environment.path])
+
+        # Apply custom environment variables from sandboxed_envs
+        # These are user-specific secrets that should be available in the sandbox
+        if config.environment.custom_env:
+            for env_name, env_value in config.environment.custom_env.items():
+                # Security: validate env name to prevent injection
+                if env_name and env_name.isidentifier() and env_value is not None:
+                    cmd.extend(["--setenv", env_name, str(env_value)])
+                    logger.debug(f"BWRAP: Set custom env {env_name}=***")
+                else:
+                    logger.warning(f"BWRAP: Skipping invalid env var name: {env_name}")
+
+            if config.environment.custom_env:
+                logger.info(
+                    f"BWRAP: Applied {len(config.environment.custom_env)} custom env vars "
+                    f"from sandboxed_envs"
+                )
+
         cmd.extend(["--chdir", config.environment.home])
 
         cmd.append("--")

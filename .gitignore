@@ -42,5 +42,6 @@ docker-compose.override.yml
 users/
 
 .claude/
+!skills/.claude/
 TODO
 tmp_*.py

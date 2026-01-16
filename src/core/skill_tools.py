@@ -8,11 +8,27 @@ This module handles:
 - Loading skills and detecting which have associated scripts
 - Creating @tool decorated async handlers for script-based skills
 - Generating MCP server configurations for skill tools
+- Sandboxed execution of skill scripts with environment variable injection
+
+SECURITY: All script-based skills MUST run inside the Bubblewrap sandbox.
+A SandboxExecutor is REQUIRED. Without it, skill execution will fail with
+an explicit error - there is no fallback to insecure direct execution.
+
+Environment variables (sandboxed_envs) are injected via the SandboxExecutor's
+config (custom_env field), which is set up by the PermissionManager. This
+ensures a single source of truth for environment variables.
 
 Usage:
     from skill_tools import SkillToolsManager, create_skills_mcp_server
+    from sandbox import SandboxExecutor, SandboxConfig
 
-    manager = SkillToolsManager(skills_dir)
+    # SandboxExecutor must be configured with sandboxed_envs via custom_env
+    # (handled by PermissionManager.get_sandbox_config(sandboxed_envs=...))
+    manager = SkillToolsManager(
+        skills_dir,
+        workspace_dir=workspace_dir,
+        sandbox_executor=executor,  # REQUIRED for skill execution
+    )
     mcp_server = manager.create_mcp_server()
 
     options = ClaudeAgentOptions(
@@ -27,13 +43,16 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .tool_utils import build_script_command
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from .skills import Skill, SkillManager
+
+if TYPE_CHECKING:
+    from .sandbox import SandboxExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +96,10 @@ class SkillToolsManager:
 
     Discovers script-based skills and creates @tool decorated handlers
     for them that can be registered with the Claude Agent SDK.
+
+    SECURITY: All script-based skills run inside the Bubblewrap sandbox.
+    A SandboxExecutor is REQUIRED for skill execution. If not provided,
+    skill execution will fail with an explicit error.
     """
 
     def __init__(
@@ -84,6 +107,7 @@ class SkillToolsManager:
         skills_dir: Optional[Path] = None,
         workspace_dir: Optional[Path] = None,
         timeout_seconds: int = 300,
+        sandbox_executor: Optional["SandboxExecutor"] = None,
     ) -> None:
         """
         Initialize the skill tools manager.
@@ -92,10 +116,19 @@ class SkillToolsManager:
             skills_dir: Directory containing skills.
             workspace_dir: Working directory for skill execution.
             timeout_seconds: Timeout for skill script execution.
+            sandbox_executor: SandboxExecutor for secure execution.
+                REQUIRED for skill script execution. Environment variables
+                from sandboxed_envs are injected via the sandbox config.
+
+        Note:
+            sandboxed_envs are NOT passed directly here. They are already
+            injected into the SandboxExecutor's config via custom_env field.
+            This ensures a single source of truth for environment variables.
         """
         self._skill_manager = SkillManager(skills_dir)
         self._workspace_dir = workspace_dir
         self._timeout = timeout_seconds
+        self._sandbox_executor = sandbox_executor
         self._tool_definitions: dict[str, SkillToolDefinition] = {}
         self._mcp_tools: list[Any] = []
         self._initialized = False
@@ -138,6 +171,9 @@ class SkillToolsManager:
         """
         Create an async tool handler for a skill.
 
+        SECURITY: Skills MUST run inside the Bubblewrap sandbox.
+        If sandbox_executor is not available, execution fails with an error.
+
         Args:
             definition: The skill tool definition.
 
@@ -149,7 +185,7 @@ class SkillToolsManager:
         skill_name = definition.skill.name
         script_path = definition.script_path
         timeout = self._timeout
-        workspace_dir = self._workspace_dir
+        sandbox_executor = self._sandbox_executor
 
         # Determine execution command
         if script_path.suffix == ".py":
@@ -174,22 +210,45 @@ class SkillToolsManager:
             _skill_name: str = skill_name,
             _base_cmd: list = base_cmd,
             _timeout: int = timeout,
-            _workspace_dir: Optional[Path] = workspace_dir,
             _script_path: Path = script_path,
+            _sandbox_executor: Optional["SandboxExecutor"] = sandbox_executor,
         ) -> dict[str, Any]:
-            """Execute the skill script with provided arguments."""
+            """Execute the skill script inside the Bubblewrap sandbox."""
+            # SECURITY: Require sandbox for skill execution
+            if _sandbox_executor is None:
+                error_msg = (
+                    f"SECURITY ERROR: Cannot execute skill '{_skill_name}' - "
+                    f"SandboxExecutor is not configured. "
+                    f"Script-based skills MUST run inside the Bubblewrap sandbox."
+                )
+                logger.error(error_msg)
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": error_msg
+                    }],
+                    "is_error": True
+                }
+
             cmd_args = args.get("args", [])
             input_data = args.get("input_data", "")
 
             cmd = _base_cmd + ([str(a) for a in cmd_args] if cmd_args else [])
 
-            logger.info(f"Executing skill {_skill_name}: {' '.join(cmd)}")
-
             try:
-                # Run script asynchronously
+                # Build Bubblewrap command with sandboxed env vars
+                # Environment variables are in sandbox config via custom_env
+                bwrap_cmd = _sandbox_executor.build_bwrap_command(
+                    cmd,
+                    allow_network=True,  # Skills may need network access
+                )
+                logger.info(
+                    f"Executing skill {_skill_name} in sandbox: "
+                    f"{' '.join(bwrap_cmd[:8])}..."
+                )
+
                 process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=_workspace_dir or _script_path.parent,
+                    *bwrap_cmd,
                     stdin=asyncio.subprocess.PIPE if input_data else None,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -232,6 +291,7 @@ class SkillToolsManager:
                 }
 
             except Exception as e:
+                logger.error(f"Skill {_skill_name} execution error: {e}")
                 return {
                     "content": [{
                         "type": "text",
@@ -306,18 +366,28 @@ class SkillToolsManager:
 def create_skills_mcp_server(
     skills_dir: Optional[Path] = None,
     workspace_dir: Optional[Path] = None,
+    sandbox_executor: Optional["SandboxExecutor"] = None,
 ) -> tuple[Any, list[str]]:
     """
     Convenience function to create an MCP server for skills.
 
+    SECURITY: sandbox_executor is REQUIRED for skill execution.
+    If not provided, skill execution will fail with an explicit error.
+
     Args:
         skills_dir: Directory containing skills.
         workspace_dir: Working directory for skill execution.
+        sandbox_executor: SandboxExecutor for secure execution.
+            Environment variables are injected via sandbox config's custom_env.
 
     Returns:
         Tuple of (McpSdkServerConfig, list of allowed tool names).
     """
-    manager = SkillToolsManager(skills_dir, workspace_dir)
+    manager = SkillToolsManager(
+        skills_dir,
+        workspace_dir,
+        sandbox_executor=sandbox_executor,
+    )
     manager.initialize()
 
     mcp_server = manager.create_mcp_server()
@@ -330,22 +400,40 @@ def execute_skill_sync(
     skill: Skill,
     args: Optional[list[str]] = None,
     input_data: Optional[str] = None,
-    cwd: Optional[Path] = None,
     timeout: int = 300,
+    sandbox_executor: Optional["SandboxExecutor"] = None,
 ) -> SkillExecutionResult:
     """
-    Execute a skill script synchronously.
+    Execute a skill script synchronously inside the Bubblewrap sandbox.
+
+    SECURITY: sandbox_executor is REQUIRED. If not provided, execution fails.
 
     Args:
         skill: The skill to execute.
         args: Command-line arguments for the script.
         input_data: Optional stdin data.
-        cwd: Working directory.
         timeout: Timeout in seconds.
+        sandbox_executor: SandboxExecutor for secure execution.
+            Environment variables are injected via sandbox config's custom_env.
 
     Returns:
         SkillExecutionResult with output and status.
     """
+    # SECURITY: Require sandbox for skill execution
+    if sandbox_executor is None:
+        error_msg = (
+            f"SECURITY ERROR: Cannot execute skill '{skill.name}' - "
+            f"SandboxExecutor is not configured. "
+            f"Script-based skills MUST run inside the Bubblewrap sandbox."
+        )
+        logger.error(error_msg)
+        return SkillExecutionResult(
+            success=False,
+            output="",
+            error=error_msg,
+            exit_code=1,
+        )
+
     if not skill.script_file or not skill.script_file.exists():
         return SkillExecutionResult(
             success=False,
@@ -360,9 +448,15 @@ def execute_skill_sync(
     start = time.time()
 
     try:
-        result = subprocess.run(
+        # Build Bubblewrap command with sandboxed env vars
+        bwrap_cmd = sandbox_executor.build_bwrap_command(
             cmd,
-            cwd=cwd or script_path.parent,
+            allow_network=True,
+        )
+        logger.info(f"Executing skill {skill.name} in sandbox (sync)")
+
+        result = subprocess.run(
+            bwrap_cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -388,6 +482,7 @@ def execute_skill_sync(
         )
 
     except Exception as e:
+        logger.error(f"Skill {skill.name} sync execution error: {e}")
         return SkillExecutionResult(
             success=False,
             output="",

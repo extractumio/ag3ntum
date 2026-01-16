@@ -950,7 +950,6 @@ function TodoProgressList({
   const isCancelled = overallStatus === 'cancelled';
   const isFailed = overallStatus === 'failed';
   const isDone = !isRunning;
-  const frame = useSpinnerFrame();
 
   return (
     <div className={`todo-progress${isDone ? ' todo-progress-done' : ''}`}>
@@ -962,20 +961,22 @@ function TodoProgressList({
         const showCancel = (isCancelled || isFailed) && status === 'in_progress';
         const bullet = showCancel
           ? '✗'
-          : isActive
-            ? SPINNER_FRAMES[frame]
-            : isCompleted
-              ? '✓'
-              : '•';
+          : isCompleted
+            ? '✓'
+            : '•';
 
         return (
           <div
             key={`${todo.content}-${index}`}
             className={`todo-item todo-${status}${showCancel ? ' todo-cancelled' : ''}`}
           >
-            <span className="todo-bullet">
-              {bullet}
-            </span>
+            {isActive ? (
+              <PulsingCircleSpinner />
+            ) : (
+              <span className="todo-bullet">
+                {bullet}
+              </span>
+            )}
             <span
               className={`todo-text${isActive ? ' todo-active' : ''}${isCompleted ? ' todo-completed' : ''}`}
             >
@@ -3582,8 +3583,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           if (bufferedAskUserQuestions.length > 0) {
             if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
               // Append to existing agent message
+              const targetMessage = lastAgentMessage as { toolCalls: ToolCallView[] };
               bufferedAskUserQuestions.forEach(tool => {
-                (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(tool);
+                targetMessage.toolCalls.push(tool);
               });
             } else {
               // Create a new message for the buffered tools

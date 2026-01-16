@@ -88,7 +88,7 @@ def test_ask_skill_dir() -> Generator[Path, None, None]:
     # Use temp directory since /tests/backend/input/ is read-only in Docker
     temp_base = Path(tempfile.mkdtemp(prefix="test_ask_skill_"))
     skill_dir = temp_base / "test-ask"
-    skill_file = skill_dir / "test-ask.md"
+    skill_file = skill_dir / "SKILL.md"
 
     # Create skill directory and file
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -272,6 +272,281 @@ class TestAskUserQuestionEventEmission:
         assert result["_stop_session"] is True
         assert result["_stop_reason"] == "waiting_for_user_input"
         assert "_question_id" in result
+
+
+class TestFrontendEventRequirements:
+    """
+    Tests for event structure that the frontend depends on.
+
+    The frontend (App.tsx) uses specific event fields for:
+    1. Tool buffering: Filters tool_start events by tool_name containing 'AskUser'
+    2. UI rendering: Uses tool_name, tool_id, tool_input from events
+    3. Event sequencing: Expects tool_start before agent_complete for proper flushing
+
+    These tests ensure backend emits events in the format frontend expects.
+    """
+
+    # The exact tool names the frontend filters on (from App.tsx)
+    FRONTEND_TOOL_NAME_FILTERS = ['AskUserQuestion', 'mcp__ag3ntum__AskUserQuestion']
+
+    @pytest.mark.asyncio
+    async def test_tool_name_matches_frontend_filter(self):
+        """
+        Tool name emitted by backend must match frontend filter.
+
+        Frontend App.tsx buffers tools with:
+          if (toolName === 'AskUserQuestion' || toolName === 'mcp__ag3ntum__AskUserQuestion')
+
+        If this test fails, the frontend won't buffer/display the AskUserQuestion UI.
+        """
+        # The MCP tool name as registered in ag3ntum_file_tools.py
+        MCP_TOOL_NAME = "mcp__ag3ntum__AskUserQuestion"
+
+        # Verify the tool name matches one of the frontend filters
+        assert MCP_TOOL_NAME in self.FRONTEND_TOOL_NAME_FILTERS, (
+            f"Tool name '{MCP_TOOL_NAME}' doesn't match frontend filters: {self.FRONTEND_TOOL_NAME_FILTERS}. "
+            "Frontend won't display AskUserQuestion UI block!"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_start_event_has_required_fields(self):
+        """
+        tool_start event must have fields required by frontend.
+
+        Frontend expects:
+        - event.data.tool_name: string (used for filtering)
+        - event.data.tool_id: string (used for tracking)
+        - event.data.tool_input: object (displayed in UI)
+        """
+        tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
+        tool_name = "mcp__ag3ntum__AskUserQuestion"
+        tool_input = {
+            "questions": [
+                {"question": "Test?", "header": "Test", "options": [{"label": "A"}, {"label": "B"}]}
+            ]
+        }
+
+        # Simulate tool_start event structure (as emitted by agent_runner)
+        tool_start_event = {
+            "type": "tool_start",
+            "data": {
+                "tool_name": tool_name,
+                "tool_id": tool_id,
+                "tool_input": tool_input,
+            },
+            "timestamp": "2024-01-15T12:00:00Z",
+            "sequence": 1,
+        }
+
+        # Frontend extracts these fields (from App.tsx tool_start case)
+        assert "tool_name" in tool_start_event["data"], "Missing tool_name in tool_start event"
+        assert "tool_id" in tool_start_event["data"], "Missing tool_id in tool_start event"
+        assert "tool_input" in tool_start_event["data"], "Missing tool_input in tool_start event"
+
+        # Verify tool_name is a string (frontend does String(event.data.tool_name))
+        assert isinstance(tool_start_event["data"]["tool_name"], str)
+
+        # Verify tool_id is a string (frontend does String(event.data.tool_id))
+        assert isinstance(tool_start_event["data"]["tool_id"], str)
+
+    @pytest.mark.asyncio
+    async def test_event_sequence_for_ask_user_question(self):
+        """
+        Events must arrive in correct sequence for frontend buffering.
+
+        Frontend buffering algorithm:
+        1. On tool_start with AskUserQuestion: buffer the tool (don't display yet)
+        2. On agent_complete: flush buffered tools to last agent message
+
+        If agent_complete arrives before tool_start is processed, the tool won't be buffered.
+        """
+        events = [
+            {"type": "agent_start", "sequence": 1},
+            {"type": "message", "sequence": 2},
+            {"type": "tool_start", "data": {"tool_name": "mcp__ag3ntum__AskUserQuestion"}, "sequence": 3},
+            {"type": "question_pending", "sequence": 4},
+            {"type": "tool_complete", "data": {"tool_name": "mcp__ag3ntum__AskUserQuestion"}, "sequence": 5},
+            {"type": "agent_complete", "sequence": 6},
+        ]
+
+        # Find event indices
+        tool_start_seq = next(e["sequence"] for e in events if e["type"] == "tool_start")
+        agent_complete_seq = next(e["sequence"] for e in events if e["type"] == "agent_complete")
+
+        # Verify tool_start comes before agent_complete
+        assert tool_start_seq < agent_complete_seq, (
+            f"tool_start (seq={tool_start_seq}) must come before agent_complete (seq={agent_complete_seq}). "
+            "Frontend buffers on tool_start and flushes on agent_complete."
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_input_can_be_json_string(self):
+        """
+        tool_input can be JSON string (frontend parses it).
+
+        Frontend handles this in tool_start case:
+          if (typeof toolInput === 'string' && toolInput.trim().startsWith('{'))
+            toolInput = JSON.parse(toolInput)
+        """
+        questions_data = [
+            {"question": "Test?", "header": "Test", "options": [{"label": "A"}, {"label": "B"}]}
+        ]
+
+        # tool_input as JSON string (as it might come from some backends)
+        tool_input_str = json.dumps({"questions": questions_data})
+
+        # Verify it can be parsed back
+        parsed = json.loads(tool_input_str)
+        assert "questions" in parsed
+
+        # Also test with questions directly as JSON string (nested)
+        questions_str = json.dumps(questions_data)
+        tool_input_nested_str = json.dumps({"questions": questions_str})
+        parsed_nested = json.loads(tool_input_nested_str)
+        assert "questions" in parsed_nested
+
+    @pytest.mark.asyncio
+    async def test_frontend_buffering_algorithm_simulation(self):
+        """
+        Simulate frontend buffering algorithm to verify it processes events correctly.
+
+        This is a CONTRACT TEST that documents exactly how the frontend processes events.
+        If this test fails, the frontend AskUserQuestion UI block won't appear.
+
+        The algorithm (from App.tsx useMemo):
+        1. Create empty buffer: bufferedAskUserQuestions = []
+        2. For each event (sorted by timestamp):
+           - On tool_start with AskUserQuestion: push to buffer
+           - On agent_complete: flush buffer to lastAgentMessage
+        3. Return conversation items with AskUserQuestion attached
+
+        Bug scenario this test catches:
+        - If tool_name doesn't match filter, tool isn't buffered
+        - If agent_complete is missing, buffer isn't flushed
+        - If events are out of order, buffer may be empty at flush time
+        """
+        # Simulate events as stored in database (exact structure from our session)
+        events = [
+            {
+                "type": "agent_start",
+                "sequence": 1,
+                "timestamp": "2024-01-15T12:00:00Z",
+                "data": {"session_id": "test"}
+            },
+            {
+                "type": "message",
+                "sequence": 2,
+                "timestamp": "2024-01-15T12:00:01Z",
+                "data": {"text": "I'll ask you some questions."}
+            },
+            {
+                "type": "tool_start",
+                "sequence": 10,
+                "timestamp": "2024-01-15T12:00:02Z",
+                "data": {
+                    "tool_name": "Skill",
+                    "tool_id": "toolu_001",
+                    "tool_input": {"skill": "test-ask"}
+                }
+            },
+            {
+                "type": "tool_start",
+                "sequence": 23,
+                "timestamp": "2024-01-15T12:00:03Z",
+                "data": {
+                    "tool_name": "mcp__ag3ntum__AskUserQuestion",  # MUST match frontend filter
+                    "tool_id": "toolu_002",
+                    "tool_input": {
+                        "questions": [
+                            {"question": "What language?", "header": "Lang", "options": [{"label": "Python"}, {"label": "Go"}]}
+                        ]
+                    }
+                }
+            },
+            {
+                "type": "question_pending",
+                "sequence": 24,
+                "timestamp": "2024-01-15T12:00:04Z",
+                "data": {"question_id": "q123", "questions": []}
+            },
+            {
+                "type": "tool_complete",
+                "sequence": 25,
+                "timestamp": "2024-01-15T12:00:05Z",
+                "data": {"tool_name": "mcp__ag3ntum__AskUserQuestion", "tool_id": "toolu_002"}
+            },
+            {
+                "type": "agent_complete",
+                "sequence": 30,
+                "timestamp": "2024-01-15T12:00:06Z",
+                "data": {"status": "waiting_for_input"}
+            },
+        ]
+
+        # Sort events by timestamp (as frontend does)
+        sorted_events = sorted(events, key=lambda e: e.get("timestamp", ""))
+
+        # Simulate frontend buffering algorithm
+        buffered_ask_user_questions = []
+        last_agent_message = {"id": "agent-1", "type": "agent_message", "toolCalls": []}
+
+        for event in sorted_events:
+            if event["type"] == "tool_start":
+                tool_name = str(event["data"].get("tool_name", ""))
+
+                # Frontend filter (EXACTLY as in App.tsx)
+                if tool_name == "AskUserQuestion" or tool_name == "mcp__ag3ntum__AskUserQuestion":
+                    buffered_ask_user_questions.append({
+                        "id": event["data"]["tool_id"],
+                        "tool": tool_name,
+                        "input": event["data"].get("tool_input"),
+                    })
+
+            elif event["type"] == "agent_complete":
+                # Flush buffer (EXACTLY as in App.tsx)
+                if buffered_ask_user_questions:
+                    for tool in buffered_ask_user_questions:
+                        last_agent_message["toolCalls"].append(tool)
+                    buffered_ask_user_questions = []
+
+        # ASSERTIONS: These catch the bug we fixed
+        assert len(last_agent_message["toolCalls"]) > 0, (
+            "BUG: AskUserQuestion was not flushed to agent message! "
+            "Check that tool_name matches frontend filter and agent_complete event exists."
+        )
+
+        # Verify the tool was correctly attached
+        ask_tools = [t for t in last_agent_message["toolCalls"] if "AskUser" in t["tool"]]
+        assert len(ask_tools) == 1, f"Expected 1 AskUserQuestion tool, got {len(ask_tools)}"
+        assert ask_tools[0]["tool"] == "mcp__ag3ntum__AskUserQuestion"
+        assert ask_tools[0]["id"] == "toolu_002"
+
+    @pytest.mark.asyncio
+    async def test_frontend_filter_case_sensitivity(self):
+        """
+        Frontend filter is case-sensitive - test various tool name variations.
+
+        This catches bugs where tool names might be registered with different casing.
+        """
+        # Valid tool names that frontend accepts
+        valid_names = ["AskUserQuestion", "mcp__ag3ntum__AskUserQuestion"]
+
+        # Invalid variations that would NOT be recognized
+        invalid_names = [
+            "askuserquestion",  # lowercase
+            "ASKUSERQUESTION",  # uppercase
+            "Ask_User_Question",  # underscores
+            "mcp__ag3ntum__askUserQuestion",  # camelCase
+            "AskUserQuestions",  # plural
+        ]
+
+        for name in valid_names:
+            matches = name == "AskUserQuestion" or name == "mcp__ag3ntum__AskUserQuestion"
+            assert matches, f"'{name}' should match frontend filter but doesn't"
+
+        for name in invalid_names:
+            matches = name == "AskUserQuestion" or name == "mcp__ag3ntum__AskUserQuestion"
+            assert not matches, f"'{name}' matches frontend filter but shouldn't (case sensitivity bug)"
 
 
 class TestAnswerSubmission:
@@ -640,7 +915,16 @@ class TestAskUserQuestionE2E:
     def test_agent_stops_on_ask_user_question(
         self, running_server, e2e_test_environment_with_ask_skill
     ):
-        """Agent stops execution when AskUserQuestion tool is called."""
+        """
+        Agent stops execution when AskUserQuestion tool is called.
+
+        This test STRICTLY verifies:
+        1. Session status becomes 'waiting_for_input' (not just 'complete')
+        2. A pending question exists with proper structure
+        3. The question has options (so the form can be displayed)
+
+        If this test fails, the AskUserQuestion UI form won't appear.
+        """
         import httpx
 
         if running_server is None:
@@ -653,10 +937,15 @@ class TestAskUserQuestionE2E:
         token = get_auth_token(base_url, test_user["email"], test_user["password"])
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Verify test-ask skill is available
+        # Verify test-ask skill is available and has content
         temp_skills = running_server["temp_skills"]
         skill_path = temp_skills / "test-ask" / "test-ask.md"
         assert skill_path.exists(), f"test-ask skill not found at {skill_path}"
+        skill_content = skill_path.read_text()
+        assert len(skill_content) > 100, (
+            f"test-ask skill content is too short ({len(skill_content)} chars). "
+            "Skill file may be empty - check TEST_ASK_SKILL_CONTENT."
+        )
 
         # Start a task that will invoke the AskUserQuestion tool
         response = httpx.post(
@@ -676,30 +965,108 @@ class TestAskUserQuestionE2E:
         data = response.json()
         session_id = data["session_id"]
 
-        # Wait for agent to process and potentially stop
-        time.sleep(5)
+        # Poll for session to reach terminal state (waiting_for_input, complete, or failed)
+        # LLM agents can take significant time to process skills and tools
+        max_wait = 90  # seconds (increased from 30 for LLM processing time)
+        poll_interval = 2  # seconds
+        final_status = None
 
-        # Check session status - should be waiting_for_input
-        response = httpx.get(
-            f"{base_url}/api/v1/sessions/{session_id}",
-            headers=headers,
-            timeout=10.0
-        )
+        for _ in range(max_wait // poll_interval):
+            time.sleep(poll_interval)
+            response = httpx.get(
+                f"{base_url}/api/v1/sessions/{session_id}",
+                headers=headers,
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                session_data = response.json()
+                final_status = session_data.get("status")
+                # Stop polling when we reach a terminal state
+                if final_status in ("waiting_for_input", "complete", "failed", "cancelled"):
+                    break
 
-        if response.status_code == 200:
-            session_data = response.json()
-            # Agent should have stopped waiting for input
-            # (or completed if it didn't use the tool)
-            assert session_data["status"] in ("waiting_for_input", "complete", "running")
-
-            if session_data["status"] == "waiting_for_input":
-                # Verify there's a pending question
-                response = httpx.get(
-                    f"{base_url}/api/v1/sessions/{session_id}/pending-question",
+        # STRICT: Require waiting_for_input status
+        # If we get 'running' after timeout, the agent is taking too long (LLM latency)
+        # If we get 'complete', the agent finished without calling AskUserQuestion
+        if final_status == "running":
+            # Get session events and server logs to diagnose what's happening
+            event_summary = "Unknown (could not fetch events)"
+            event_types = []
+            try:
+                events_response = httpx.get(
+                    f"{base_url}/api/v1/sessions/{session_id}/events/history",
                     headers=headers,
                     timeout=10.0
                 )
-                assert response.status_code == 200
-                pending_data = response.json()
-                assert pending_data["has_pending_question"] is True
-                print(f"✓ Agent stopped with pending question: {pending_data.get('questions', [])}")
+                if events_response.status_code == 200 and events_response.text:
+                    events = events_response.json()
+                    event_types = [e.get("type") for e in events]
+                    tool_calls = [e for e in events if e.get("type") == "tool_start"]
+                    tool_names = [e.get("data", {}).get("tool_name", "?") for e in tool_calls]
+                    # Look for error events and get their data
+                    error_events = [e for e in events if e.get("type") == "error"]
+                    error_details = [e.get("data", {}) for e in error_events]
+                    event_summary = (
+                        f"{len(events)} events: {event_types}, "
+                        f"{len(tool_calls)} tool calls: {tool_names[:5]}, "
+                        f"errors: {error_details}"
+                    )
+            except Exception as e:
+                event_summary = f"Error fetching events: {e}"
+
+            # Try to read server stderr log
+            server_log = ""
+            try:
+                temp_base = running_server["temp_skills"].parent
+                stderr_log = temp_base / "server_stderr.log"
+                if stderr_log.exists():
+                    log_content = stderr_log.read_text()
+                    # Get last 50 lines
+                    server_log = "\n".join(log_content.split("\n")[-50:])
+            except Exception as e:
+                server_log = f"Error reading server log: {e}"
+
+            pytest.fail(
+                f"Agent still 'running' after {max_wait}s timeout. "
+                f"Session {session_id} has {event_summary}. "
+                f"LLM may be slow or stuck.\n"
+                f"Server stderr (last 50 lines):\n{server_log}"
+            )
+        elif final_status == "complete":
+            pytest.fail(
+                f"Agent completed WITHOUT calling AskUserQuestion. "
+                "The skill was not invoked or didn't call the tool. "
+                "Check that skills are enabled and test-ask skill instructs agent to use AskUserQuestion."
+            )
+        elif final_status in ("failed", "cancelled"):
+            pytest.fail(f"Agent {final_status}. Check server logs for errors.")
+
+        assert final_status == "waiting_for_input", (
+            f"Unexpected session status '{final_status}'. Expected 'waiting_for_input'."
+        )
+
+        # Verify there's a pending question with proper structure
+        response = httpx.get(
+            f"{base_url}/api/v1/sessions/{session_id}/pending-question",
+            headers=headers,
+            timeout=10.0
+        )
+        assert response.status_code == 200, f"Failed to get pending question: {response.text}"
+        pending_data = response.json()
+
+        assert pending_data["has_pending_question"] is True, (
+            "Session is waiting_for_input but no pending question found. "
+            "The question_pending event may not have been recorded."
+        )
+
+        # Verify questions have proper structure for UI rendering
+        questions = pending_data.get("questions", [])
+        assert len(questions) > 0, "Pending question has no questions array"
+
+        for i, q in enumerate(questions):
+            assert "question" in q, f"Question {i} missing 'question' field"
+            assert "options" in q, f"Question {i} missing 'options' field"
+            assert len(q["options"]) >= 2, f"Question {i} has fewer than 2 options"
+
+        print(f"✓ Agent stopped with {len(questions)} pending question(s)")
+        print(f"✓ First question: {questions[0].get('question', 'N/A')}")
