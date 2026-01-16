@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom';
 import App from './App';
+import { ErrorBoundary } from './ErrorBoundary';
 import './styles.css';
 
 // Session ID validation: must match backend pattern YYYYMMDD_HHMMSS_8hexchars
@@ -42,14 +43,16 @@ if (!container) {
 
 createRoot(container).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <TrailingSlashRedirect />
-      <Routes>
-        <Route path="/" element={<App />} />
-        <Route path="/session/:sessionId/" element={<SessionRoute />} />
-        <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <TrailingSlashRedirect />
+        <Routes>
+          <Route path="/" element={<App />} />
+          <Route path="/session/:sessionId/" element={<SessionRoute />} />
+          <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );

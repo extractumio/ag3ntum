@@ -290,6 +290,8 @@ class RedisEventHub:
                 f"Failed to publish event to Redis for session {session_id}: {e}"
             )
             # Don't raise - event may still be in DB for replay
+            # Emit infrastructure error to local subscribers so clients know something is wrong
+            await self._emit_infrastructure_error(session_id, "redis_publish_failed", str(e))
 
     async def get_subscriber_count(self, session_id: str) -> int:
         """
@@ -331,6 +333,45 @@ class RedisEventHub:
                 }
                 for q in subscribers
             ]
+
+    async def _emit_infrastructure_error(
+        self, session_id: str, error_type: str, error_message: str
+    ) -> None:
+        """
+        Emit an infrastructure error event to all local subscribers.
+
+        This notifies connected clients when infrastructure issues occur
+        (e.g., Redis publish failures) so they can take appropriate action.
+
+        Args:
+            session_id: The session ID.
+            error_type: Type of infrastructure error (e.g., "redis_publish_failed").
+            error_message: Human-readable error message.
+        """
+        from datetime import datetime, timezone
+
+        error_event = {
+            "type": "infrastructure_error",
+            "data": {
+                "error_type": error_type,
+                "message": error_message,
+                "recoverable": True,
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sequence": -1,  # Infrastructure events don't have sequence numbers
+        }
+
+        async with self._lock:
+            subscribers = self._subscribers.get(session_id, set())
+            for queue in subscribers:
+                try:
+                    # Use put_nowait to avoid blocking
+                    queue.put_nowait(error_event)
+                except asyncio.QueueFull:
+                    # Queue is full, skip this subscriber
+                    logger.warning(
+                        f"Could not deliver infrastructure error to subscriber: queue full"
+                    )
 
     async def close(self) -> None:
         """Close Redis connection pool and cancel all listener tasks."""

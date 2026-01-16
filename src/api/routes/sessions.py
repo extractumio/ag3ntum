@@ -767,7 +767,29 @@ async def stream_events(
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
+                    # Enhanced heartbeat with session state information
+                    # This helps clients detect session completion even if terminal event was lost
+                    try:
+                        current_session = await session_service.get_session(db, session_id)
+                        session_status = current_session.status if current_session else "unknown"
+                        current_last_seq = await event_service.get_last_sequence(session_id)
+                        redis_ok = agent_runner._event_hub is not None
+                    except Exception:
+                        session_status = "unknown"
+                        current_last_seq = last_sequence
+                        redis_ok = False
+
+                    heartbeat_data = {
+                        "type": "heartbeat",
+                        "data": {
+                            "session_status": session_status,
+                            "last_sequence": current_last_seq,
+                            "redis_ok": redis_ok,
+                            "server_time": datetime.now(timezone.utc).isoformat(),
+                        },
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    yield f"data: {json.dumps(heartbeat_data)}\n\n"
 
                     # Check if task finished while waiting
                     if not agent_runner.is_running(session_id) and queue.empty():

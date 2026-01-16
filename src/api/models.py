@@ -39,6 +39,25 @@ class HealthResponse(BaseModel):
     )
 
 
+class ComponentHealth(BaseModel):
+    """Health status for a single component."""
+    status: str = Field(description="Component status: ok, degraded, or unhealthy")
+    latency_ms: float | None = Field(default=None, description="Response latency in milliseconds")
+    error: str | None = Field(default=None, description="Error message if unhealthy")
+
+
+class DeepHealthResponse(BaseModel):
+    """Response from GET /health/deep with detailed component health."""
+    status: str = Field(description="Overall status: ok, degraded, or unhealthy")
+    version: str = Field(description="API version")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Current server time"
+    )
+    database: ComponentHealth = Field(description="Database health status")
+    redis: ComponentHealth = Field(description="Redis health status")
+
+
 class ConfigResponse(BaseModel):
     """Response from GET /config."""
     models_available: list[str] = Field(

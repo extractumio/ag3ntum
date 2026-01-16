@@ -16,7 +16,9 @@ export type SSEEventType =
   | 'cancelled'
   | 'subagent_start'
   | 'subagent_message'
-  | 'subagent_stop';
+  | 'subagent_stop'
+  | 'heartbeat'
+  | 'infrastructure_error';
 
 export interface SSEEvent {
   type: SSEEventType;

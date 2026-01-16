@@ -2445,6 +2445,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting' | 'polling' | 'degraded'>('connected');
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [expandedSubagents, setExpandedSubagents] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
@@ -2740,10 +2741,30 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           setReconnecting(true);
           setError(`Connection lost. Reconnecting (attempt ${attempt})...`);
         },
-        lastSequence ?? null
+        lastSequence ?? null,
+        // Heartbeat callback - can detect session completion from heartbeat
+        (heartbeatData) => {
+          if (heartbeatData.session_status &&
+              ['completed', 'failed', 'cancelled'].includes(heartbeatData.session_status)) {
+            // Session ended - refresh to get final state
+            refreshSessions();
+          }
+        },
+        // Connection state change callback
+        (state) => {
+          setConnectionState(state);
+          if (state === 'connected') {
+            setReconnecting(false);
+            setError(null);
+          } else if (state === 'polling') {
+            setError('Connection degraded - using polling mode. Will retry SSE automatically.');
+          } else if (state === 'degraded') {
+            setError('Connection issues - retrying...');
+          }
+        }
       );
     },
-    [config, token, handleEvent]
+    [config, token, handleEvent, refreshSessions]
   );
 
   const handleSubmit = async (): Promise<void> => {
@@ -4308,7 +4329,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               onModelChange={setSelectedModel}
               availableModels={availableModels}
             />
-            <div className={`input-message ${error ? (reconnecting ? 'warning' : 'error') : ''}`}>
+            <div className={`input-message ${error ? (reconnecting || connectionState === 'polling' ? 'warning' : 'error') : ''}`}>
               {error || '\u00A0'}
             </div>
           </div>
@@ -4318,7 +4339,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           statusLabel={statusLabel}
           statusClass={statusClass}
           stats={stats}
-          connected={Boolean(token) && !reconnecting}
+          connected={Boolean(token) && !reconnecting && connectionState === 'connected'}
           startTime={runningStartTime}
         />
       </div>
