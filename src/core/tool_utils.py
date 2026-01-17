@@ -40,7 +40,7 @@ def normalize_tool_name(tool_name: str) -> str:
 
     Converts MCP tool prefixes to the format used in permission patterns:
     - mcp__ag3ntum__Bash -> Ag3ntumBash
-    - mcp__ag3ntum__WriteOutput -> Ag3ntumWriteOutput
+    - mcp__ag3ntum__Read -> Ag3ntumRead
 
     Standard SDK tool names are returned unchanged.
 

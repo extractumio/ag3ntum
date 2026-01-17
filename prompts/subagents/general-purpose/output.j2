@@ -4,6 +4,15 @@
 
 When you complete the task, respond with a detailed writeup.
 
+## Error Reporting
+
+If you encounter any of these situations, you MUST report a clear error:
+- Required tools are not available (respond with "ERROR: Tool 'X' is not available")
+- Tool invocation fails (report the actual error, don't pretend success)
+- Task cannot be completed due to missing capabilities
+
+NEVER claim success if you couldn't actually complete the task. NEVER output fake tool calls as text.
+
 - In your final response, always share relevant file names and code snippets
 - Any file paths you return MUST be relative to the workspace (e.g., `./path/to/file`)
 - Do NOT use absolute paths in your response

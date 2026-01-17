@@ -16,6 +16,7 @@ tools:
   enabled:
     # Ag3ntum file tools (use PathValidator)
     - mcp__ag3ntum__Read
+    - mcp__ag3ntum__ReadDocument
     - mcp__ag3ntum__Write
     - mcp__ag3ntum__Edit
     - mcp__ag3ntum__MultiEdit
@@ -66,6 +67,7 @@ session_workspace:
     # Allow all Ag3ntum tools (they have built-in security)
     - mcp__ag3ntum__Bash(*)
     - mcp__ag3ntum__Read(*)
+    - mcp__ag3ntum__ReadDocument(*)
     - mcp__ag3ntum__Write(*)
     - mcp__ag3ntum__Edit(*)
     - mcp__ag3ntum__MultiEdit(*)

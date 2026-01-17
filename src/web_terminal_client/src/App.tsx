@@ -592,12 +592,12 @@ function formatToolInput(input: unknown): string {
 }
 
 function formatToolName(name: string): string {
-  // Handle double underscore prefix (mcp__ag3ntum__WriteOutput -> Ag3ntumWriteOutput)
+  // Handle double underscore prefix (mcp__ag3ntum__Bash -> Ag3ntumBash)
   if (name.startsWith('mcp__ag3ntum__')) {
     const suffix = name.slice('mcp__ag3ntum__'.length);
     return `Ag3ntum${suffix}`;
   }
-  // Handle single underscore prefix (legacy: mcp_ag3ntum_write_output -> Ag3ntumWriteOutput)
+  // Handle single underscore prefix (legacy: mcp_ag3ntum_bash -> Ag3ntumBash)
   if (name.startsWith('mcp_ag3ntum_')) {
     const suffix = name.slice('mcp_ag3ntum_'.length);
     const capitalized = suffix
@@ -658,6 +658,24 @@ function extractTodos(toolCalls: ToolCallView[]): TodoItem[] | null {
     .filter((item): item is TodoItem => Boolean(item));
 }
 
+// Convert Python repr format to JSON string
+function pythonReprToJson(input: string): string {
+  // Convert Python repr to JSON:
+  // 1. Protect escaped single quotes (\') with placeholder - they become unescaped ' in JSON
+  // 2. Escape existing double quotes (they'll be inside double-quoted JSON strings)
+  // 3. Convert single quotes to double quotes
+  // 4. Restore protected single quotes (no escaping needed in double-quoted strings)
+  const SQ_PLACEHOLDER = '\x00SQ\x00';
+  return input
+    .replace(/\\'/g, SQ_PLACEHOLDER)  // Protect escaped single quotes
+    .replace(/"/g, '\\"')             // Escape existing double quotes
+    .replace(/'/g, '"')               // Convert single to double quotes
+    .replace(new RegExp(SQ_PLACEHOLDER, 'g'), "'")  // Restore as unescaped single quotes
+    .replace(/\bTrue\b/g, 'true')     // Python True -> JSON true
+    .replace(/\bFalse\b/g, 'false')   // Python False -> JSON false
+    .replace(/\bNone\b/g, 'null');    // Python None -> JSON null
+}
+
 // Convert text to YAML if it looks like JSON or Python repr
 function formatOutputAsYaml(output: string): { formatted: string; isYaml: boolean } {
   const trimmed = output.trim();
@@ -665,27 +683,62 @@ function formatOutputAsYaml(output: string): { formatted: string; isYaml: boolea
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
     return { formatted: output, isYaml: false };
   }
+
+  // Check if output appears truncated (doesn't end with proper closing)
+  const isTruncated = !trimmed.endsWith('}') && !trimmed.endsWith(']') &&
+                      !trimmed.endsWith('}\n') && !trimmed.endsWith(']\n');
+
+  // Try parsing as JSON first
   try {
     const parsed = JSON.parse(trimmed);
     const yamlStr = YAML.stringify(parsed, { indent: 2, lineWidth: 120 });
     return { formatted: yamlStr, isYaml: true };
   } catch {
-    // Try converting Python repr format (single quotes) to JSON (double quotes)
-    try {
-      // Replace single quotes with double quotes, handling escaped quotes
-      // This handles Python's repr() output format
-      const jsonLike = trimmed
-        .replace(/'/g, '"')           // Convert single to double quotes
-        .replace(/True/g, 'true')     // Python True -> JSON true
-        .replace(/False/g, 'false')   // Python False -> JSON false
-        .replace(/None/g, 'null');    // Python None -> JSON null
-      const parsed = JSON.parse(jsonLike);
-      const yamlStr = YAML.stringify(parsed, { indent: 2, lineWidth: 120 });
-      return { formatted: yamlStr, isYaml: true };
-    } catch {
-      // Not valid JSON or Python repr, return as-is
-      return { formatted: output, isYaml: false };
+    // Not valid JSON, continue to Python repr conversion
+  }
+
+  // Try converting Python repr format to JSON
+  try {
+    const jsonLike = pythonReprToJson(trimmed);
+    const parsed = JSON.parse(jsonLike);
+    const yamlStr = YAML.stringify(parsed, { indent: 2, lineWidth: 120 });
+    return { formatted: yamlStr, isYaml: true };
+  } catch {
+    // Parsing failed - if truncated, try to complete the structure
+    if (isTruncated) {
+      // Try to fix truncated structure by adding closing brackets
+      const jsonLike = pythonReprToJson(trimmed);
+      // Count open/close brackets to determine what's missing
+      let openBrackets = 0;
+      let openBraces = 0;
+      for (const char of jsonLike) {
+        if (char === '[') openBrackets++;
+        else if (char === ']') openBrackets--;
+        else if (char === '{') openBraces++;
+        else if (char === '}') openBraces--;
+      }
+      // Try to close the structure
+      let fixedJson = jsonLike;
+      // If we're in a string, close it
+      const quoteCount = (jsonLike.match(/(?<!\\)"/g) || []).length;
+      if (quoteCount % 2 !== 0) {
+        fixedJson += '"';
+      }
+      // Add missing closing brackets
+      fixedJson += '}'.repeat(Math.max(0, openBraces));
+      fixedJson += ']'.repeat(Math.max(0, openBrackets));
+
+      try {
+        const parsed = JSON.parse(fixedJson);
+        const yamlStr = YAML.stringify(parsed, { indent: 2, lineWidth: 120 });
+        return { formatted: yamlStr + '\n... (truncated)', isYaml: true };
+      } catch {
+        // Still can't parse, return as-is
+      }
     }
+
+    // Final fallback: return as-is
+    return { formatted: output, isYaml: false };
   }
 }
 
@@ -702,7 +755,7 @@ function CollapsibleOutput({
   const [isExpanded, setIsExpanded] = useState(false);
 
   const { formatted, isYaml } = useMemo(() => formatOutputAsYaml(output), [output]);
-  const lines = formatted.split('\n');
+  const lines = useMemo(() => formatted.split('\n'), [formatted]);
   const totalLines = lines.length;
   const needsCollapse = totalLines > COLLAPSED_LINE_COUNT;
 
@@ -1854,6 +1907,127 @@ function ResultSection({
   );
 }
 
+// Right panel details component - shows tool calls, subagents, and files for selected message
+function RightPanelDetails({
+  message,
+  toolExpanded,
+  onToggleTool,
+  subagentExpanded,
+  onToggleSubagent,
+  commentsExpanded,
+  onToggleComments,
+  filesExpanded,
+  onToggleFiles,
+  onFileAction,
+  onExpandAll,
+  onCollapseAll,
+}: {
+  message: ConversationItem | null;
+  toolExpanded: Set<string>;
+  onToggleTool: (id: string) => void;
+  subagentExpanded: Set<string>;
+  onToggleSubagent: (id: string) => void;
+  commentsExpanded: boolean;
+  onToggleComments: () => void;
+  filesExpanded: boolean;
+  onToggleFiles: () => void;
+  onFileAction?: (file: string, action: 'view' | 'download') => void;
+  onExpandAll: () => void;
+  onCollapseAll: () => void;
+}): JSX.Element {
+  if (!message) {
+    return (
+      <div className="right-panel-empty">
+        Select a message to view details
+      </div>
+    );
+  }
+
+  // Extract data based on message type
+  if (message.type === 'user') {
+    return (
+      <div className="right-panel-empty">
+        No details available for user messages
+      </div>
+    );
+  }
+
+  // Type narrowing for agent_message and output types
+  const toolCalls = message.type === 'agent_message' ? message.toolCalls : [];
+  const subagents = message.type === 'agent_message' ? message.subagents : [];
+  const comments = message.comments;
+  const files = message.files;
+
+  const hasContent = toolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
+
+  if (!hasContent) {
+    return (
+      <div className="right-panel-empty">
+        No tool calls or files for this message
+      </div>
+    );
+  }
+
+  return (
+    <div className="right-panel-details">
+      {/* Expand/Collapse All Buttons */}
+      <div className="right-panel-actions">
+        <button className="filter-button" type="button" onClick={onExpandAll} title="Expand all sections (Alt+[)">
+          [expand all]
+        </button>
+        <button className="filter-button" type="button" onClick={onCollapseAll} title="Collapse all sections (Alt+])">
+          [collapse all]
+        </button>
+      </div>
+
+      {/* Tool Calls */}
+      {toolCalls.length > 0 && (
+        <div className="tool-call-section">
+          <div className="section-title">Tool Calls ({toolCalls.length})</div>
+          {toolCalls.map((tool: ToolCallView, idx: number) => (
+            <ToolCallBlock
+              key={tool.id}
+              tool={tool}
+              expanded={toolExpanded.has(tool.id)}
+              onToggle={() => onToggleTool(tool.id)}
+              isLast={idx === toolCalls.length - 1}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* SubAgents */}
+      {subagents.length > 0 && (
+        <div className="subagent-section">
+          <div className="section-title">SubAgents ({subagents.length})</div>
+          {subagents.map((sub: SubagentView, idx: number) => (
+            <SubagentBlock
+              key={sub.id}
+              subagent={sub}
+              expanded={subagentExpanded.has(sub.id)}
+              onToggle={() => onToggleSubagent(sub.id)}
+              isLast={idx === subagents.length - 1}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Result Section - Comments and Files */}
+      {(Boolean(comments) || Boolean(files?.length)) && (
+        <ResultSection
+          comments={comments}
+          commentsExpanded={commentsExpanded}
+          onToggleComments={onToggleComments}
+          files={files}
+          filesExpanded={filesExpanded}
+          onToggleFiles={onToggleFiles}
+          onFileAction={onFileAction}
+        />
+      )}
+    </div>
+  );
+}
+
 function AgentMessageBlock({
   id,
   time,
@@ -1953,6 +2127,32 @@ function AgentMessageBlock({
         <span className="message-icon">◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
+        {/* Message stats badges */}
+        {(otherToolCalls.length > 0 || subagents.length > 0 || (files && files.length > 0)) && (
+          <div className="message-stats">
+            {otherToolCalls.length > 0 && (
+              <span className="message-stat-badge stat-tools">
+                <span className="stat-icon">◉</span>
+                <span className="stat-label">Tools</span>
+                <span className="stat-count">×{otherToolCalls.length}</span>
+              </span>
+            )}
+            {subagents.length > 0 && (
+              <span className="message-stat-badge stat-subagents">
+                <span className="stat-icon">◉</span>
+                <span className="stat-label">SubAgents</span>
+                <span className="stat-count">×{subagents.length}</span>
+              </span>
+            )}
+            {files && files.length > 0 && (
+              <span className="message-stat-badge stat-files">
+                <span className="stat-icon">◉</span>
+                <span className="stat-label">Files</span>
+                <span className="stat-count">×{files.length}</span>
+              </span>
+            )}
+          </div>
+        )}
         {displayContent && <CopyButtons contentRef={contentRef} markdown={displayContent} className="message-header-copy-buttons" />}
         {isMobile && hasOtherRightContent && (
           <button
@@ -2566,6 +2766,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [mobileExpandedMessages, setMobileExpandedMessages] = useState<Set<string>>(new Set());
   const [systemEventsExpanded, setSystemEventsExpanded] = useState(false);
   const [fileExplorerVisible, setFileExplorerVisible] = useState(false);
+  // New layout state
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [rightPanelMode, setRightPanelMode] = useState<'details' | 'explorer'>('details');
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  // Resizable panel state
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
+    const stored = localStorage.getItem('rightPanelWidth');
+    return stored ? parseInt(stored, 10) : 400;
+  });
+  const [isDraggingDivider, setIsDraggingDivider] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
   const [fileExplorerRefreshKey, setFileExplorerRefreshKey] = useState(0);
   const [fileExplorerModalOpen, setFileExplorerModalOpen] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
@@ -3329,6 +3540,41 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     });
   }, []);
 
+  // Divider drag handlers for resizable panels
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingDivider(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDraggingDivider) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!mainRef.current) return;
+      const mainRect = mainRef.current.getBoundingClientRect();
+      const newWidth = mainRect.right - e.clientX;
+      // Clamp between min (250px) and max (70% of main width)
+      const minWidth = 250;
+      const maxWidth = mainRect.width * 0.7;
+      const clampedWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+      setRightPanelWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingDivider(false);
+      // Persist to localStorage
+      localStorage.setItem('rightPanelWidth', String(rightPanelWidth));
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingDivider, rightPanelWidth]);
+
   const conversation = useMemo<ConversationItem[]>(() => {
     const sortedEvents = [...events].sort((a, b) => {
       const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
@@ -3970,6 +4216,26 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     return items;
   }, [events]);
 
+  // Auto-select the latest agent message for the right panel
+  useEffect(() => {
+    // Find the last agent_message or output with content
+    const messagesWithDetails = conversation.filter(
+      (item) => item.type === 'agent_message' || item.type === 'output'
+    );
+
+    if (messagesWithDetails.length > 0) {
+      const lastMessage = messagesWithDetails[messagesWithDetails.length - 1];
+      // Auto-select the latest message when:
+      // 1. Nothing is selected yet
+      // 2. The selected message no longer exists
+      // 3. Session is running (to follow the active message)
+      const selectedExists = conversation.find((item) => item.id === selectedMessageId);
+      if (!selectedMessageId || !selectedExists || status === 'running') {
+        setSelectedMessageId(lastMessage.id);
+      }
+    }
+  }, [conversation, selectedMessageId, status]);
+
   const toolStats = useMemo(() => {
     const statsMap: Record<string, number> = {};
     conversation.forEach((item) => {
@@ -4209,6 +4475,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
   const handleShowInExplorer = useCallback((filePath: string) => {
     // Open file explorer and navigate to the file
+    setRightPanelMode('explorer');
     setFileExplorerVisible(true);
     setNavigateToPath(filePath);
   }, []);
@@ -4387,233 +4654,167 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             </div>
           </div>
           <div className="filter-actions">
-            {!fileExplorerVisible && (
-              <>
-                <button className="filter-button" type="button" onClick={expandAllSections} title="Expand all sections (Alt+[)">
-                  [expand all]
-                </button>
-                <button className="filter-button" type="button" onClick={collapseAllSections} title="Collapse all sections (Alt+[)">
-                  [collapse all]
-                </button>
-              </>
-            )}
-            {currentSession && (
-              <button
-                className={`filter-button ${fileExplorerVisible ? 'active' : ''}`}
-                type="button"
-                onClick={() => {
-                  const willBeVisible = !fileExplorerVisible;
-                  setFileExplorerVisible(willBeVisible);
-                  // Increment refresh key when opening to force reload of file list
-                  if (willBeVisible) {
-                    setFileExplorerRefreshKey((k) => k + 1);
-                  }
-                }}
-                title="Toggle File Explorer (Alt+E)"
-              >
-                [File Explorer]
-              </button>
-            )}
+            {/* Expand/Collapse All and File Explorer buttons moved to Details panel */}
           </div>
         </div>
       </header>
 
-      <main className={`terminal-body ${rightPanelCollapsed ? 'panel-collapsed' : ''}`}>
-        {/* Panel toggle - vertical gutter or edge tab */}
-        {!isMobile && (
-          <div
-            className={`panel-toggle-edge ${rightPanelCollapsed ? 'collapsed' : ''}`}
-            onClick={toggleRightPanel}
-            title={rightPanelCollapsed ? 'Show details panel' : 'Hide details panel'}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleRightPanel(); }}
-          >
-            <span className="panel-toggle-icon">
-              {rightPanelCollapsed ? '◂' : '▸'}
-            </span>
-          </div>
-        )}
-        <div ref={outputRef} className="terminal-output">
-          {conversation.length === 0 ? (
-            <div className="terminal-empty">Enter a task below to begin.</div>
-          ) : (
-            <AgentMessageContext.Provider
-              value={
-                currentSession && config && token
-                  ? {
-                      sessionId: currentSession.id,
-                      baseUrl: config.api.base_url,
-                      token,
-                      onShowInExplorer: handleShowInExplorer,
-                    }
-                  : null
-              }
-            >
-              {conversation.map((item, index) => {
-                if (item.type === 'user') {
-                  return (
-                    <MessageBlock
-                      key={item.id}
-                      sender="USER"
-                      time={item.time}
-                      content={item.content}
-                      rightPanelCollapsed={rightPanelCollapsed}
-                      isMobile={isMobile}
-                      isLarge={item.isLarge}
-                      sizeDisplay={item.sizeDisplay}
-                      processedText={item.processedText}
-                    />
-                  );
+      <main ref={mainRef} className={`terminal-main ${isDraggingDivider ? 'resizing' : ''}`}>
+        {/* Left column - conversation and input */}
+        <div className="terminal-left">
+          <div ref={outputRef} className="terminal-output">
+            {conversation.length === 0 ? (
+              <div className="terminal-empty">Enter a task below to begin.</div>
+            ) : (
+              <AgentMessageContext.Provider
+                value={
+                  currentSession && config && token
+                    ? {
+                        sessionId: currentSession.id,
+                        baseUrl: config.api.base_url,
+                        token,
+                        onShowInExplorer: handleShowInExplorer,
+                      }
+                    : null
                 }
-                if (item.type === 'agent_message') {
-                  const isLastAgentMessage = conversation
-                    .slice(index + 1)
-                    .every((i) => i.type !== 'agent_message');
-                  const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
-                  const todoPayload = todosByAgentId.get(item.id);
-                  const todos = todoPayload?.todos ?? null;
-                  // Only show streaming on the last agent message when overall status is running
-                  const showStreaming = item.isStreaming && isLastAgentMessage && status === 'running';
-                  return (
-                    <AgentMessageBlock
-                      key={item.id}
-                      id={item.id}
-                      time={item.time}
-                      content={item.content}
-                      toolCalls={item.toolCalls}
-                      subagents={item.subagents}
-                      todos={todos ?? undefined}
-                      toolExpanded={expandedTools}
-                      onToggleTool={toggleTool}
-                      subagentExpanded={expandedSubagents}
-                      onToggleSubagent={toggleSubagent}
-                      status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
-                      structuredStatus={item.structuredStatus}
-                      structuredError={item.structuredError}
-                      comments={item.comments}
-                      commentsExpanded={expandedComments.has(item.id)}
-                      onToggleComments={() => toggleComments(item.id)}
-                      files={item.files}
-                      filesExpanded={expandedFiles.has(item.id)}
-                      onToggleFiles={() => toggleFiles(item.id)}
-                      isStreaming={showStreaming}
-                      sessionRunning={isLastAgentMessage && status === 'running'}
-                      rightPanelCollapsed={rightPanelCollapsed}
-                      isMobile={isMobile}
-                      mobileExpanded={mobileExpandedMessages.has(item.id)}
-                      onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
-                      onSubmitAnswer={handleSubmitAnswer}
-                    />
-                  );
-                }
-                if (item.type === 'output') {
-                  return (
-                    <OutputBlock
-                      key={item.id}
-                      id={item.id}
-                      time={item.time}
-                      output={item.output}
-                      comments={item.comments}
-                      commentsExpanded={expandedComments.has(item.id)}
-                      onToggleComments={() => toggleComments(item.id)}
-                      files={item.files}
-                      filesExpanded={expandedFiles.has(item.id)}
-                      onToggleFiles={() => toggleFiles(item.id)}
-                      status={item.status}
-                      error={item.error}
-                      onFileAction={handleFileAction}
-                      rightPanelCollapsed={rightPanelCollapsed}
-                      isMobile={isMobile}
-                      mobileExpanded={mobileExpandedMessages.has(item.id)}
-                      onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
-                    />
-                  );
-                }
-                return null;
-              })}
-            </AgentMessageContext.Provider>
-          )}
-        </div>
-        {/* File Explorer Overlay */}
-        {fileExplorerVisible && currentSession && config && token && (
-          <div className="file-explorer-overlay">
-            <div className="file-explorer-overlay-header">
-              <span className="file-explorer-overlay-title">File Explorer</span>
-              <label className="file-explorer-hidden-toggle">
-                <input
-                  type="checkbox"
-                  checked={showHiddenFiles}
-                  onChange={(e) => setShowHiddenFiles(e.target.checked)}
-                />
-                <span>Hidden</span>
-              </label>
-              <button
-                type="button"
-                className="file-explorer-overlay-close"
-                onClick={() => setFileExplorerVisible(false)}
-                title="Close file explorer (Esc)"
               >
-                [close]
-              </button>
-            </div>
-            <FileExplorer
-              key={fileExplorerRefreshKey}
-              sessionId={currentSession.id}
-              baseUrl={config.api.base_url}
-              token={token}
-              showHiddenFiles={showHiddenFiles}
-              onError={(err) => setError(err)}
-              onModalStateChange={setFileExplorerModalOpen}
-              navigateTo={navigateToPath}
-              onNavigateComplete={handleNavigateComplete}
-            />
+                {conversation.map((item, index) => {
+                  const isSelected = selectedMessageId === item.id;
+                  if (item.type === 'user') {
+                    return (
+                      <MessageBlock
+                        key={item.id}
+                        sender="USER"
+                        time={item.time}
+                        content={item.content}
+                        rightPanelCollapsed={rightPanelCollapsed}
+                        isMobile={isMobile}
+                        isLarge={item.isLarge}
+                        sizeDisplay={item.sizeDisplay}
+                        processedText={item.processedText}
+                      />
+                    );
+                  }
+                  if (item.type === 'agent_message') {
+                    const isLastAgentMessage = conversation
+                      .slice(index + 1)
+                      .every((i) => i.type !== 'agent_message');
+                    const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
+                    const todoPayload = todosByAgentId.get(item.id);
+                    const todos = todoPayload?.todos ?? null;
+                    // Only show streaming on the last agent message when overall status is running
+                    const showStreaming = item.isStreaming && isLastAgentMessage && status === 'running';
+                    return (
+                      <div
+                        key={item.id}
+                        className={`message-block-wrapper selectable ${isSelected ? 'selected' : ''}`}
+                        onClick={() => {
+                          setSelectedMessageId(item.id);
+                          setRightPanelMode('details');
+                          if (isMobile) setMobilePanelOpen(true);
+                        }}
+                      >
+                        <AgentMessageBlock
+                          id={item.id}
+                          time={item.time}
+                          content={item.content}
+                          toolCalls={item.toolCalls}
+                          subagents={item.subagents}
+                          todos={todos ?? undefined}
+                          toolExpanded={expandedTools}
+                          onToggleTool={toggleTool}
+                          subagentExpanded={expandedSubagents}
+                          onToggleSubagent={toggleSubagent}
+                          status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
+                          structuredStatus={item.structuredStatus}
+                          structuredError={item.structuredError}
+                          comments={item.comments}
+                          commentsExpanded={expandedComments.has(item.id)}
+                          onToggleComments={() => toggleComments(item.id)}
+                          files={item.files}
+                          filesExpanded={expandedFiles.has(item.id)}
+                          onToggleFiles={() => toggleFiles(item.id)}
+                          isStreaming={showStreaming}
+                          sessionRunning={isLastAgentMessage && status === 'running'}
+                          rightPanelCollapsed={rightPanelCollapsed}
+                          isMobile={isMobile}
+                          mobileExpanded={mobileExpandedMessages.has(item.id)}
+                          onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
+                          onSubmitAnswer={handleSubmitAnswer}
+                        />
+                      </div>
+                    );
+                  }
+                  if (item.type === 'output') {
+                    return (
+                      <div
+                        key={item.id}
+                        className={`message-block-wrapper selectable ${isSelected ? 'selected' : ''}`}
+                        onClick={() => {
+                          setSelectedMessageId(item.id);
+                          setRightPanelMode('details');
+                          if (isMobile) setMobilePanelOpen(true);
+                        }}
+                      >
+                        <OutputBlock
+                          id={item.id}
+                          time={item.time}
+                          output={item.output}
+                          comments={item.comments}
+                          commentsExpanded={expandedComments.has(item.id)}
+                          onToggleComments={() => toggleComments(item.id)}
+                          files={item.files}
+                          filesExpanded={expandedFiles.has(item.id)}
+                          onToggleFiles={() => toggleFiles(item.id)}
+                          status={item.status}
+                          error={item.error}
+                          onFileAction={handleFileAction}
+                          rightPanelCollapsed={rightPanelCollapsed}
+                          isMobile={isMobile}
+                          mobileExpanded={mobileExpandedMessages.has(item.id)}
+                          onToggleMobileExpand={() => toggleMobileMessageExpand(item.id)}
+                        />
+                      </div>
+                    );
+                  }
+                  return null;
+                })}
+              </AgentMessageContext.Provider>
+            )}
           </div>
-        )}
-        {/* File Viewer Modal - for viewing files from result file list */}
-        {(viewerFile || viewerLoading) && (
-          <FileViewerModal
-            file={viewerFile}
-            isLoading={viewerLoading}
-            onClose={handleCloseViewer}
-            onDownload={handleViewerDownload}
-            imageUrl={viewerImageUrl}
-          />
-        )}
-      </main>
 
-      <div className="terminal-footer">
+          {/* Footer/Input area - inside left column */}
+          <div className="terminal-footer">
         <div className="usage-bar-row">
           <FooterCopyButtons conversation={conversation} outputRef={outputRef} />
         </div>
-        <div className="usage-bar-row">
-          {loadedSkills.length > 0 && (
-            <div className="skills-bar">
-              <span className="skills-label">Skills ({loadedSkills.length}):</span>
-              {loadedSkills.map((skill) => (
-                <SkillTag
-                  key={skill.id}
-                  id={skill.id}
-                  name={skill.name}
-                  description={skill.description}
-                  onClick={() => setInputValue(`/${skill.id} `)}
-                />
-              ))}
-            </div>
-          )}
-          <div className="tool-usage-bar">
-            <span className="tool-usage-label">Tool Usage ({totalToolCalls} calls):</span>
-            {Object.keys(toolStats).map((tool) => (
-              <ToolTag key={tool} type={tool} count={toolStats[tool]} />
+        {loadedSkills.length > 0 && (
+          <div className="usage-bar-row">
+            <span className="usage-bar-label">Skills ({loadedSkills.length}):</span>
+            {loadedSkills.map((skill) => (
+              <SkillTag
+                key={skill.id}
+                id={skill.id}
+                name={skill.name}
+                description={skill.description}
+                onClick={() => setInputValue(`/${skill.id} `)}
+              />
             ))}
           </div>
+        )}
+        <div className="usage-bar-row">
+          <span className="usage-bar-label">Tools:</span>
+          {Object.keys(toolStats).map((tool) => (
+            <ToolTag key={tool} type={tool} count={toolStats[tool]} />
+          ))}
           {totalSubagentCalls > 0 && (
-            <div className="subagent-usage-bar">
-              <span className="subagent-usage-label">SubAgents ({totalSubagentCalls} calls):</span>
+            <>
+              <span className="usage-bar-separator">|</span>
+              <span className="usage-bar-label">Agents:</span>
               {Object.keys(subagentStats).map((name) => (
                 <SubagentTag key={name} name={name} count={subagentStats[name]} />
               ))}
-            </div>
+            </>
           )}
           <SystemEventsToggle
             count={systemEvents.length}
@@ -4655,7 +4856,131 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           connected={Boolean(token) && !reconnecting && connectionState === 'connected'}
           startTime={runningStartTime}
         />
-      </div>
+          </div>
+        </div>
+
+        {/* Draggable divider */}
+        {!isMobile && (
+          <div
+            className={`terminal-divider ${isDraggingDivider ? 'dragging' : ''}`}
+            onMouseDown={handleDividerMouseDown}
+          />
+        )}
+
+        {/* Right column - details panel or file explorer */}
+        <div
+          className={`terminal-right ${isMobile && mobilePanelOpen ? 'mobile-open' : ''}`}
+          style={!isMobile ? { width: rightPanelWidth, flex: 'none' } : undefined}
+        >
+          <div className="right-panel-header">
+            <button
+              type="button"
+              className={`right-panel-tab ${rightPanelMode === 'details' ? 'active' : ''}`}
+              onClick={() => setRightPanelMode('details')}
+            >
+              Details
+            </button>
+            <button
+              type="button"
+              className={`right-panel-tab ${rightPanelMode === 'explorer' ? 'active' : ''}`}
+              onClick={() => {
+                setRightPanelMode('explorer');
+                if (!fileExplorerVisible) {
+                  setFileExplorerVisible(true);
+                  setFileExplorerRefreshKey((k) => k + 1);
+                }
+              }}
+            >
+              File Explorer
+            </button>
+            {isMobile && (
+              <button
+                type="button"
+                className="right-panel-tab right-panel-close"
+                onClick={() => setMobilePanelOpen(false)}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <div className="right-panel-content">
+            {rightPanelMode === 'details' ? (() => {
+              const displayMessageId = selectedMessageId;
+              return (
+                <RightPanelDetails
+                  message={conversation.find((item) => item.id === displayMessageId) ?? null}
+                  toolExpanded={expandedTools}
+                  onToggleTool={toggleTool}
+                  subagentExpanded={expandedSubagents}
+                  onToggleSubagent={toggleSubagent}
+                  commentsExpanded={displayMessageId ? expandedComments.has(displayMessageId) : false}
+                  onToggleComments={() => displayMessageId && toggleComments(displayMessageId)}
+                  filesExpanded={displayMessageId ? expandedFiles.has(displayMessageId) : false}
+                  onToggleFiles={() => displayMessageId && toggleFiles(displayMessageId)}
+                  onFileAction={handleFileAction}
+                  onExpandAll={expandAllSections}
+                  onCollapseAll={collapseAllSections}
+                />
+              );
+            })() : currentSession && config && token ? (
+              <>
+                <div className="file-explorer-options">
+                  <label className="file-explorer-hidden-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showHiddenFiles}
+                      onChange={(e) => setShowHiddenFiles(e.target.checked)}
+                    />
+                    <span>Show hidden files</span>
+                  </label>
+                </div>
+                <FileExplorer
+                  key={fileExplorerRefreshKey}
+                  sessionId={currentSession.id}
+                  baseUrl={config.api.base_url}
+                  token={token}
+                  showHiddenFiles={showHiddenFiles}
+                  onError={(err) => setError(err)}
+                  onModalStateChange={setFileExplorerModalOpen}
+                  navigateTo={navigateToPath}
+                  onNavigateComplete={handleNavigateComplete}
+                />
+              </>
+            ) : (
+              <div className="right-panel-empty">
+                No session selected
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* File Viewer Modal */}
+        {(viewerFile || viewerLoading) && (
+          <FileViewerModal
+            file={viewerFile}
+            isLoading={viewerLoading}
+            onClose={handleCloseViewer}
+            onDownload={handleViewerDownload}
+            imageUrl={viewerImageUrl}
+          />
+        )}
+      </main>
+
+      {/* Mobile panel backdrop */}
+      <div
+        className={`mobile-panel-backdrop ${isMobile && mobilePanelOpen ? 'visible' : ''}`}
+        onClick={() => setMobilePanelOpen(false)}
+      />
+
+      {/* Mobile panel toggle button */}
+      <button
+        type="button"
+        className="mobile-panel-toggle"
+        onClick={() => setMobilePanelOpen(true)}
+        title="Open details panel"
+      >
+        ☰
+      </button>
     </div>
   );
 }

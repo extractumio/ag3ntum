@@ -66,28 +66,12 @@ _tools_dir = str(AGENT_DIR / "tools")
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 
-SYSTEM_TOOLS_AVAILABLE = False
-SYSTEM_TOOLS: list[str] = []
-create_ag3ntum_mcp_server = None
-
-# Import Ag3ntumBash MCP server factory
-try:
-    from ag3ntum.ag3ntum_bash import (
-        create_ag3ntum_bash_mcp_server,
-        AG3NTUM_BASH_TOOL,
-    )
-    AG3NTUM_BASH_AVAILABLE = True
-except ImportError:
-    create_ag3ntum_bash_mcp_server = None
-    AG3NTUM_BASH_TOOL = "mcp__ag3ntum__Bash"
-    AG3NTUM_BASH_AVAILABLE = False
-
-# Import Ag3ntum unified tools MCP server factory (includes Bash + file tools)
-try:
-    from ag3ntum import create_ag3ntum_tools_mcp_server
-    AG3NTUM_TOOLS_AVAILABLE = True
-except ImportError:
-    AG3NTUM_TOOLS_AVAILABLE = False
+# Import Ag3ntum MCP tools - these are REQUIRED for Ag3ntum to function
+# If these imports fail, the application should fail fast with a clear error
+from tools.ag3ntum import (
+    create_ag3ntum_tools_mcp_server,
+    AG3NTUM_BASH_TOOL,
+)
 
 # Import PathValidator configuration functions
 from .path_validator import (
@@ -612,30 +596,59 @@ class ClaudeAgent:
         # All tools share the same server name "ag3ntum" for consistent naming:
         # mcp__ag3ntum__Bash, mcp__ag3ntum__Read, mcp__ag3ntum__Write, etc.
         # SECURITY: Bash uses bwrap sandbox, file tools use PathValidator
-        if AG3NTUM_TOOLS_AVAILABLE:
-            session_id = session_info.session_id
-            include_bash = AG3NTUM_BASH_TOOL in all_tools
-            try:
-                # Create unified MCP server with ALL Ag3ntum tools
-                # Tool names: mcp__ag3ntum__Bash, mcp__ag3ntum__Read, mcp__ag3ntum__Write,
-                #            mcp__ag3ntum__Edit, mcp__ag3ntum__MultiEdit, mcp__ag3ntum__Glob,
-                #            mcp__ag3ntum__Grep, mcp__ag3ntum__LS, mcp__ag3ntum__WebFetch,
-                #            mcp__ag3ntum__AskUserQuestion
-                ag3ntum_server = create_ag3ntum_tools_mcp_server(
-                    session_id=session_id,
-                    workspace_path=workspace_dir,
-                    sandbox_executor=sandbox_executor,  # SECURITY: Enable bwrap for Bash
-                    include_bash=include_bash,
-                    server_name="ag3ntum"
-                )
-                mcp_servers["ag3ntum"] = ag3ntum_server
-                tool_count = 10 if include_bash else 9
-                logger.info(
-                    f"Ag3ntum unified MCP server configured ({tool_count} tools, "
-                    f"Bash: {include_bash}, sandbox: {'ENABLED' if sandbox_executor else 'DISABLED'})"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to create Ag3ntum unified MCP server: {e}")
+        # NOTE: MCP tools are REQUIRED - fail fast if creation fails
+        session_id = session_info.session_id
+        include_bash = AG3NTUM_BASH_TOOL in all_tools
+        try:
+            # Create unified MCP server with ALL Ag3ntum tools
+            # Tool names: mcp__ag3ntum__Bash, mcp__ag3ntum__Read, mcp__ag3ntum__Write,
+            #            mcp__ag3ntum__Edit, mcp__ag3ntum__MultiEdit, mcp__ag3ntum__Glob,
+            #            mcp__ag3ntum__Grep, mcp__ag3ntum__LS, mcp__ag3ntum__WebFetch,
+            #            mcp__ag3ntum__AskUserQuestion
+            ag3ntum_server = create_ag3ntum_tools_mcp_server(
+                session_id=session_id,
+                workspace_path=workspace_dir,
+                sandbox_executor=sandbox_executor,  # SECURITY: Enable bwrap for Bash
+                include_bash=include_bash,
+                server_name="ag3ntum"
+            )
+            mcp_servers["ag3ntum"] = ag3ntum_server
+
+            # CRITICAL: Add MCP tool names to all_tools list for subagent access
+            # The SDK's AgentDefinition.tools filters from the parent's available tools.
+            # Without this, subagents can't use MCP tools even if specified in their config.
+            # Tool names follow the mcp__{server}__{tool} convention.
+            ag3ntum_tool_names = [
+                "mcp__ag3ntum__Read",
+                "mcp__ag3ntum__ReadDocument",
+                "mcp__ag3ntum__Write",
+                "mcp__ag3ntum__Edit",
+                "mcp__ag3ntum__MultiEdit",
+                "mcp__ag3ntum__Glob",
+                "mcp__ag3ntum__Grep",
+                "mcp__ag3ntum__LS",
+                "mcp__ag3ntum__WebFetch",
+                "mcp__ag3ntum__AskUserQuestion",
+            ]
+            if include_bash:
+                ag3ntum_tool_names.append("mcp__ag3ntum__Bash")
+
+            # Add to all_tools so they're available for subagent tool filtering
+            all_tools.extend(ag3ntum_tool_names)
+
+            tool_count = len(ag3ntum_tool_names)
+            logger.info(
+                f"Ag3ntum unified MCP server configured ({tool_count} tools, "
+                f"Bash: {include_bash}, sandbox: {'ENABLED' if sandbox_executor else 'DISABLED'})"
+            )
+            logger.debug(f"MCP tools added to all_tools: {ag3ntum_tool_names}")
+        except Exception as e:
+            # MCP tools are critical - fail fast with clear error
+            raise AgentError(
+                f"CRITICAL: Failed to create Ag3ntum MCP server. "
+                f"MCP tools (mcp__ag3ntum__*) are required for Ag3ntum to function. "
+                f"Error: {e}"
+            )
 
         # Add skills MCP server for script-based skills
         # SECURITY: Script skills MUST run inside the Bubblewrap sandbox

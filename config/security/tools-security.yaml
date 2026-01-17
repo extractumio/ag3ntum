@@ -104,3 +104,87 @@ tools:
     max_entries: 1000
     # Include hidden files by default
     include_hidden: false
+
+  read_document:
+    # Global timeout for any single file read (seconds)
+    global_timeout: 180  # 3 minutes
+
+    # File size limits by category (bytes)
+    limits:
+      text: 10485760          # 10MB
+      pdf: 104857600          # 100MB
+      office: 52428800        # 50MB
+      archive: 524288000      # 500MB
+      image: 52428800         # 50MB
+      tabular: 104857600      # 100MB
+      audio: 52428800         # 50MB
+
+    # PDF-specific settings
+    pdf:
+      max_pages_text: 100
+      max_pages_ocr: 20
+      per_page_timeout: 5
+      ocr_per_page_timeout: 30
+      # Auto-OCR threshold: pages with fewer chars are considered scanned
+      ocr_text_threshold: 50
+
+    # Archive security
+    archive:
+      max_compression_ratio: 100
+      max_total_size: 524288000     # 500MB
+      max_file_count: 10000
+      max_single_file: 104857600    # 100MB
+      max_nesting_depth: 3
+      # Extraction destination within session workspace
+      extraction_dir: ".tmp/extracted"
+      # Banned extensions - compiled binaries/executables only
+      # NOTE: Scripts (.sh, .bat, .ps1, .php, .js, .cgi, etc.) are ALLOWED
+      # to support reading website backups (PHP, NodeJS, CGI projects)
+      banned_extensions:
+        - ".exe"      # Windows executable
+        - ".dll"      # Windows dynamic library
+        - ".so"       # Linux shared object
+        - ".dylib"    # macOS dynamic library
+        - ".com"      # DOS executable
+        - ".scr"      # Windows screensaver (executable)
+        - ".msi"      # Windows installer package
+        - ".app"      # macOS application bundle
+        - ".deb"      # Debian package
+        - ".rpm"      # RPM package
+        - ".dmg"      # macOS disk image
+        - ".iso"      # Disk image
+        - ".img"      # Disk image
+
+    # Output sanitization (LLM context protection)
+    output:
+      max_chars: 500000
+      max_lines: 10000
+      max_cell_content: 1000
+      strip_null_bytes: true
+      strip_control_chars: true
+      max_metadata_fields: 50
+      max_metadata_value_len: 1000
+      truncation_marker: "\n... [content truncated] ..."
+
+    # Timeouts (seconds)
+    timeouts:
+      global: 180               # 3 minutes max per file
+      pdf_per_page: 5           # 5 seconds per PDF page
+      ocr_per_page: 30          # 30 seconds per OCR page
+      archive_list: 30          # 30 seconds for archive listing
+      archive_extract: 60       # 60 seconds per file extraction
+      pandoc: 60                # 60 seconds for Office conversion
+      tabular_load: 60          # 60 seconds for loading tabular data
+
+    # Memory limits
+    memory:
+      max_dataframe_rows: 100000
+      max_dataframe_cols: 500
+      chunk_size: 10000
+
+    # Caching
+    cache:
+      enabled: true
+      directory: "~/.tmp/doc-cache"
+      max_size_mb: 1024
+      ttl_days: 7

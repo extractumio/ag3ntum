@@ -1042,7 +1042,7 @@ features:
 | Config overrides | ✅ | ✅ | CLI args / request body |
 | Task cancellation | ❌ | ✅ | POST /sessions/{id}/cancel |
 | Authentication | N/A | ✅ | JWT Bearer tokens |
-| MCP system tools | ✅ | ✅ | ag3ntum:write_output |
+| MCP tools | ✅ | ✅ | ag3ntum MCP server (Read, Write, Bash, etc.) |
 
 ### 6.2 Feature Status
 
@@ -1220,12 +1220,9 @@ Project/
 │       ├── ag3ntum_webfetch/ # mcp__ag3ntum__WebFetch (domain blocklist)
 │       │   ├── __init__.py
 │       │   └── tool.py
-│       ├── ag3ntum_ask/      # mcp__ag3ntum__AskUserQuestion (HITL)
-│       │   ├── __init__.py
-│       │   └── tool.py       # Event-based question/answer flow
-│       └── system_write_output/  # ag3ntum:write_output tool
+│       └── ag3ntum_ask/      # mcp__ag3ntum__AskUserQuestion (HITL)
 │           ├── __init__.py
-│           └── tool.py
+│           └── tool.py       # Event-based question/answer flow
 └── tests/                    # Test suites
 ```
 

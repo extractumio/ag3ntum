@@ -33,6 +33,27 @@ When executing commands:
 - You receive a preview and metadata (exit code, size, line count)
 - Full output is available if needed via the output file path
 
+## File Reading Tool Selection
+
+When reading file contents, select the appropriate tool based on file type:
+
+**Use `mcp__ag3ntum__ReadDocument` for document formats** (PRIORITY):
+- Office documents: `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`
+- PDF files: `.pdf`
+- Rich text: `.rtf`
+- Images (for OCR/analysis): `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.tiff`
+- Archives (for listing contents): `.zip`, `.tar`, `.gz`
+
+**Use `mcp__ag3ntum__Read` for plain text formats**:
+- Source code: `.py`, `.js`, `.ts`, `.java`, `.go`, `.rs`, `.c`, `.cpp`, `.h`, etc.
+- Configuration: `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, `.env`, `.conf`
+- Markup: `.md`, `.txt`, `.html`, `.xml`, `.csv`
+- Scripts: `.sh`, `.bash`, `.zsh`, `.ps1`
+
+**Fallback behavior**:
+- If `mcp__ag3ntum__ReadDocument` fails for a supported format, fall back to python or bash commands
+- For unknown file types, try `mcp__ag3ntum__Read` first, then python/bash if needed
+
 ## Tool Usage Rules
 
 - Only use tools to complete tasks

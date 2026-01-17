@@ -36,15 +36,40 @@ subagents:
     enabled: true
     description: "General-purpose agent for research, code search, and multi-step tasks"
     prompt_template: "subagents/general-purpose/prompt.j2"
+    # MCP tools available to this subagent via the ag3ntum server.
+    # These tools go through Ag3ntum's security layer (PathValidator, sandbox).
+    # IMPORTANT: MCP tool names must be added to parent's all_tools list (see agent_core.py)
+    # for the CLI to resolve them when spawning subagents.
     tools:
+      # File read operations
       - mcp__ag3ntum__Read
+      - mcp__ag3ntum__ReadDocument
       - mcp__ag3ntum__Glob
       - mcp__ag3ntum__Grep
+      - mcp__ag3ntum__LS
+      # File write operations
+      - mcp__ag3ntum__Write
+      - mcp__ag3ntum__Edit
+      - mcp__ag3ntum__MultiEdit
+      # Command execution (bwrap sandbox)
+      - mcp__ag3ntum__Bash
+      # Network operations
       - mcp__ag3ntum__WebFetch
-      - WebSearch
-      # Note: Bash is intentionally omitted for subagents by default.
-      # The main agent handles command execution with proper sandboxing.
-      # Add "mcp__ag3ntum__Bash" here only if subagents need direct command access.
+      # User interaction
+      - mcp__ag3ntum__AskUserQuestion
+
+  # ---------------------------------------------------------------------------
+  # Bash: DISABLED - Use mcp__ag3ntum__Bash directly
+  # ---------------------------------------------------------------------------
+  # Claude Code has a built-in Bash subagent, but in Ag3ntum the main agent
+  # should use mcp__ag3ntum__Bash directly. Disabling this subagent prevents
+  # the agent from delegating to a non-functional built-in Bash subagent.
+  #
+  Bash:
+    enabled: false
+    description: "Disabled - use mcp__ag3ntum__Bash tool directly instead"
+    prompt_template: "subagents/disabled.j2"
+    tools: []
 
   # ---------------------------------------------------------------------------
   # Explore: Fast, read-only file search specialist
@@ -59,10 +84,14 @@ subagents:
     enabled: true
     description: "Fast, read-only agent for exploring codebases and finding files"
     prompt_template: "subagents/Explore/prompt.j2"
+    # MCP tools for read-only exploration via the ag3ntum server.
+    # See general-purpose comment for MCP tool availability.
     tools:
       - mcp__ag3ntum__Read
+      - mcp__ag3ntum__ReadDocument
       - mcp__ag3ntum__Glob
       - mcp__ag3ntum__Grep
+      - mcp__ag3ntum__LS
       # Note: No Write, Edit, or Bash - this is a READ-ONLY agent
 
   # ---------------------------------------------------------------------------
@@ -113,5 +142,4 @@ subagents:
   #   prompt_template: "subagents/research-agent/prompt.j2"
   #   tools:
   #     - mcp__ag3ntum__WebFetch
-  #     - WebSearch
   #     - mcp__ag3ntum__Read

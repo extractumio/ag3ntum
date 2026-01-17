@@ -526,7 +526,7 @@ class ExecutionTracer(TracerBase):
         Format tool name for display.
 
         Converts MCP tool prefixes to readable format:
-        - mcp__ag3ntum__WriteOutput -> Ag3ntumWriteOutput
+        - mcp__ag3ntum__Bash -> Ag3ntumBash
 
         Args:
             tool_name: Raw tool name from SDK.

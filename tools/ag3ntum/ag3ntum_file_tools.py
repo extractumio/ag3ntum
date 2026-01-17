@@ -12,6 +12,7 @@ from typing import Any, Optional
 from claude_agent_sdk import create_sdk_mcp_server
 
 from .ag3ntum_read import create_read_tool
+from .ag3ntum_read_document import create_read_document_tool
 from .ag3ntum_write import create_write_tool
 from .ag3ntum_edit import create_edit_tool
 from .ag3ntum_multiedit import create_multiedit_tool
@@ -53,6 +54,7 @@ def create_ag3ntum_tools_mcp_server(
     Tool Names Generated:
         - mcp__ag3ntum__Bash (if include_bash=True)
         - mcp__ag3ntum__Read
+        - mcp__ag3ntum__ReadDocument
         - mcp__ag3ntum__Write
         - mcp__ag3ntum__Edit
         - mcp__ag3ntum__MultiEdit
@@ -82,6 +84,7 @@ def create_ag3ntum_tools_mcp_server(
     # Note: WebFetch doesn't need session_id as it doesn't access filesystem
     tools.extend([
         create_read_tool(session_id=session_id),
+        create_read_document_tool(session_id=session_id),
         create_write_tool(session_id=session_id),
         create_edit_tool(session_id=session_id),
         create_multiedit_tool(session_id=session_id),

@@ -18,6 +18,7 @@ RUN apt-get update \
         npm \
         bubblewrap \
         sudo \
+        libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create ag3ntum_api user (UID 45045, well outside typical user range to avoid conflicts)

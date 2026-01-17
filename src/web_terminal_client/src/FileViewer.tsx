@@ -1186,7 +1186,8 @@ export function InlineFileViewer({
     }
   }, [fileData?.content]);
 
-  const handleShowInExplorer = useCallback(() => {
+  const handleShowInExplorer = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     if (onShowInExplorer) {
       onShowInExplorer(filePath);
     }
@@ -1414,7 +1415,8 @@ export function InlineImageViewer({
     setImageDimensions(dims);
   }, []);
 
-  const handleShowInExplorer = useCallback(() => {
+  const handleShowInExplorer = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     if (onShowInExplorer) {
       onShowInExplorer(imagePath);
     }
@@ -1501,7 +1503,7 @@ export function InlineImageViewer({
           isOpen={showFullscreen}
           onClose={() => setShowFullscreen(false)}
           onDownload={handleDownload}
-          onShowInExplorer={onShowInExplorer ? handleShowInExplorer : undefined}
+          onShowInExplorer={onShowInExplorer ? () => onShowInExplorer(imagePath) : undefined}
         />
       )}
     </div>

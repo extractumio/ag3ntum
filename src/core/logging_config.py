@@ -241,7 +241,10 @@ def setup_backend_logging(log_level: str = "INFO") -> None:
     backend_loggers = [
         "src.api",
         "src.services",
+        "src.core",
         "src.db",
+        "ag3ntum",
+        "tools.ag3ntum",
         "uvicorn",
         "uvicorn.error",
         "uvicorn.access",
