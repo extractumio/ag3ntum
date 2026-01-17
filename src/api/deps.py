@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.database import get_db
-from ..services.auth_service import auth_service
+from ..services.auth_service import auth_service, UserEnvironmentError
 
 # HTTP Bearer authentication scheme
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -28,10 +28,19 @@ async def get_current_user_id(
     Returns the user_id from the token.
 
     Raises:
-        HTTPException: If token is invalid or expired.
+        HTTPException: 401 if token is invalid/expired, 403 if user environment misconfigured.
     """
     token = credentials.credentials
-    user_id = await auth_service.validate_token(token, db)
+
+    try:
+        user_id = await auth_service.validate_token(token, db)
+    except UserEnvironmentError as e:
+        # User account exists but filesystem is misconfigured
+        # Return 403 Forbidden - user must be recreated
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
 
     if not user_id:
         raise HTTPException(
@@ -58,7 +67,7 @@ async def get_current_user_id_from_query_or_header(
     Returns the user_id from the token.
 
     Raises:
-        HTTPException: If no token provided or token is invalid/expired.
+        HTTPException: 401 if not authenticated/invalid, 403 if user environment misconfigured.
     """
     # Prefer header token if available, fall back to query param
     actual_token = None
@@ -74,7 +83,15 @@ async def get_current_user_id_from_query_or_header(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id = await auth_service.validate_token(actual_token, db)
+    try:
+        user_id = await auth_service.validate_token(actual_token, db)
+    except UserEnvironmentError as e:
+        # User account exists but filesystem is misconfigured
+        # Return 403 Forbidden - user must be recreated
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
 
     if not user_id:
         raise HTTPException(

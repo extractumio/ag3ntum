@@ -5,20 +5,52 @@ import YAML from 'yaml';
 import {
   cancelSession,
   continueTask,
+  downloadFile,
   getConfig,
+  getFileContent,
+  getFileDownloadUrl,
   getSession,
   getSessionEvents,
   getSkills,
   listSessions,
   runTask,
+  uploadFiles,
 } from './api';
 import { AuthProvider, useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import { FileExplorer } from './FileExplorer';
+import {
+  AgentMessageContext,
+  FileViewerModal,
+  toFileViewerData,
+  type FileViewerData,
+} from './FileViewer';
 import { renderMarkdownElements } from './MarkdownRenderer';
 import { ProtectedRoute } from './ProtectedRoute';
 import { connectSSE } from './sse';
 import type { AppConfig, SessionResponse, SkillInfo, TerminalEvent } from './types';
+
+// Copy button icons (matching FileViewer style)
+function CopyIconSvg(): JSX.Element {
+  return (
+    <span className="copy-icon-wrapper">
+      <svg className="copy-icon-svg" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 0H6V3H10V0Z" fill="currentColor" />
+        <path d="M4 2H2V16H14V2H12V5H4V2Z" fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
+function CheckIconSvg(): JSX.Element {
+  return (
+    <span className="copy-icon-wrapper">
+      <svg className="copy-icon-svg" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 8L6 12L14 4" stroke="currentColor" strokeWidth="2" fill="none" />
+      </svg>
+    </span>
+  );
+}
 
 type ResultStatus = 'complete' | 'partial' | 'failed' | 'running' | 'cancelled';
 
@@ -231,19 +263,21 @@ function CopyButtons({
     <div className={`copy-buttons ${className}`}>
       <button
         type="button"
-        className={`filter-button ${copiedRich ? 'copied' : ''}`}
+        className={`copy-icon-btn ${copiedRich ? 'copied' : ''}`}
         onClick={handleCopyRich}
         title="Copy as rich text (with formatting)"
       >
-        {copiedRich ? '[✓ rich]' : '[rich]'}
+        {copiedRich ? <CheckIconSvg /> : <CopyIconSvg />}
+        <span className="copy-icon-label">R</span>
       </button>
       <button
         type="button"
-        className={`filter-button ${copiedMd ? 'copied' : ''}`}
+        className={`copy-icon-btn ${copiedMd ? 'copied' : ''}`}
         onClick={handleCopyMd}
         title="Copy as markdown"
       >
-        {copiedMd ? '[✓ md]' : '[md]'}
+        {copiedMd ? <CheckIconSvg /> : <CopyIconSvg />}
+        <span className="copy-icon-label">M</span>
       </button>
     </div>
   );
@@ -888,19 +922,21 @@ function FooterCopyButtons({
     <div className="footer-copy-buttons">
       <button
         type="button"
-        className={`filter-button ${copiedRich ? 'copied' : ''}`}
+        className={`copy-icon-btn ${copiedRich ? 'copied' : ''}`}
         onClick={handleCopyRich}
         title="Copy entire conversation as rich text (with formatting)"
       >
-        {copiedRich ? '[✓ rich]' : '[rich]'}
+        {copiedRich ? <CheckIconSvg /> : <CopyIconSvg />}
+        <span className="copy-icon-label">R</span>
       </button>
       <button
         type="button"
-        className={`filter-button ${copiedMd ? 'copied' : ''}`}
+        className={`copy-icon-btn ${copiedMd ? 'copied' : ''}`}
         onClick={handleCopyMd}
         title="Copy entire conversation as markdown"
       >
-        {copiedMd ? '[✓ md]' : '[md]'}
+        {copiedMd ? <CheckIconSvg /> : <CopyIconSvg />}
+        <span className="copy-icon-label">M</span>
       </button>
     </div>
   );
@@ -1436,10 +1472,12 @@ function ToolCallBlock({
   const hasContent = Boolean(tool.thinking || tool.input || tool.output || tool.error);
   const treeChar = isLast ? '└──' : '├──';
   const isRunning = tool.status === 'running';
+  const isThinkingTool = tool.tool === 'Think';
 
   // Status icon: pulsing circle while running, checkmark/cross when done
+  // For Think tool, use brain emoji when complete
   const statusIcon =
-    tool.status === 'complete' ? '✓' :
+    tool.status === 'complete' ? (isThinkingTool ? '🧠' : '✓') :
     tool.status === 'failed' ? '✗' : null;
 
   const statusClass =
@@ -1449,7 +1487,16 @@ function ToolCallBlock({
 
   // Tool-specific input preview (only while running)
   const getRunningPreview = (): string | null => {
-    if (!isRunning || !tool.input) return null;
+    if (!isRunning) return null;
+
+    // Special handling for Think tool - show thinking preview
+    // Backend already sends last 300 chars, show last 60 for header
+    if (isThinkingTool && tool.thinking) {
+      const preview = tool.thinking.slice(-60).replace(/\n/g, ' ');
+      return preview + '...';
+    }
+
+    if (!tool.input) return null;
 
     const input = tool.input as Record<string, unknown>;
     const toolName = tool.tool.toLowerCase();
@@ -1515,7 +1562,15 @@ function ToolCallBlock({
       {expanded && hasContent && (
         <div className="tool-call-body">
           {tool.thinking && (
-            <div className="tool-thinking">💭 {tool.thinking}</div>
+            <div className={`tool-thinking ${isRunning ? 'tool-thinking-streaming' : ''}`}>
+              {isRunning ? (
+                // Streaming thinking - backend sends last 300 chars every ~1s
+                <>💭 Thinking: {tool.thinking}...</>
+              ) : (
+                // Complete thinking - show full content (collapsible via CollapsibleOutput)
+                <CollapsibleOutput output={`💭 ${tool.thinking}`} />
+              )}
+            </div>
           )}
           {tool.input !== undefined && tool.input !== null && (
             <div className="tool-section">
@@ -2098,6 +2153,42 @@ type AttachedFile = {
 
 // Models are loaded dynamically from agent.yaml via the API config endpoint
 
+/**
+ * Format a model name for display in the dropdown.
+ *
+ * Transforms model identifiers into user-friendly names:
+ * - Removes 'claude-' prefix
+ * - Removes date suffix (e.g., '-20250929')
+ * - Replaces ':mode=thinking' suffix with ' [thinking]' indicator
+ *
+ * Examples:
+ * - 'claude-sonnet-4-5-20250929' -> 'sonnet-4-5'
+ * - 'claude-sonnet-4-5-20250929:mode=thinking' -> 'sonnet-4-5 [thinking]'
+ * - 'claude-haiku-4-5-20251001:mode=thinking' -> 'haiku-4-5 [thinking]'
+ */
+function formatModelName(model: string): string {
+  let displayName = model;
+
+  // Check if thinking mode is enabled
+  const isThinking = model.endsWith(':mode=thinking');
+  if (isThinking) {
+    displayName = displayName.replace(':mode=thinking', '');
+  }
+
+  // Remove 'claude-' prefix
+  displayName = displayName.replace(/^claude-/, '');
+
+  // Remove date suffix (8-digit date at end)
+  displayName = displayName.replace(/-\d{8}$/, '');
+
+  // Add thinking indicator if applicable
+  if (isThinking) {
+    displayName += ' [thinking]';
+  }
+
+  return displayName;
+}
+
 function InputField({
   value,
   onChange,
@@ -2301,7 +2392,7 @@ function InputField({
 
           <div className="dropdown input-model-dropdown">
             <span className="dropdown-value">
-              {model.replace('claude-', '').replace(/-\d{8}$/, '')}
+              {formatModelName(model)}
             </span>
             <span className="dropdown-icon">▾</span>
             <div className="dropdown-list">
@@ -2312,7 +2403,7 @@ function InputField({
                   className={`dropdown-item ${m === model ? 'active' : ''}`}
                   onClick={() => onModelChange(m)}
                 >
-                  {m.replace('claude-', '').replace(/-\d{8}$/, '')}
+                  {formatModelName(m)}
                 </button>
               ))}
             </div>
@@ -2414,6 +2505,23 @@ function setStoredPanelCollapsed(collapsed: boolean): void {
   }
 }
 
+// localStorage helpers for model preference
+function getStoredSelectedModel(): string | null {
+  try {
+    return localStorage.getItem('ag3ntum_selected_model');
+  } catch {
+    return null;
+  }
+}
+
+function setStoredSelectedModel(model: string): void {
+  try {
+    localStorage.setItem('ag3ntum_selected_model', model);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 // Detect mobile viewport
 function useIsMobile(breakpoint: number = 768): boolean {
   const [isMobile, setIsMobile] = useState(() => 
@@ -2461,6 +2569,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [fileExplorerRefreshKey, setFileExplorerRefreshKey] = useState(0);
   const [fileExplorerModalOpen, setFileExplorerModalOpen] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
+  const [navigateToPath, setNavigateToPath] = useState<string | null>(null);
   const [stats, setStats] = useState({
     turns: 0,
     cost: 0,
@@ -2471,6 +2580,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   });
   const [runningStartTime, setRunningStartTime] = useState<string | null>(null);
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
+  // File viewer modal state
+  const [viewerFile, setViewerFile] = useState<FileViewerData | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerImageUrl, setViewerImageUrl] = useState<string | undefined>(undefined);
 
   const isMobile = useIsMobile();
 
@@ -2494,7 +2607,15 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     getConfig(config.api.base_url)
       .then((apiConfig) => {
         setAvailableModels(apiConfig.models_available);
-        setSelectedModel(apiConfig.default_model);
+        // Check for stored model preference
+        const storedModel = getStoredSelectedModel();
+        if (storedModel && apiConfig.models_available.includes(storedModel)) {
+          // Use stored model if it's still available
+          setSelectedModel(storedModel);
+        } else {
+          // Fall back to default model
+          setSelectedModel(apiConfig.default_model);
+        }
       })
       .catch((err) => {
         console.error('Failed to load API config:', err);
@@ -2778,11 +2899,60 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     setStatus('running');
     setRunningStartTime(new Date().toISOString());
     activeTurnRef.current = 0;
-    const userEvent: TerminalEvent = {
-      type: 'user_message',
-      data: { text: taskText },
-      timestamp: new Date().toISOString(),
-      sequence: Date.now(),
+
+    // Helper to format file size for display
+    const formatFileSizeForContext = (bytes: number): string => {
+      if (bytes < 1024) return `${bytes}B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    };
+
+    // Helper to upload files to a session and return file context string
+    const uploadAndBuildContext = async (sessionId: string): Promise<string> => {
+      if (attachedFiles.length === 0) return '';
+
+      try {
+        const result = await uploadFiles(
+          config.api.base_url,
+          token,
+          sessionId,
+          attachedFiles.map((f) => f.file)
+        );
+
+        let fileContext = '';
+        if (result.uploaded.length > 0) {
+          fileContext =
+            '\n\n<uploaded-files>\nThe following files have been uploaded to the workspace:\n' +
+            result.uploaded
+              .map((f) => `- ${f.path} (${formatFileSizeForContext(f.size)}, ${f.mime_type})`)
+              .join('\n') +
+            '\n</uploaded-files>';
+        }
+
+        // Report errors but continue
+        if (result.errors.length > 0) {
+          setError(`Some files failed to upload: ${result.errors.join(', ')}`);
+        }
+
+        return fileContext;
+      } catch (err) {
+        // Log error but don't block the task
+        console.error('File upload failed:', err);
+        setError(`File upload failed: ${(err as Error).message}`);
+        return '';
+      }
+    };
+
+    // Build preliminary file context (describes files before upload completes)
+    const buildPreliminaryFileContext = (): string => {
+      if (attachedFiles.length === 0) return '';
+      return (
+        '\n\n<attached-files>\nThe user is attaching the following files (uploading to workspace):\n' +
+        attachedFiles
+          .map((f) => `- ${f.file.name} (${formatFileSizeForContext(f.file.size)})`)
+          .join('\n') +
+        '\n</attached-files>'
+      );
     };
 
     // Check if we can continue the session:
@@ -2796,19 +2966,33 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     const shouldContinue = canContinue && !isCancelledNotResumable;
 
     if (shouldContinue && currentSession) {
-      // Close old SSE connection before appending user event to prevent
-      // late-arriving events from previous request appearing after the new message
+      // CONTINUE EXISTING SESSION
+      // For continuing sessions, upload files first so they're available immediately
+
+      // Close old SSE connection before appending user event
       if (cleanupRef.current) {
         cleanupRef.current();
         cleanupRef.current = null;
       }
-      appendEvent(userEvent);
+
       try {
+        // Upload files first (if any) so they're available when agent starts
+        const fileContext = await uploadAndBuildContext(currentSession.id);
+        const fullTaskText = taskText + fileContext;
+
+        const userEvent: TerminalEvent = {
+          type: 'user_message',
+          data: { text: fullTaskText },
+          timestamp: new Date().toISOString(),
+          sequence: Date.now(),
+        };
+        appendEvent(userEvent);
+
         const response = await continueTask(
           config.api.base_url,
           token,
           currentSession.id,
-          taskText,
+          fullTaskText,
           selectedModel
         );
 
@@ -2825,20 +3009,32 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         refreshSessions();
       } catch (err) {
         setStatus('failed');
-        // Provide helpful error message for non-resumable sessions
         const errorMessage = (err as Error).message;
         if (errorMessage.includes('cannot be resumed')) {
           setError(
             'Session cannot be resumed. The agent was cancelled before it could start. ' +
               'Your next message will start a new session.'
           );
-          // Mark session as not resumable for future attempts
           setCurrentSession((prev) => (prev ? { ...prev, resumable: false } : null));
         } else {
           setError(`Failed to continue task: ${errorMessage}`);
         }
       }
     } else {
+      // START NEW SESSION
+      // For new sessions, include preliminary file context in task,
+      // then upload files immediately after session is created
+
+      const preliminaryFileContext = buildPreliminaryFileContext();
+      const fullTaskText = taskText + preliminaryFileContext;
+
+      const userEvent: TerminalEvent = {
+        type: 'user_message',
+        data: { text: fullTaskText },
+        timestamp: new Date().toISOString(),
+        sequence: Date.now(),
+      };
+
       setEvents([userEvent]);
       setExpandedTools(new Set());
       setExpandedSubagents(new Set());
@@ -2854,8 +3050,23 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       });
 
       try {
-        const response = await runTask(config.api.base_url, token, taskText, selectedModel);
+        const response = await runTask(config.api.base_url, token, fullTaskText, selectedModel);
         const sessionId = response.session_id;
+
+        // Upload files to the new session (agent will see them in workspace)
+        if (attachedFiles.length > 0) {
+          // Upload in background - don't block SSE start
+          uploadFiles(
+            config.api.base_url,
+            token,
+            sessionId,
+            attachedFiles.map((f) => f.file)
+          ).catch((err) => {
+            console.error('File upload failed:', err);
+            setError(`File upload failed: ${(err as Error).message}`);
+          });
+        }
+
         setCurrentSession({
           id: sessionId,
           status: response.status,
@@ -2873,7 +3084,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         setAttachedFiles([]);
         startSSE(sessionId, null);
         refreshSessions();
-        // Update URL to reflect new session
         navigate(`/session/${sessionId}/`, { replace: true });
       } catch (err) {
         setStatus('failed');
@@ -2982,6 +3192,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
   const handleRemoveFile = useCallback((id: string) => {
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  }, []);
+
+  const handleModelChange = useCallback((model: string) => {
+    setSelectedModel(model);
+    setStoredSelectedModel(model);
   }, []);
 
   const handleSelectSession = async (sessionId: string): Promise<void> => {
@@ -3294,22 +3509,59 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           break;
         }
         case 'thinking': {
-          const thinkingTool: ToolCallView = {
-            id: `think-${toolIdCounter++}`,
-            tool: 'Think',
-            time: formatTimestamp(event.timestamp),
-            status: 'complete',
-            thinking: String(event.data.text ?? ''),
-          };
+          const thinkingText = String(event.data.text ?? '');
+          const isPartial = Boolean(event.data.is_partial);
 
-          // Attach thinking to the current or last agent message if one exists
+          // Find existing thinking tool to update (for streaming)
+          let existingThinkingTool: ToolCallView | undefined;
           if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
-            currentStreamMessage.toolCalls.push(thinkingTool);
-          } else if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
-            (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(thinkingTool);
+            existingThinkingTool = currentStreamMessage.toolCalls.find(
+              (t) => t.tool === 'Think' && t.status === 'running'
+            );
+          }
+
+          if (existingThinkingTool) {
+            // Replace with new preview text (backend sends last 300 chars every ~1 second)
+            existingThinkingTool.thinking = thinkingText;
+            if (!isPartial) {
+              // Thinking complete - mark as complete
+              existingThinkingTool.status = 'complete';
+            }
+          } else if (isPartial) {
+            // Start new streaming thinking
+            const thinkingTool: ToolCallView = {
+              id: `think-${toolIdCounter++}`,
+              tool: 'Think',
+              time: formatTimestamp(event.timestamp),
+              status: 'running', // Running while streaming
+              thinking: thinkingText,
+            };
+
+            // Attach to current or last agent message
+            if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
+              currentStreamMessage.toolCalls.push(thinkingTool);
+            } else if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+              (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(thinkingTool);
+            } else {
+              pendingTools.push(thinkingTool);
+            }
           } else {
-            // No existing message - accumulate for next message
-            pendingTools.push(thinkingTool);
+            // Non-streaming complete thinking (from ThinkingBlock in AssistantMessage)
+            const thinkingTool: ToolCallView = {
+              id: `think-${toolIdCounter++}`,
+              tool: 'Think',
+              time: formatTimestamp(event.timestamp),
+              status: 'complete',
+              thinking: thinkingText,
+            };
+
+            if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
+              currentStreamMessage.toolCalls.push(thinkingTool);
+            } else if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
+              (lastAgentMessage as { toolCalls: ToolCallView[] }).toolCalls.push(thinkingTool);
+            } else {
+              pendingTools.push(thinkingTool);
+            }
           }
           break;
         }
@@ -3436,13 +3688,15 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
           if (isPartial) {
             streamBuffer += text;
+            // Strip structured header from streaming content if it's complete
+            const streamingBody = parseStructuredMessage(streamBuffer).body;
             if (!currentStreamMessage) {
               const existing = reuseLastAgentMessage();
               currentStreamMessage = existing ?? {
                 type: 'agent_message',
                 id: `agent-${items.length}`,
                 time: formatTimestamp(event.timestamp),
-                content: streamBuffer,
+                content: streamingBody,
                 toolCalls: pendingTools,
                 subagents: pendingSubagents,
                 isStreaming: true,
@@ -3458,7 +3712,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               pendingTools = [];
               pendingSubagents = [];
             } else if (currentStreamMessage.type === 'agent_message') {
-              currentStreamMessage.content = streamBuffer;
+              currentStreamMessage.content = streamingBody;
               (currentStreamMessage as { isStreaming?: boolean }).isStreaming = true;
             }
             break;
@@ -3480,9 +3734,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           }
           finalText = finalText.trim();
           streamBuffer = '';
+          // Always parse to strip the structured header from the body
+          const parsedMessage = parseStructuredMessage(finalText);
           const structuredInfo = eventStructuredFields
             ? {
-                body: finalText,
+                body: parsedMessage.body, // Use parsed body (header stripped)
                 fields: eventStructuredFields,
                 status: (() => {
                   const statusRaw = typeof event.data.structured_status === 'string'
@@ -3497,7 +3753,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   return errorRaw ?? undefined;
                 })(),
               }
-            : parseStructuredMessage(finalText);
+            : parsedMessage;
           const bodyText = structuredInfo.body;
 
           if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
@@ -3542,7 +3798,18 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           const statusValue = normalizeStatus(String(event.data.status ?? 'complete')) as ResultStatus;
 
           if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
-            currentStreamMessage.content = streamBuffer.trim();
+            // Parse the stream buffer to strip structured header
+            const parsedStream = parseStructuredMessage(streamBuffer.trim());
+            currentStreamMessage.content = parsedStream.body;
+            if (parsedStream.status) {
+              currentStreamMessage.structuredStatus = parsedStream.status;
+            }
+            if (parsedStream.error) {
+              currentStreamMessage.structuredError = parsedStream.error;
+            }
+            if (Object.keys(parsedStream.fields).length > 0) {
+              currentStreamMessage.structuredFields = parsedStream.fields;
+            }
             (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
             lastAgentMessage = currentStreamMessage;
             currentStreamMessage = null;
@@ -3896,38 +4163,59 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       return;
     }
 
-    try {
-      const response = await fetch(
-        `${config.api.base_url}/api/v1/sessions/${currentSession.id}/files?path=${encodeURIComponent(filePath)}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+    if (mode === 'view') {
+      // Open in FileViewerModal
+      try {
+        setViewerLoading(true);
+        setViewerFile(null);
+        setViewerImageUrl(undefined);
+        const response = await getFileContent(config.api.base_url, token, currentSession.id, filePath);
+        const fileData = toFileViewerData(response);
+        setViewerFile(fileData);
+        // If it's an image, set the image URL for the viewer
+        if (fileData.mimeType.startsWith('image/')) {
+          setViewerImageUrl(getFileDownloadUrl(config.api.base_url, token, currentSession.id, filePath));
         }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch file: ${response.status}`);
+      } catch (err) {
+        setError(`Failed to load file: ${(err as Error).message}`);
+      } finally {
+        setViewerLoading(false);
       }
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const filename = filePath.split('/').pop() || 'result-file';
-
-      if (mode === 'view') {
-        window.open(url, '_blank', 'noopener,noreferrer');
-      } else {
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        link.click();
+    } else {
+      // Download mode - download the file with authentication
+      try {
+        await downloadFile(config.api.base_url, token, currentSession.id, filePath);
+      } catch (err) {
+        console.error('Download failed:', err);
       }
-
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (err) {
-      setError(`Failed to load file: ${(err as Error).message}`);
     }
   };
+
+  const handleCloseViewer = useCallback(() => {
+    setViewerFile(null);
+    setViewerImageUrl(undefined);
+  }, []);
+
+  const handleViewerDownload = useCallback(async () => {
+    if (!config || !token || !currentSession || !viewerFile?.path) {
+      return;
+    }
+    try {
+      await downloadFile(config.api.base_url, token, currentSession.id, viewerFile.path);
+    } catch (err) {
+      console.error('Download failed:', err);
+    }
+  }, [config, token, currentSession, viewerFile?.path]);
+
+  const handleShowInExplorer = useCallback((filePath: string) => {
+    // Open file explorer and navigate to the file
+    setFileExplorerVisible(true);
+    setNavigateToPath(filePath);
+  }, []);
+
+  const handleNavigateComplete = useCallback(() => {
+    setNavigateToPath(null);
+  }, []);
 
   const toggleTool = (id: string) => {
     setExpandedTools((prev) => {
@@ -4150,7 +4438,18 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           {conversation.length === 0 ? (
             <div className="terminal-empty">Enter a task below to begin.</div>
           ) : (
-            <>
+            <AgentMessageContext.Provider
+              value={
+                currentSession && config && token
+                  ? {
+                      sessionId: currentSession.id,
+                      baseUrl: config.api.base_url,
+                      token,
+                      onShowInExplorer: handleShowInExplorer,
+                    }
+                  : null
+              }
+            >
               {conversation.map((item, index) => {
                 if (item.type === 'user') {
                   return (
@@ -4233,7 +4532,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                 }
                 return null;
               })}
-            </>
+            </AgentMessageContext.Provider>
           )}
         </div>
         {/* File Explorer Overlay */}
@@ -4266,8 +4565,20 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               showHiddenFiles={showHiddenFiles}
               onError={(err) => setError(err)}
               onModalStateChange={setFileExplorerModalOpen}
+              navigateTo={navigateToPath}
+              onNavigateComplete={handleNavigateComplete}
             />
           </div>
+        )}
+        {/* File Viewer Modal - for viewing files from result file list */}
+        {(viewerFile || viewerLoading) && (
+          <FileViewerModal
+            file={viewerFile}
+            isLoading={viewerLoading}
+            onClose={handleCloseViewer}
+            onDownload={handleViewerDownload}
+            imageUrl={viewerImageUrl}
+          />
         )}
       </main>
 
@@ -4328,7 +4639,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               onAttachFiles={handleAttachFiles}
               onRemoveFile={handleRemoveFile}
               model={selectedModel}
-              onModelChange={setSelectedModel}
+              onModelChange={handleModelChange}
               availableModels={availableModels}
             />
             <div className={`input-message ${error ? (reconnecting || connectionState === 'polling' ? 'warning' : 'error') : ''}`}>

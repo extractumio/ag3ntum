@@ -3,6 +3,36 @@ name: generate-python-code
 description: Generate and execute Python scripts with agent. Always use it when you need to generate a python code or script.
 ---
 
+### Sandbox Environment
+
+The script runs inside a sandboxed environment with specific mounted directories:
+
+| Mount Point | Access | Description |
+|-------------|--------|-------------|
+| `/workspace` | **Read-Write** | Working directory for scripts, output, and data |
+| `/venv` | Read-Only | Pre-configured Python virtual environment |
+| `/skills` | Read-Only | Global skill scripts and resources |
+| `/user-skills` | Read-Only | User-specific skill scripts |
+
+**Python Interpreter:**
+- Located at `/venv/bin/python3`
+- PATH includes `/venv/bin`, so `python3` works directly
+- All packages from Available Modules are pre-installed
+
+**Calling Other Skills:**
+
+Skills are available at `.claude/skills/<skill_name>/` in the workspace:
+
+```bash
+# Execute a skill script
+python3 .claude/skills/create_image/image_gen.py "prompt" -o ./output/image.png
+
+# Import from a skill in Python
+import sys
+sys.path.insert(0, '.claude/skills/create_image')
+from image_gen import generate_image
+```
+
 ### Workspace Boundaries
 
 | Constraint | Value |
@@ -11,13 +41,14 @@ description: Generate and execute Python scripts with agent. Always use it when 
 | **Scripts Location** | `./scripts/` |
 | **Output Location** | `./output/` |
 
-> ⚠️ **CRITICAL:** Never access paths outside the workspace. Use relative paths (`./`).
+> ⚠️ **CRITICAL:** Never access paths outside the workspace. Use relative paths (`./`) for all file operations.
 
 ### System Limitations
 
-- **No package installation** at runtime (`pip install` forbidden)
+- **No package installation** at runtime (`pip install` forbidden) — all packages are pre-installed in `/venv`
 - **No system command execution** outside approved patterns
 - **No access** to `/etc`, `/root`, `/home`, or system directories
+- **Read-only mounts:** `/venv`, `/skills`, `/user-skills` cannot be modified
 
 ---
 
@@ -108,6 +139,8 @@ Scripts must produce output optimized for LLM context windows—practical, compa
 
 ## Execution Methods
 
+> **Note:** Python is available as `python3` (PATH includes `/venv/bin`). For explicit paths, use `/venv/bin/python3`.
+
 ### Method 1: Runtime-Generated (Inline)
 
 **Use for:** Quick operations (< 50 lines), single-purpose, one-off tasks.
@@ -125,14 +158,46 @@ print(json.dumps(data))
 **Use for:** Complex operations (> 30 lines), reusable utilities, debugging needed.
 
 ```bash
-mkdir -p ./scripts
+mkdir -p ./scripts ./output
 cat > ./scripts/my_script.py << 'EOF'
 #!/usr/bin/env python3
-# script content
+import json
+from pathlib import Path
+
+# All imports from Available Modules work - packages are pre-installed
+import pandas as pd
+import httpx
+
+result = {"status": "success"}
+print(json.dumps(result))
 EOF
 
-python3 -m py_compile ./scripts/my_script.py  # Validate
+python3 -m py_compile ./scripts/my_script.py  # Validate syntax
 python3 ./scripts/my_script.py                 # Execute
+```
+
+### Quick Start Template
+
+For immediate script execution with proper error handling:
+
+```bash
+python3 << 'EOF'
+import json
+import sys
+from pathlib import Path
+
+WORKSPACE = Path("./").resolve()
+OUTPUT_DIR = WORKSPACE / "output"
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+try:
+    # Your code here
+    result = {"success": True, "data": {}}
+except Exception as e:
+    result = {"success": False, "error": str(e)}
+
+print(json.dumps(result))
+EOF
 ```
 
 ---
@@ -152,8 +217,6 @@ python3 ./scripts/my_script.py                 # Execute
 |--------|---------|----------|
 | `httpx` | 0.28.1 | HTTP client (sync/async) |
 | `requests` | 2.32.5 | HTTP client (sync) |
-| `fastapi` | 0.128.0 | API framework |
-| `uvicorn` | 0.40.0 | ASGI server |
 | `python-multipart` | 0.0.21 | Form data parsing |
 
 ### Database
@@ -161,14 +224,11 @@ python3 ./scripts/my_script.py                 # Execute
 |--------|---------|----------|
 | `sqlalchemy` | 2.0.45 | ORM, database abstraction |
 | `aiosqlite` | 0.22.1 | Async SQLite |
-| `redis` | 7.1.0 | Redis client |
 
 ### Security & Auth
 | Module | Version | Use Case |
 |--------|---------|----------|
-| `cryptography` | 44.0.0 | Encryption, hashing |
 | `bcrypt` | 4.2.1 | Password hashing |
-| `pyjwt` | 2.10.1 | JWT tokens |
 
 ### AI/LLM SDKs
 | Module | Version | Use Case |
@@ -176,22 +236,17 @@ python3 ./scripts/my_script.py                 # Execute
 | `anthropic` | 0.76.0 | Claude API |
 | `openai` | 2.15.0 | OpenAI API |
 | `google-genai` | 1.59.0 | Google AI API |
-| `claude-agent-sdk` | 0.1.19 | Claude agent framework |
 
 ### Utilities
 | Module | Version | Use Case |
 |--------|---------|----------|
-| `rich` | 13.7.0 | Terminal formatting |
-| `colorlog` | 6.10.1 | Colored logging |
 | `python-dotenv` | 1.2.1 | Env file loading |
 | `pandoc` | 2.4 | Document conversion |
 
 ### Testing & Validation
 | Module | Version | Use Case |
 |--------|---------|----------|
-| `pytest` | 9.0.2 | Testing framework |
-| `pytest-asyncio` | 1.3.0 | Async test support |
-| `flake8` | — | Syntax/lint validation |
+| `flake8` | 7.3.0 | Syntax/lint validation |
 
 ---
 
@@ -251,10 +306,10 @@ Shall be used for **complex scripts** or multi-file scripts.
 
 | Pattern | Use Case |
 |---------|----------|
-| `print(json.dumps(result))` | Programmatic consumption |
-| `Path("./output/file.json").write_text(...)` | Large results |
+| `print(json.dumps(result))` | Programmatic consumption (preferred) |
+| `Path("./output/file.json").write_text(...)` | Large results to file |
 | `logging.info(...)` | Debugging/audit trail |
-| `rich.console.print(...)` | Human-readable display |
+| `print(...)` | Simple text output |
 
 **Always:** Create output directory first with `mkdir -p ./output`
 
@@ -269,5 +324,35 @@ Shall be used for **complex scripts** or multi-file scripts.
 | Debugging | Minimal | Important |
 | Complex imports | Few | Multiple |
 | Validation needed | No | Yes |
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| `ModuleNotFoundError` | Package not in pre-installed list | Use only modules from Available Modules section |
+| `Permission denied` writing to `/venv` | Mount is read-only | Write only to `./` or `./output/` |
+| `python3: command not found` | Unlikely, but possible PATH issue | Use explicit `/venv/bin/python3` |
+| Script blocked by security | Pattern matched security filter | Check command against Security Rules |
+| `No such file: ./image_gen.py` | Script not in workspace | Use full path: `python3 .claude/skills/create_image/image_gen.py` |
+
+### Verify Environment
+
+Quick check that environment is working:
+
+```bash
+python3 -c "import sys; print({'python': sys.executable, 'version': sys.version.split()[0]})"
+```
+
+Expected output: `{'python': '/venv/bin/python3', 'version': '3.x.x'}`
+
+### Check Available Packages
+
+```bash
+python3 -c "import pkg_resources; print([p.key for p in pkg_resources.working_set][:10])"
+```
 
 ---

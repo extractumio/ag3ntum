@@ -106,6 +106,12 @@ async def execute_agent_task(
         else config_data.get("include_partial_messages", False)
     )
 
+    # Extended thinking configuration
+    thinking_tokens = (
+        params.thinking_tokens if params.thinking_tokens is not None
+        else config_data.get("thinking_tokens")
+    )
+
     logger.info(f"Config: model={model}, max_turns={max_turns}, timeout={timeout_seconds}s")
 
     # 4. Load permission manager from profile
@@ -145,6 +151,7 @@ async def execute_agent_task(
         max_buffer_size=max_buffer_size,
         output_format=output_format,
         include_partial_messages=include_partial_messages,
+        thinking_tokens=thinking_tokens,
     )
 
     # 7. Determine tracer

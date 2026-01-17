@@ -1,11 +1,11 @@
 ---
 name: create-image
 description: |
-  Generate images from text prompts or edit existing images using AI. Supports 
-  multiple vendors (Google Gemini, OpenAI) with a unified interface. Configurable 
-  aspect ratios, quality tiers, and optional mask-based editing. Prompts can be 
-  provided inline or from external files. Returns a PIL Image object and optionally 
-  saves to disk. Requires GOOGLE_API_KEY or OPENAI_API_KEY environment variable.
+  Generate images from text prompts or edit existing images using AI. Supports
+  multiple vendors (Google Gemini, OpenAI) with a unified interface. Configurable
+  aspect ratios, quality tiers, and optional mask-based editing. Prompts can be
+  provided inline or from external files. Returns a PIL Image object and optionally
+  saves to disk. Requires GEMINI_API_KEY or OPENAI_API_KEY environment variable.
 ---
 
 # Create Image
@@ -20,20 +20,20 @@ This skill generates images from natural language descriptions or edits existing
 ## Quick Start
 
 ```bash
-# Generate an image (Google, default)
-python image_gen.py "A sunset over mountains" -o sunset.png
+# Create output directory first
+mkdir -p ./output
 
-# Generate with prompt from file
-python image_gen.py -p prompt.txt -o sunset.png
+# Generate an image (Google, default)
+python3 .claude/skills/create_image/image_gen.py "A sunset over mountains" -o ./output/sunset.png
 
 # Generate with OpenAI
-python image_gen.py "A sunset over mountains" --vendor openai -o sunset.png
+python3 .claude/skills/create_image/image_gen.py "A sunset over mountains" --vendor openai -o ./output/sunset.png
 
 # High quality
-python image_gen.py "Detailed portrait" --hq -o portrait.png
+python3 .claude/skills/create_image/image_gen.py "Detailed portrait" --hq -o ./output/portrait.png
 
 # Edit an existing image
-python image_gen.py "Make the shirt green" --reference photo.jpg -o edited.png
+python3 .claude/skills/create_image/image_gen.py "Make the shirt green" --reference ./photo.jpg -o ./output/edited.png
 ```
 
 ---
@@ -49,7 +49,7 @@ python image_gen.py "Make the shirt green" --reference photo.jpg -o edited.png
 
 | Vendor | Environment Variable |
 |--------|---------------------|
-| Google | `GOOGLE_API_KEY` |
+| Google | `GEMINI_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
 
 ---
@@ -59,12 +59,13 @@ python image_gen.py "Make the shirt green" --reference photo.jpg -o edited.png
 ### Basic Usage
 
 ```bash
-# Inline prompt
-python image_gen.py "<prompt>" [options]
+python3 .claude/skills/create_image/image_gen.py "<prompt>" [options]
 
 # Prompt from file
-python image_gen.py -p <prompt-file> [options]
+python3 .claude/skills/create_image/image_gen.py -p <prompt-file> [options]
 ```
+
+> **Note:** Output files should be written to `./output/` (writable workspace directory).
 
 ### Options
 
@@ -86,8 +87,8 @@ python image_gen.py -p <prompt-file> [options]
 
 You can provide the prompt in two ways:
 
-1. **Inline (positional argument):** `python image_gen.py "your prompt here"`
-2. **From file:** `python image_gen.py -p prompt.txt`
+1. **Inline (positional argument):** `python3 .claude/skills/create_image/image_gen.py "your prompt here"`
+2. **From file:** `python3 .claude/skills/create_image/image_gen.py -p ./prompt.txt`
 
 The file option is useful for:
 - Long, detailed prompts
@@ -109,12 +110,12 @@ from image_gen import generate_image
 
 result = generate_image(
     prompt="A sunset over mountains",
-    output_path="sunset.png",      # optional
-    aspect_ratio="16:9",           # default: "1:1"
-    vendor="google",               # or "openai"
-    high_quality=False,            # True for pro/HD
-    model=None,                    # override default model
-    api_key=None,                  # override env variable
+    output_path="./output/sunset.png",  # optional
+    aspect_ratio="16:9",                # default: "1:1"
+    vendor="google",                    # or "openai"
+    high_quality=False,                 # True for pro/HD
+    model=None,                         # override default model
+    api_key=None,                       # override env variable
 )
 ```
 
@@ -125,13 +126,13 @@ from image_gen import edit_image
 
 result = edit_image(
     prompt="Make the shirt green",
-    reference_image="photo.jpg",
-    output_path="edited.png",      # optional
-    vendor="google",               # or "openai"
-    high_quality=False,            # True for pro/HD
-    model=None,                    # override default model
-    mask_image=None,               # OpenAI only: path to mask
-    api_key=None,                  # override env variable
+    reference_image="./photo.jpg",
+    output_path="./output/edited.png",  # optional
+    vendor="google",                    # or "openai"
+    high_quality=False,                 # True for pro/HD
+    model=None,                         # override default model
+    mask_image=None,                    # OpenAI only: path to mask
+    api_key=None,                       # override env variable
 )
 ```
 
@@ -175,55 +176,35 @@ From the user's request, extract:
 | Need mask-based targeted edits | `openai` |
 | User explicitly requests | As specified |
 
-### Step 3: Prepare Prompt
+### Step 3: Execute
 
-**For short prompts (< 200 chars):**
 ```bash
-python image_gen.py "Short prompt here" -o output.png
+# Create output directory
+mkdir -p ./output
+
+# Generate image
+python3 .claude/skills/create_image/image_gen.py "<prompt>" --vendor <vendor> -r <aspect-ratio> -o ./output/<filename>.png [--hq]
+
+# Edit image
+python3 .claude/skills/create_image/image_gen.py "<prompt>" --reference ./<image> -o ./output/<filename>.png
 ```
 
-**For long/detailed prompts:**
-1. Save prompt to a file (e.g., `prompt.txt`)
-2. Use the `-p` flag:
+**Programmatic (via inline python):**
 ```bash
-python image_gen.py -p prompt.txt -o output.png
-```
-
-### Step 4: Execute
-
-**CLI with inline prompt:**
-```bash
-python image_gen.py "<prompt>" --vendor <vendor> -r <aspect-ratio> -o <output> [--hq]
-```
-
-**CLI with prompt file:**
-```bash
-python image_gen.py -p <prompt-file> --vendor <vendor> -r <aspect-ratio> -o <output> [--hq]
-```
-
-**CLI for editing:**
-```bash
-python image_gen.py "<prompt>" --reference <image> -o <output>
-python image_gen.py -p <prompt-file> --reference <image> -o <output>
-```
-
-**Programmatic:**
-```python
+python3 << 'EOF'
+import sys
+sys.path.insert(0, '.claude/skills/create_image')
 from image_gen import generate_image, edit_image
 
-# Generation
-result = generate_image(prompt="...", vendor="google", aspect_ratio="16:9")
-
-# Editing
-result = edit_image(prompt="...", reference_image="photo.jpg", vendor="google")
+result = generate_image(prompt="...", vendor="google", aspect_ratio="16:9", output_path="./output/image.png")
+EOF
 ```
 
-### Step 5: Handle Result
+### Step 4: Handle Result
 
 ```python
 if result["success"]:
     print(f"Saved to: {result['image_path']}")
-    image = result["image"]  # PIL.Image.Image
 else:
     print(f"Error: {result['error']}")
 ```
@@ -235,86 +216,32 @@ else:
 ### Text-to-Image Generation
 
 ```bash
-# Inline prompt (short)
-python image_gen.py "A cartoon cat wizard" -o wizard_cat.png
+mkdir -p ./output
 
-# Prompt from file (long/detailed)
-python image_gen.py -p character_description.txt -o character.png
+# Inline prompt (short)
+python3 .claude/skills/create_image/image_gen.py "A cartoon cat wizard" -o ./output/wizard_cat.png
 
 # Widescreen landscape
-python image_gen.py "Mountain panorama at sunset" -r 16:9 -o mountains.png
+python3 .claude/skills/create_image/image_gen.py "Mountain panorama at sunset" -r 16:9 -o ./output/mountains.png
 
 # High quality with Google Pro
-python image_gen.py -p detailed_prompt.md --hq -r 3:4 -o portrait.png
+python3 .claude/skills/create_image/image_gen.py "Detailed portrait" --hq -r 3:4 -o ./output/portrait.png
 
 # Using OpenAI
-python image_gen.py "Steampunk clockwork" --vendor openai -o steampunk.png
-
-# OpenAI HD quality with prompt file
-python image_gen.py -p prompt.txt --vendor openai --hq -o botanical.png
+python3 .claude/skills/create_image/image_gen.py "Steampunk clockwork" --vendor openai -o ./output/steampunk.png
 ```
 
 ### Image Editing
 
 ```bash
 # Edit with inline prompt
-python image_gen.py "Make the background a beach" --reference portrait.jpg -o beach.png
-
-# Edit with prompt from file
-python image_gen.py -p edit_instructions.txt --reference portrait.jpg -o edited.png
+python3 .claude/skills/create_image/image_gen.py "Make the background a beach" --reference ./portrait.jpg -o ./output/beach.png
 
 # Edit with Google Pro
-python image_gen.py "Change shirt to green" --reference person.jpg --hq -o green.png
-
-# Edit with OpenAI (whole image variation)
-python image_gen.py "Make it look like watercolor" --vendor openai --reference photo.png -o watercolor.png
+python3 .claude/skills/create_image/image_gen.py "Change shirt to green" --reference ./person.jpg --hq -o ./output/green.png
 
 # Targeted edit with OpenAI mask
-python image_gen.py -p bg_replacement.txt --vendor openai --reference portrait.png --mask bg_mask.png -o space.png
-```
-
-### Programmatic Examples
-
-```python
-from image_gen import generate_image, edit_image
-from pathlib import Path
-
-# Generate with inline prompt
-result = generate_image(
-    prompt="A serene Japanese garden",
-    aspect_ratio="16:9",
-    high_quality=True,
-)
-if result["success"]:
-    result["image"].show()
-
-# Generate with prompt from file (read file yourself)
-prompt = Path("detailed_prompt.txt").read_text()
-result = generate_image(
-    prompt=prompt,
-    output_path="detailed_image.png",
-    high_quality=True,
-)
-
-# Edit an image
-result = edit_image(
-    prompt="Add dramatic sunset lighting",
-    reference_image="landscape.jpg",
-    output_path="dramatic_landscape.png",
-    vendor="google",
-    high_quality=True,
-)
-if result["success"]:
-    print(f"Saved to {result['image_path']}")
-
-# OpenAI with mask
-result = edit_image(
-    prompt="Replace the sky with northern lights",
-    reference_image="photo.png",
-    mask_image="sky_mask.png",
-    vendor="openai",
-    output_path="aurora.png",
-)
+python3 .claude/skills/create_image/image_gen.py "Replace background with space" --vendor openai --reference ./portrait.png --mask ./bg_mask.png -o ./output/space.png
 ```
 
 ---

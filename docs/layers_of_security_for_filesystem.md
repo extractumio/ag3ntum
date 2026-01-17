@@ -570,7 +570,7 @@ All file and command operations go through **Ag3ntum MCP tools** (`mcp__ag3ntum_
 - ✅ `mcp__ag3ntum__Read(/workspace/file.txt)` - `/workspace` path (translated)
 - ✅ `mcp__ag3ntum__Bash(ls -la)` - sandboxed command execution
 
-### Configuration (`config/tools_security.yaml`)
+### Configuration (`config/security/tools-security.yaml`)
 
 ```yaml
 path_validator:
@@ -616,7 +616,7 @@ network:
 
 ### How It Works for User `greg`
 
-1. **Security Rules Configuration** (`config/security/command_filtering.yaml`)
+1. **Security Rules Configuration** (`config/security/command-filtering.yaml`)
    
    ```yaml
    categories:
@@ -804,7 +804,7 @@ network:
 - ✅ `npm install package` → Package installation
 - ✅ `git status` → Version control
 
-### Configuration (`config/security/command_filtering.yaml`)
+### Configuration (`config/security/command-filtering.yaml`)
 
 ```yaml
 categories:
@@ -1464,7 +1464,7 @@ agent> for pid in $(ls /proc | grep -E "^[0-9]+$"); do cat /proc/$pid/cmdline; e
 
 3. **Configure PathValidator Blocklist:**
    ```yaml
-   # config/tools_security.yaml
+   # config/security/tools-security.yaml
    path_validator:
      blocklist:
        - "*.env"
@@ -1477,7 +1477,7 @@ agent> for pid in $(ls /proc | grep -E "^[0-9]+$"); do cat /proc/$pid/cmdline; e
 
 4. **Configure Network Blocklist (for WebFetch):**
    ```yaml
-   # config/tools_security.yaml
+   # config/security/tools-security.yaml
    network:
      blocked_domains:
        - "localhost"
@@ -1587,12 +1587,12 @@ Ag3ntum's **five-layer security model** provides robust protection through **def
 1. **Security at the right level:** Command filter + OS for commands, Python for file operations
 2. **Fail-closed by default:** If PathValidator or Command Filter fails, deny the operation
 3. **Log everything:** Audit trails enable incident response
-4. **Configure blocklists:** Update `config/tools_security.yaml` and `config/security/command_filtering.yaml` for new threats
+4. **Configure blocklists:** Update `config/security/tools-security.yaml` and `config/security/command-filtering.yaml` for new threats
 5. **Test bypass scenarios:** Use `scripts/ag3ntum_debug.py` and `pytest tests/security/` for security testing
 
 **Next Steps:**
 
-- Review configuration: `config/permissions.yaml`, `config/tools_security.yaml`
+- Review configuration: `config/security/permissions.yaml`, `config/security/tools-security.yaml`
 - Audit session logs: `logs/backend.log`
 - Test security: Run `scripts/ag3ntum_debug.py` with attack scenarios
 - Review PathValidator: `src/core/path_validator.py`
@@ -1609,9 +1609,9 @@ Ag3ntum's **five-layer security model** provides robust protection through **def
 
 ### Configuration Files
 
-- `config/permissions.yaml` - Tool enablement and sandbox config
-- `config/tools_security.yaml` - PathValidator and network blocklists
-- `config/security/command_filtering.yaml` - Command Security Filter rules (100+ patterns, 16 categories)
+- `config/security/permissions.yaml` - Tool enablement and sandbox config
+- `config/security/tools-security.yaml` - PathValidator and network blocklists
+- `config/security/command-filtering.yaml` - Command Security Filter rules (100+ patterns, 16 categories)
 - `prompts/modules/security.j2` - Security prompt module
 - `prompts/modules/tools.j2` - Tool usage guidance
 

@@ -38,9 +38,17 @@ class PathValidatorConfig(BaseModel):
     workspace_path: Path = Field(
         description="Actual filesystem path to session workspace (required)"
     )
-    # REAL path to skills directory (mounted inside workspace/skills)
+    # REAL path to skills directory (legacy, unused - use global/user skills paths)
     skills_path: Path | None = Field(
-        default=None, description="Actual filesystem path to skills directory"
+        default=None, description="Deprecated: use global_skills_path/user_skills_path"
+    )
+    # REAL path to global skills directory (e.g., /skills/.claude/skills)
+    global_skills_path: Path | None = Field(
+        default=None, description="Path to global skills directory (read-only)"
+    )
+    # REAL path to user skills directory (e.g., /users/username/.claude/skills)
+    user_skills_path: Path | None = Field(
+        default=None, description="Path to user skills directory (read-only)"
     )
     log_all_access: bool = Field(
         default=True, description="Log all path access attempts"
@@ -102,6 +110,9 @@ class Ag3ntumPathValidator:
         self.config = config
         self.workspace = config.workspace_path.resolve()  # REAL Docker path
         self.skills = config.skills_path.resolve() if config.skills_path else None
+        # Additional read-only paths for skills access
+        self.global_skills = config.global_skills_path.resolve() if config.global_skills_path else None
+        self.user_skills = config.user_skills_path.resolve() if config.user_skills_path else None
 
     def validate_path(
         self,
@@ -136,15 +147,42 @@ class Ag3ntumPathValidator:
                 reason=f"Path normalization failed: {e}",
             )
 
-        # Step 2: Check workspace boundary
+        # Step 2: Check boundary (workspace OR skills directories)
+        # Paths can be within:
+        # - Workspace (read-write for most, read-only for some prefixes)
+        # - Global skills directory (read-only)
+        # - User skills directory (read-only)
+        in_workspace = False
+        in_global_skills = False
+        in_user_skills = False
+        rel_path = ""
+
         try:
-            normalized.relative_to(self.workspace)
+            rel_path = str(normalized.relative_to(self.workspace))
+            in_workspace = True
         except ValueError:
-            self._log_blocked(path, operation, "Outside workspace")
+            pass
+
+        if not in_workspace and self.global_skills:
+            try:
+                rel_path = str(normalized.relative_to(self.global_skills))
+                in_global_skills = True
+            except ValueError:
+                pass
+
+        if not in_workspace and not in_global_skills and self.user_skills:
+            try:
+                rel_path = str(normalized.relative_to(self.user_skills))
+                in_user_skills = True
+            except ValueError:
+                pass
+
+        if not in_workspace and not in_global_skills and not in_user_skills:
+            self._log_blocked(path, operation, "Outside allowed directories")
             raise PathValidationError(
-                f"Path outside workspace: {path}",
+                f"Path outside allowed directories: {path}",
                 path=path,
-                reason=f"Path must be within {self.workspace}",
+                reason=f"Path must be within workspace or skills directories",
             )
 
         # Step 3: Check for path traversal attempts
@@ -152,23 +190,23 @@ class Ag3ntumPathValidator:
             # Even if normalized path is valid, log the attempt
             logger.warning(f"PATH_VALIDATOR: Traversal attempt in path: {path}")
 
-        # Step 4: Check blocklist
-        rel_path = str(normalized.relative_to(self.workspace))
-        for pattern in self.config.blocklist:
-            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-                normalized.name, pattern
-            ):
-                self._log_blocked(
-                    path, operation, f"Matches blocklist pattern: {pattern}"
-                )
-                raise PathValidationError(
-                    f"Path blocked by policy: {path}",
-                    path=path,
-                    reason=f"Matches blocklist pattern: {pattern}",
-                )
+        # Step 4: Check blocklist (only for workspace paths)
+        if in_workspace:
+            for pattern in self.config.blocklist:
+                if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
+                    normalized.name, pattern
+                ):
+                    self._log_blocked(
+                        path, operation, f"Matches blocklist pattern: {pattern}"
+                    )
+                    raise PathValidationError(
+                        f"Path blocked by policy: {path}",
+                        path=path,
+                        reason=f"Matches blocklist pattern: {pattern}",
+                    )
 
-        # Step 5: Check allowlist (if configured)
-        if self.config.allowlist is not None:
+        # Step 5: Check allowlist (if configured, only for workspace paths)
+        if in_workspace and self.config.allowlist is not None:
             allowed = False
             for pattern in self.config.allowlist:
                 if fnmatch.fnmatch(rel_path, pattern):
@@ -182,11 +220,15 @@ class Ag3ntumPathValidator:
                     reason="Path does not match any allowed pattern",
                 )
 
-        # Step 6: Check if read-only (using relative path prefixes)
-        is_readonly = any(
-            rel_path.startswith(ro_prefix.rstrip("/"))
-            for ro_prefix in self.config.readonly_prefixes
-        )
+        # Step 6: Check if read-only
+        # Skills directories are always read-only
+        # Workspace paths check readonly_prefixes
+        is_readonly = in_global_skills or in_user_skills
+        if in_workspace and not is_readonly:
+            is_readonly = any(
+                rel_path.startswith(ro_prefix.rstrip("/"))
+                for ro_prefix in self.config.readonly_prefixes
+            )
 
         if is_readonly and operation in ("write", "edit", "delete"):
             self._log_blocked(path, operation, "Read-only path")
@@ -282,6 +324,8 @@ def configure_path_validator(
     session_id: str,
     workspace_path: Path,
     skills_path: Path | None = None,
+    global_skills_path: Path | None = None,
+    user_skills_path: Path | None = None,
     blocklist: list[str] | None = None,
     readonly_prefixes: list[str] | None = None,
 ) -> Ag3ntumPathValidator:
@@ -291,7 +335,9 @@ def configure_path_validator(
     Args:
         session_id: The session ID
         workspace_path: REAL Docker filesystem path to session workspace
-        skills_path: Optional path to skills directory
+        skills_path: Deprecated, use global_skills_path/user_skills_path
+        global_skills_path: Path to global skills directory (read-only)
+        user_skills_path: Path to user skills directory (read-only)
         blocklist: Optional list of blocked patterns (defaults to common sensitive files)
         readonly_prefixes: Optional list of read-only path prefixes
 
@@ -301,6 +347,8 @@ def configure_path_validator(
     config = PathValidatorConfig(
         workspace_path=workspace_path,
         skills_path=skills_path,
+        global_skills_path=global_skills_path,
+        user_skills_path=user_skills_path,
         blocklist=blocklist or ["*.env", "*.key", ".git/**", "__pycache__/**", "*.pyc"],
         readonly_prefixes=readonly_prefixes or ["skills/"],
     )

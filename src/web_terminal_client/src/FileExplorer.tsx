@@ -9,12 +9,13 @@
  * - File preview modal for text files (using FileViewer)
  * - Responsive design that adapts to container size
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   browseFiles,
   deleteFile,
+  downloadFile,
   getFileContent,
-  getFileDownloadUrl,
+  uploadFiles,
 } from './api';
 import type {
   FileContentResponse,
@@ -22,7 +23,7 @@ import type {
   FileSortField,
   SortOrder,
 } from './types';
-import { FileViewerModal, toFileViewerData, type FileViewerData } from './FileViewer';
+import { FileViewerModal, ImageViewerModal, toFileViewerData, type FileViewerData } from './FileViewer';
 
 // =============================================================================
 // Types
@@ -36,6 +37,10 @@ interface FileExplorerProps {
   className?: string;
   onError?: (error: string) => void;
   onModalStateChange?: (isModalOpen: boolean) => void;
+  /** Path to navigate to and highlight (expands parent folders) */
+  navigateTo?: string | null;
+  /** Callback when navigation is complete */
+  onNavigateComplete?: () => void;
 }
 
 interface ExpandedFolders {
@@ -133,6 +138,22 @@ function TrashIcon({ className = '' }: IconProps): JSX.Element {
           d="M3 6H13V16H3V6ZM7 9H9V13H7V9Z"
           fill="currentColor"
         />
+      </svg>
+    </span>
+  );
+}
+
+function UploadIcon({ className = '' }: IconProps): JSX.Element {
+  return (
+    <span className={`action-icon-wrapper ${className}`}>
+      <svg
+        className="action-icon-svg"
+        viewBox="0 0 16 16"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <path d="M8 0L3 5H6V10H10V5H13L8 0Z" fill="currentColor" />
+        <path d="M2 12H14V14H2V12Z" fill="currentColor" />
       </svg>
     </span>
   );
@@ -348,6 +369,7 @@ interface FileTreeNodeProps {
   getIsExpanded: (path: string) => boolean;
   getIsLoading: (path: string) => boolean;
   getChildren: (path: string) => FileInfo[] | undefined;
+  getIsHighlighted: (path: string) => boolean;
   onToggle: (path: string) => void;
   onView: (file: FileInfo) => void;
   onDownload: (file: FileInfo) => void;
@@ -360,6 +382,7 @@ function FileTreeNode({
   getIsExpanded,
   getIsLoading,
   getChildren,
+  getIsHighlighted,
   onToggle,
   onView,
   onDownload,
@@ -368,10 +391,12 @@ function FileTreeNode({
   const isExpanded = file.is_directory ? getIsExpanded(file.path) : false;
   const isLoading = file.is_directory ? getIsLoading(file.path) : false;
   const children = file.is_directory ? getChildren(file.path) : undefined;
+  const isHighlighted = getIsHighlighted(file.path);
   const handleClick = () => {
     if (file.is_directory) {
       onToggle(file.path);
-    } else if (file.is_viewable) {
+    } else if (file.is_viewable || file.mime_type?.startsWith('image/')) {
+      // View text files and images (images open in preview popup)
       onView(file);
     } else {
       onDownload(file);
@@ -381,9 +406,10 @@ function FileTreeNode({
   return (
     <div className="file-tree-node">
       <div
-        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}`}
+        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
+        title={file.is_directory ? file.name : `${file.name}\nSize: ${formatFileSize(file.size)}\nModified: ${new Date(file.modified_at).toLocaleString()}`}
       >
         <span className="file-tree-toggle">
           {file.is_directory ? (isExpanded ? '▼' : '▶') : '\u00A0'}
@@ -395,11 +421,13 @@ function FileTreeNode({
         <span className="file-tree-size">
           {file.is_directory ? '' : formatFileSize(file.size)}
         </span>
-        <span className="file-tree-date">{formatDateTime(file.modified_at)}</span>
+        <span className="file-tree-date" title={`Modified: ${new Date(file.modified_at).toLocaleString()}`}>
+          {formatDateTime(file.modified_at)}
+        </span>
         <span className="file-tree-actions" onClick={(e) => e.stopPropagation()}>
           {!file.is_directory && (
             <>
-              {file.is_viewable && (
+              {(file.is_viewable || file.mime_type?.startsWith('image/')) && (
                 <button
                   type="button"
                   className="file-action-btn"
@@ -444,6 +472,7 @@ function FileTreeNode({
                 getIsExpanded={getIsExpanded}
                 getIsLoading={getIsLoading}
                 getChildren={getChildren}
+                getIsHighlighted={getIsHighlighted}
                 onToggle={onToggle}
                 onView={onView}
                 onDownload={onDownload}
@@ -473,6 +502,8 @@ export function FileExplorer({
   className = '',
   onError,
   onModalStateChange,
+  navigateTo,
+  onNavigateComplete,
 }: FileExplorerProps): JSX.Element {
   // State
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -487,20 +518,107 @@ export function FileExplorer({
   const [sortBy, setSortBy] = useState<FileSortField>('modified_at');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
 
+  // Navigation/highlight state
+  const [highlightedPath, setHighlightedPath] = useState<string | null>(null);
+
   // Preview modal state (using FileViewer)
   const [previewFile, setPreviewFile] = useState<FileViewerData | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [previewFilePath, setPreviewFilePath] = useState<string | null>(null);
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | undefined>(undefined);
+  const [previewIsImage, setPreviewIsImage] = useState(false);
+  const [previewImageDimensions, setPreviewImageDimensions] = useState<{ width: number; height: number } | null>(null);
 
   // Delete modal state
   const [deleteTarget, setDeleteTarget] = useState<FileInfo | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Upload state
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [uploadNotification, setUploadNotification] = useState<{
+    type: 'uploading' | 'success' | 'error';
+    message: string;
+    fileCount: number;
+  } | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const dragCounter = useRef(0);
+  const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Notify parent when modal state changes (for ESC key handling)
   useEffect(() => {
     const isModalOpen = previewFile !== null || isLoadingPreview || deleteTarget !== null;
     onModalStateChange?.(isModalOpen);
   }, [previewFile, isLoadingPreview, deleteTarget, onModalStateChange]);
+
+  // Handle navigation to a specific path
+  useEffect(() => {
+    if (!navigateTo) return;
+
+    // Normalize the path (remove leading ./ if present)
+    let targetPath = navigateTo;
+    if (targetPath.startsWith('./')) {
+      targetPath = targetPath.slice(2);
+    }
+
+    // Get parent folder path
+    const lastSlashIndex = targetPath.lastIndexOf('/');
+    const parentPath = lastSlashIndex > 0 ? targetPath.slice(0, lastSlashIndex) : '';
+
+    // Build list of all parent folders to expand
+    const foldersToExpand: string[] = [];
+    if (parentPath) {
+      const parts = parentPath.split('/');
+      let currentPath = '';
+      for (const part of parts) {
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        foldersToExpand.push(currentPath);
+      }
+    }
+
+    // Expand all parent folders
+    if (foldersToExpand.length > 0) {
+      setExpandedFolders((prev) => {
+        const next = { ...prev };
+        for (const folder of foldersToExpand) {
+          next[folder] = true;
+        }
+        return next;
+      });
+
+      // Load contents of each folder that needs to be expanded
+      const loadFolders = async () => {
+        for (const folder of foldersToExpand) {
+          if (!folderContents[folder]) {
+            try {
+              const listing = await browseFiles(baseUrl, token, sessionId, folder, {
+                includeHidden: showHiddenFiles,
+                sortBy,
+                sortOrder,
+              });
+              setFolderContents((prev) => ({ ...prev, [folder]: listing.files }));
+            } catch {
+              // Ignore errors during navigation
+            }
+          }
+        }
+      };
+      loadFolders();
+    }
+
+    // Highlight the target file
+    setHighlightedPath(targetPath);
+
+    // Clear highlight after a few seconds
+    const timer = setTimeout(() => {
+      setHighlightedPath(null);
+    }, 3000);
+
+    // Notify that navigation is complete
+    onNavigateComplete?.();
+
+    return () => clearTimeout(timer);
+  }, [navigateTo, baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, folderContents, onNavigateComplete]);
 
   // Load root directory
   const loadRootFiles = useCallback(async () => {
@@ -559,6 +677,8 @@ export function FileExplorer({
   // Toggle folder expansion
   const handleToggleFolder = useCallback(
     (path: string) => {
+      // Clear any navigation highlight when clicking a folder
+      setHighlightedPath(null);
       setExpandedFolders((prev) => {
         const isCurrentlyExpanded = prev[path];
         if (!isCurrentlyExpanded && !folderContents[path]) {
@@ -574,14 +694,51 @@ export function FileExplorer({
   // View file
   const handleViewFile = useCallback(
     async (file: FileInfo) => {
+      // Clear any navigation highlight when clicking a file
+      setHighlightedPath(null);
       setPreviewFilePath(file.path);
       setIsLoadingPreview(true);
       setPreviewFile(null);
+      setPreviewImageDimensions(null);
+      // Clean up previous image URL
+      setPreviewImageUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return undefined;
+      });
+
+      // Check if this is an image file
+      const isImage = file.mime_type?.startsWith('image/');
+      setPreviewIsImage(!!isImage);
 
       try {
-        const content = await getFileContent(baseUrl, token, sessionId, file.path);
-        // Convert API response to FileViewerData
-        setPreviewFile(toFileViewerData(content));
+        // For images, fetch as blob with auth headers
+        if (isImage) {
+          const params = new URLSearchParams({ path: file.path });
+          const url = `${baseUrl}/api/v1/files/${sessionId}/download?${params.toString()}`;
+          const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+          if (!response.ok) {
+            throw new Error(`Failed to load image: ${response.statusText}`);
+          }
+          const blob = await response.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          setPreviewImageUrl(objectUrl);
+          // Set file data for the viewer
+          setPreviewFile({
+            path: file.path,
+            name: file.name,
+            mimeType: file.mime_type || 'image/unknown',
+            size: file.size,
+            content: null,
+            isBinary: true,
+            isTruncated: false,
+          });
+        } else {
+          const content = await getFileContent(baseUrl, token, sessionId, file.path);
+          // Convert API response to FileViewerData
+          setPreviewFile(toFileViewerData(content));
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to load file';
         setPreviewFile({
@@ -594,6 +751,7 @@ export function FileExplorer({
           isTruncated: false,
           error: message,
         });
+        setPreviewIsImage(false);
       } finally {
         setIsLoadingPreview(false);
       }
@@ -603,11 +761,14 @@ export function FileExplorer({
 
   // Download file
   const handleDownloadFile = useCallback(
-    (file: FileInfo) => {
-      const url = getFileDownloadUrl(baseUrl, token, sessionId, file.path);
-      // Open in new tab with token in URL for auth
-      const downloadUrl = `${url}&token=${encodeURIComponent(token)}`;
-      window.open(downloadUrl, '_blank');
+    async (file: FileInfo) => {
+      // Clear any navigation highlight when clicking download
+      setHighlightedPath(null);
+      try {
+        await downloadFile(baseUrl, token, sessionId, file.path);
+      } catch (err) {
+        console.error('Download failed:', err);
+      }
     },
     [baseUrl, token, sessionId]
   );
@@ -660,14 +821,23 @@ export function FileExplorer({
   const handleClosePreview = useCallback(() => {
     setPreviewFile(null);
     setPreviewFilePath(null);
+    setPreviewIsImage(false);
+    setPreviewImageDimensions(null);
+    // Clean up image URL
+    setPreviewImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return undefined;
+    });
   }, []);
 
   // Download from preview
-  const handleDownloadFromPreview = useCallback(() => {
+  const handleDownloadFromPreview = useCallback(async () => {
     if (previewFilePath) {
-      const url = getFileDownloadUrl(baseUrl, token, sessionId, previewFilePath);
-      const downloadUrl = `${url}&token=${encodeURIComponent(token)}`;
-      window.open(downloadUrl, '_blank');
+      try {
+        await downloadFile(baseUrl, token, sessionId, previewFilePath);
+      } catch (err) {
+        console.error('Download failed:', err);
+      }
     }
   }, [baseUrl, token, sessionId, previewFilePath]);
 
@@ -684,6 +854,136 @@ export function FileExplorer({
       return field;
     });
   }, []);
+
+  // Handle file upload
+  const handleUpload = useCallback(
+    async (filesToUpload: File[], targetPath: string = '') => {
+      if (filesToUpload.length === 0) return;
+
+      const fileCount = filesToUpload.length;
+      const fileLabel = fileCount === 1 ? 'file' : 'files';
+
+      // Clear any existing notification timeout
+      if (notificationTimeoutRef.current) {
+        clearTimeout(notificationTimeoutRef.current);
+      }
+
+      // Show uploading notification
+      setUploadNotification({
+        type: 'uploading',
+        message: `Uploading ${fileCount} ${fileLabel}...`,
+        fileCount,
+      });
+
+      setIsUploading(true);
+      try {
+        const result = await uploadFiles(baseUrl, token, sessionId, filesToUpload, targetPath);
+
+        // Report errors if any
+        if (result.errors.length > 0) {
+          onError?.(result.errors.join(', '));
+          setUploadNotification({
+            type: 'error',
+            message: `Upload failed: ${result.errors[0]}`,
+            fileCount,
+          });
+        } else {
+          // Show success notification
+          setUploadNotification({
+            type: 'success',
+            message: `${fileCount} ${fileLabel} uploaded successfully`,
+            fileCount,
+          });
+        }
+
+        // Refresh the file listing to show new files
+        if (targetPath) {
+          // Refresh the specific folder
+          const listing = await browseFiles(baseUrl, token, sessionId, targetPath, {
+            includeHidden: showHiddenFiles,
+            sortBy,
+            sortOrder,
+          });
+          setFolderContents((prev) => ({ ...prev, [targetPath]: listing.files }));
+        } else {
+          // Refresh root
+          await loadRootFiles();
+        }
+
+        // Auto-dismiss notification after 3 seconds
+        notificationTimeoutRef.current = setTimeout(() => {
+          setUploadNotification(null);
+        }, 3000);
+      } catch (err) {
+        console.error('Upload failed:', err);
+        onError?.((err as Error).message);
+        setUploadNotification({
+          type: 'error',
+          message: `Upload failed: ${(err as Error).message}`,
+          fileCount,
+        });
+        // Auto-dismiss error after 5 seconds
+        notificationTimeoutRef.current = setTimeout(() => {
+          setUploadNotification(null);
+        }, 5000);
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, onError, loadRootFiles]
+  );
+
+  // Handle file input change
+  const handleFileInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const selectedFiles = Array.from(e.target.files || []);
+      if (selectedFiles.length > 0) {
+        handleUpload(selectedFiles);
+      }
+      // Reset input so same file can be selected again
+      e.target.value = '';
+    },
+    [handleUpload]
+  );
+
+  // Drag and drop handlers for the file explorer area
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDraggingOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) {
+      setIsDraggingOver(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter.current = 0;
+      setIsDraggingOver(false);
+
+      const droppedFiles = Array.from(e.dataTransfer.files);
+      if (droppedFiles.length > 0) {
+        handleUpload(droppedFiles);
+      }
+    },
+    [handleUpload]
+  );
 
   // Refresh on mount and when sort changes
   useEffect(() => {
@@ -726,6 +1026,11 @@ export function FileExplorer({
     [folderContents]
   );
 
+  const getIsHighlighted = useCallback(
+    (path: string) => highlightedPath === path,
+    [highlightedPath]
+  );
+
   // Render recursive tree with expanded state
   const renderFileTree = (fileList: FileInfo[], depth: number = 0): JSX.Element[] => {
     return fileList.map((file) => (
@@ -736,6 +1041,7 @@ export function FileExplorer({
         getIsExpanded={getIsExpanded}
         getIsLoading={getIsLoading}
         getChildren={getChildren}
+        getIsHighlighted={getIsHighlighted}
         onToggle={handleToggleFolder}
         onView={handleViewFile}
         onDownload={handleDownloadFile}
@@ -754,6 +1060,15 @@ export function FileExplorer({
         <div className="file-explorer-toolbar">
           <button
             type="button"
+            className="file-upload-btn"
+            onClick={() => uploadInputRef.current?.click()}
+            title="Upload files"
+            disabled={isLoading || isUploading}
+          >
+            <UploadIcon />
+          </button>
+          <button
+            type="button"
             className="file-refresh-btn"
             onClick={loadRootFiles}
             title="Refresh"
@@ -761,6 +1076,13 @@ export function FileExplorer({
           >
             {ICONS.refresh}
           </button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={handleFileInputChange}
+          />
         </div>
       </div>
 
@@ -771,7 +1093,42 @@ export function FileExplorer({
         <SortButton field="modified_at" label="Date" />
       </div>
 
-      <div className="file-explorer-content">
+      <div
+        className={`file-explorer-content ${isDraggingOver ? 'file-explorer-drag-over' : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        {isDraggingOver && (
+          <div className="file-explorer-drop-overlay">
+            <div className="file-explorer-drop-content">
+              <UploadIcon />
+              <span>Drop files here to upload</span>
+            </div>
+          </div>
+        )}
+        {/* Upload notification toast */}
+        {uploadNotification && (
+          <div className={`file-upload-toast file-upload-toast-${uploadNotification.type}`}>
+            <span className="file-upload-toast-icon">
+              {uploadNotification.type === 'uploading' && ICONS.spinner}
+              {uploadNotification.type === 'success' && '✓'}
+              {uploadNotification.type === 'error' && '✗'}
+            </span>
+            <span className="file-upload-toast-message">{uploadNotification.message}</span>
+            {uploadNotification.type !== 'uploading' && (
+              <button
+                type="button"
+                className="file-upload-toast-dismiss"
+                onClick={() => setUploadNotification(null)}
+                title="Dismiss"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        )}
         {isLoading ? (
           <div className="file-explorer-loading">
             <span className="file-explorer-spinner">{ICONS.spinner}</span>
@@ -786,6 +1143,7 @@ export function FileExplorer({
           <div className="file-explorer-empty">
             <span className="file-explorer-empty-icon"><FolderIcon /></span>
             <span>No files in workspace</span>
+            <span className="file-explorer-empty-hint">Drag files here or click upload</span>
           </div>
         ) : (
           <>
@@ -803,14 +1161,26 @@ export function FileExplorer({
         )}
       </div>
 
-      {/* Preview Modal - Using FileViewer */}
-      <FileViewerModal
-        file={previewFile}
-        isLoading={isLoadingPreview}
-        onClose={handleClosePreview}
-        onDownload={handleDownloadFromPreview}
-        isOpen={isLoadingPreview || previewFile !== null}
-      />
+      {/* Preview Modal - Use ImageViewerModal for images, FileViewerModal for others */}
+      {previewIsImage && previewImageUrl ? (
+        <ImageViewerModal
+          imageUrl={previewImageUrl}
+          fileName={previewFile?.name || ''}
+          dimensions={previewImageDimensions}
+          isOpen={!isLoadingPreview && previewFile !== null}
+          onClose={handleClosePreview}
+          onDownload={handleDownloadFromPreview}
+        />
+      ) : (
+        <FileViewerModal
+          file={previewFile}
+          isLoading={isLoadingPreview}
+          onClose={handleClosePreview}
+          onDownload={handleDownloadFromPreview}
+          isOpen={isLoadingPreview || previewFile !== null}
+          imageUrl={previewImageUrl}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (

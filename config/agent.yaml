@@ -6,10 +6,21 @@ agent:
   default_model: claude-haiku-4-5-20251001
 
   # Available Claude models for the UI dropdown
+  # Models with ":mode=thinking" suffix enable extended thinking mode
+  # The thinking_tokens budget will be applied to thinking-enabled models
   models_available:
     - claude-haiku-4-5-20251001
+    - claude-haiku-4-5-20251001:mode=thinking
     - claude-sonnet-4-5-20250929
+    - claude-sonnet-4-5-20250929:mode=thinking
     - claude-opus-4-5-20251101
+    - claude-opus-4-5-20251101:mode=thinking
+
+  # Extended thinking token budget (used when model has :mode=thinking suffix)
+  # This controls the maximum tokens the model can use for internal reasoning
+  # before producing its final response. Higher values allow deeper reasoning.
+  # Recommended range: 2000-16000 depending on task complexity
+  thinking_tokens: 8000
 
   # Deprecated: Use default_model instead
   # Kept for backward compatibility with CLI overrides
@@ -27,7 +38,7 @@ agent:
   # Enable file change tracking for checkpoint/rewind functionality
   enable_file_checkpointing: true
 
-  # Note: permission_mode is configured in config/permissions.yaml (defaultMode field)
+  # Note: permission_mode is configured in config/security/permissions.yaml (defaultMode field)
   # Do not set it here to avoid SDK bypassing permission checks
 
   # Role template name (loads prompts/roles/<role>.md)
@@ -72,3 +83,33 @@ file_explorer:
 
   # Default sort order: asc, desc
   default_sort_order: desc
+
+# File Upload settings
+file_upload:
+  # Maximum size per individual file in bytes (10MB)
+  max_file_size_bytes: 10485760
+
+  # Maximum number of files per upload request
+  max_files_per_upload: 20
+
+  # Maximum total size per upload request in bytes (50MB)
+  # This limits total size even if individual files are under the per-file limit
+  max_total_upload_size_bytes: 52428800
+
+  # Allowed file extensions (empty list = all allowed)
+  # Example: [".txt", ".pdf", ".py", ".js", ".json", ".md"]
+  allowed_extensions: []
+
+  # Blocked file extensions (takes precedence over allowed)
+  # Common dangerous extensions that should never be uploaded
+  blocked_extensions:
+    - ".exe"
+    - ".dll"
+    - ".so"
+    - ".dylib"
+    - ".sh"
+    - ".bat"
+    - ".cmd"
+    - ".ps1"
+    - ".vbs"
+    - ".jar"

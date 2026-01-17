@@ -2,7 +2,7 @@
 Security Tests for CommandSecurityFilter.
 
 Tests the command security filter against exploit examples defined in
-config/security/command_filtering.yaml. Each rule has an 'exploit' field
+config/security/command-filtering.yaml. Each rule has an 'exploit' field
 containing a command that should trigger that rule.
 
 Run with:
@@ -42,7 +42,7 @@ def security_filter() -> CommandSecurityFilter:
 @pytest.fixture  
 def rules_path() -> Path:
     """Path to the security rules YAML file."""
-    return PROJECT_ROOT / "config" / "security" / "command_filtering.yaml"
+    return PROJECT_ROOT / "config" / "security" / "command-filtering.yaml"
 
 
 # =============================================================================

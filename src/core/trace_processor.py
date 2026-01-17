@@ -51,6 +51,16 @@ _SYSTEM_REMINDER_PATTERN = re.compile(
 # Pattern to match mcp__ag3ntum__ToolName and capture just ToolName
 _MCP_TOOL_NAME_PATTERN = re.compile(r'mcp__ag3ntum__(\w+)')
 
+# Pattern to match <attached-files>...</attached-files> blocks (including multiline)
+_ATTACHED_FILES_PATTERN = re.compile(
+    r'<attached-files>(.*?)</attached-files>',
+    re.DOTALL
+)
+
+# Pattern to parse individual file entries from attached-files block
+# Matches: - filename.ext (size)
+_ATTACHED_FILE_ENTRY_PATTERN = re.compile(r'-\s+(.+?)\s+\(([^)]+)\)')
+
 
 def strip_system_reminders(text: str) -> str:
     """
@@ -88,6 +98,50 @@ def sanitize_tool_names_in_text(text: str) -> str:
     return _MCP_TOOL_NAME_PATTERN.sub(r'\1', text)
 
 
+def transform_attached_files(text: str) -> str:
+    """
+    Transform <attached-files> blocks to <ag3ntum-attached-file> format.
+
+    Converts the system-injected attached-files format into a structured
+    format that the frontend can render as an expandable file list widget.
+
+    Input format:
+        <attached-files>
+        The user is attaching the following files (uploading to workspace):
+        - filename1.txt (10.5KB)
+        - filename2.pdf (1.2MB)
+        </attached-files>
+
+    Output format:
+        <ag3ntum-attached-file>filename1.txt|10.5KB</ag3ntum-attached-file>
+        <ag3ntum-attached-file>filename2.pdf|1.2MB</ag3ntum-attached-file>
+
+    Args:
+        text: Input text that may contain attached-files blocks.
+
+    Returns:
+        Text with attached-files blocks transformed to ag3ntum-attached-file tags.
+    """
+    if '<attached-files>' not in text:
+        return text
+
+    def replace_block(match: re.Match) -> str:
+        content = match.group(1)
+        # Parse individual file entries
+        entries = _ATTACHED_FILE_ENTRY_PATTERN.findall(content)
+        if not entries:
+            return ''  # Remove empty blocks
+        # Build ag3ntum-attached-file tags for each file
+        result_parts = []
+        for filename, size in entries:
+            filename = filename.strip()
+            size = size.strip()
+            result_parts.append(f'<ag3ntum-attached-file>{filename}|{size}</ag3ntum-attached-file>')
+        return '\n'.join(result_parts)
+
+    return _ATTACHED_FILES_PATTERN.sub(replace_block, text)
+
+
 def sanitize_text_for_display(text: str) -> str:
     """
     Apply all text sanitization filters for user-facing display.
@@ -95,6 +149,7 @@ def sanitize_text_for_display(text: str) -> str:
     Combines multiple filters:
     - Removes <system-reminder> blocks
     - Converts mcp__ag3ntum__ToolName to ToolName
+    - Transforms <attached-files> to <ag3ntum-attached-file> tags
 
     Args:
         text: Input text from agent output.
@@ -104,6 +159,7 @@ def sanitize_text_for_display(text: str) -> str:
     """
     result = strip_system_reminders(text)
     result = sanitize_tool_names_in_text(result)
+    result = transform_attached_files(result)
     return result
 
 
@@ -164,6 +220,12 @@ class TraceProcessor:
         self._active_subagents: dict[str, dict[str, Any]] = {}
         # Current parent_tool_use_id for routing subagent messages
         self._current_parent_tool_use_id: Optional[str] = None
+        # Thinking block tracking for streaming
+        self._stream_thinking_active = False
+        self._stream_thinking_buffer = ""
+        # Throttle thinking updates to reduce UI blinking (1 second interval)
+        self._thinking_last_emit_time: float = 0.0
+        self._thinking_emit_interval: float = 1.0  # seconds
 
     def set_task(self, task: str) -> None:
         """
@@ -589,42 +651,75 @@ class TraceProcessor:
 
         if event_type == "content_block_start":
             content_block = raw_event.get("content_block", {})
-            if isinstance(content_block, dict) and content_block.get("type") == "text":
-                text = content_block.get("text")
-                if isinstance(text, str) and text:
-                    # Sanitize text for display (removes system-reminders, cleans tool names)
-                    filtered_text = sanitize_text_for_display(text)
-                    if filtered_text:
-                        self._stream_has_text = True
-                        # Route to subagent handler if in subagent context
-                        if self._current_parent_tool_use_id and \
-                           self._current_parent_tool_use_id in self._active_subagents:
-                            self.tracer.on_subagent_message(
-                                task_id=self._current_parent_tool_use_id,
-                                text=filtered_text,
-                                is_partial=True
-                            )
-                        else:
-                            self.tracer.on_message(filtered_text, is_partial=True)
+            if isinstance(content_block, dict):
+                block_type = content_block.get("type")
+                if block_type == "text":
+                    text = content_block.get("text")
+                    if isinstance(text, str) and text:
+                        # Sanitize text for display (removes system-reminders, cleans tool names)
+                        filtered_text = sanitize_text_for_display(text)
+                        if filtered_text:
+                            self._stream_has_text = True
+                            # Route to subagent handler if in subagent context
+                            if self._current_parent_tool_use_id and \
+                               self._current_parent_tool_use_id in self._active_subagents:
+                                self.tracer.on_subagent_message(
+                                    task_id=self._current_parent_tool_use_id,
+                                    text=filtered_text,
+                                    is_partial=True
+                                )
+                            else:
+                                self.tracer.on_message(filtered_text, is_partial=True)
+                elif block_type == "thinking":
+                    # Start of thinking block - initialize buffer
+                    self._stream_thinking_active = True
+                    self._stream_thinking_buffer = content_block.get("thinking", "")
+                    self._thinking_last_emit_time = time.time()
+                    # Emit initial thinking event to signal UI should show thinking indicator
+                    if self._stream_thinking_buffer:
+                        # Show last 300 chars for preview
+                        preview = self._stream_thinking_buffer[-300:]
+                        self.tracer.on_thinking(preview, is_partial=True)
         elif event_type == "content_block_delta":
             delta = raw_event.get("delta", {})
-            if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                text = delta.get("text")
-                if isinstance(text, str) and text:
-                    # Sanitize text for display (removes system-reminders, cleans tool names)
-                    filtered_text = sanitize_text_for_display(text)
-                    if filtered_text:
-                        self._stream_has_text = True
-                        # Route to subagent handler if in subagent context
-                        if self._current_parent_tool_use_id and \
-                           self._current_parent_tool_use_id in self._active_subagents:
-                            self.tracer.on_subagent_message(
-                                task_id=self._current_parent_tool_use_id,
-                                text=filtered_text,
-                                is_partial=True
-                            )
-                        else:
-                            self.tracer.on_message(filtered_text, is_partial=True)
+            if isinstance(delta, dict):
+                delta_type = delta.get("type")
+                if delta_type == "text_delta":
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        # Sanitize text for display (removes system-reminders, cleans tool names)
+                        filtered_text = sanitize_text_for_display(text)
+                        if filtered_text:
+                            self._stream_has_text = True
+                            # Route to subagent handler if in subagent context
+                            if self._current_parent_tool_use_id and \
+                               self._current_parent_tool_use_id in self._active_subagents:
+                                self.tracer.on_subagent_message(
+                                    task_id=self._current_parent_tool_use_id,
+                                    text=filtered_text,
+                                    is_partial=True
+                                )
+                            else:
+                                self.tracer.on_message(filtered_text, is_partial=True)
+                elif delta_type == "thinking_delta":
+                    # Streaming thinking content - accumulate in buffer
+                    thinking_text = delta.get("thinking", "")
+                    if thinking_text:
+                        self._stream_thinking_buffer += thinking_text
+                        # Throttle emissions to once per second to reduce UI blinking
+                        current_time = time.time()
+                        if current_time - self._thinking_last_emit_time >= self._thinking_emit_interval:
+                            self._thinking_last_emit_time = current_time
+                            # Show last 300 chars as preview
+                            preview = self._stream_thinking_buffer[-300:]
+                            self.tracer.on_thinking(preview, is_partial=True)
+        elif event_type == "content_block_stop":
+            # Check if this is the end of a thinking block
+            if self._stream_thinking_active:
+                self._stream_thinking_active = False
+                # Emit final thinking event with is_complete flag
+                # The full thinking is in _stream_thinking_buffer
+                self._stream_thinking_buffer = ""
 
         if isinstance(usage, dict):
             self._apply_usage_update(usage)

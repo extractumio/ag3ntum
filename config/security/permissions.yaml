@@ -99,11 +99,18 @@ session_workspace:
     - "{workspace}"
 
 # Sandbox configuration (bubblewrap). Toggle for non-docker runs as needed.
-# Skills are discovered via SDK native discovery from workspace/.claude/skills/
-# Symlinks in workspace point to actual skill directories which must be mounted.
+#
+# MOUNT POINTS (inside sandbox):
+# - /workspace        - User's session workspace (read-write)
+# - /venv             - User's Python venv (read-only)
+# - /skills           - Global skills directory (read-only)
+# - /user-skills      - User's custom skills (read-only)
+#
+# PYTHON: Use /venv/bin/python3 for skill scripts
+# SKILLS: Run as `python3 /skills/<skill_name>/script.py` or `/user-skills/<skill_name>/script.py`
 #
 # SECURITY NOTE: Network data transfer tools (curl, wget, ssh, scp, etc.) are
-# blocked by Command Security Filter in config/security/command_filtering.yaml
+# blocked by Command Security Filter in config/security/command-filtering.yaml
 # (category: network_data_transfer). Agents should use mcp__ag3ntum__WebFetch
 # for allowed network requests, which enforces domain allowlisting.
 sandbox:
@@ -149,23 +156,48 @@ sandbox:
       source: "/bin"
       target: "/bin"
       mode: ro
+    # DNS resolution (required for network requests)
+    etc_resolv:
+      source: "/etc/resolv.conf"
+      target: "/etc/resolv.conf"
+      mode: ro
+    # SSL certificates (required for HTTPS)
+    etc_ssl:
+      source: "/etc/ssl"
+      target: "/etc/ssl"
+      mode: ro
   session_mounts:
     # Session workspace (read-write)
     workspace:
       source: "/users/{username}/sessions/{session_id}/workspace"
       target: "/workspace"
       mode: rw
-    # Global skills - mounted so symlinks in workspace can resolve (read-only)
-    # Symlinks point to {skills_dir}/.claude/skills/<skill_name>
-    global_skills:
-      source: "{skills_dir}/.claude/skills"
-      target: "{skills_dir}/.claude/skills"
+
+    # User-specific Python venv (read-only for security)
+    # Created during user registration at /users/<username>/venv/
+    # Contains packages from user's requirements.txt
+    user_venv:
+      source: "/users/{username}/venv"
+      target: "/venv"
       mode: ro
-    # User skills - mounted so symlinks in workspace can resolve (read-only)
-    # Symlinks point to /users/{username}/.claude/skills/<skill_name>
+
+    # Global skills - mounted at /skills path (read-only)
+    # IMPORTANT: Mount the WHOLE skills directory (not just .claude/skills) to be
+    # consistent with Docker's ./skills:/skills mount. This way symlinks work in
+    # both MCP tools (outside bwrap) and Bash (inside bwrap).
+    # Access as: /skills/.claude/skills/<skill_name>/script.py
+    global_skills:
+      source: "{skills_dir}"
+      target: "/skills"
+      mode: ro
+
+    # User skills - mounted at /users path (read-only)
+    # IMPORTANT: Mount the WHOLE users directory to be consistent with Docker's
+    # ./users:/users mount. This ensures symlinks work in both environments.
+    # Access as: /users/{username}/.claude/skills/<skill_name>/script.py
     user_skills:
-      source: "/users/{username}/.claude/skills"
-      target: "/users/{username}/.claude/skills"
+      source: "/users"
+      target: "/users"
       mode: ro
   dynamic_mounts: []
   network:
@@ -174,13 +206,16 @@ sandbox:
     allow_localhost: true
   environment:
     home: "/workspace"
-    path: "/usr/bin:/bin"
+    # User's venv (/venv/bin) must be first for python3/pip
+    # This is user-specific, NOT the backend system venv
+    path: "/venv/bin:/usr/bin:/bin"
     clear_env: true
   writable_paths:
     - "/workspace"
   readonly_paths:
-    - "{skills_dir}/.claude/skills"
-    - "/users/{username}/.claude/skills"
+    - "/venv"        # User's Python venv (read-only)
+    - "/skills"      # Global skills directory
+    - "/user-skills" # User's custom skills
     - "/usr"
     - "/lib"
     - "/bin"

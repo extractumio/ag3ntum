@@ -60,6 +60,9 @@ class TaskParams:
     output_format: Optional[str] = None
     include_partial_messages: Optional[bool] = None
 
+    # Extended thinking configuration
+    thinking_tokens: Optional[int] = None
+
     # Permission profile (CLI: --profile)
     profile: Optional[str] = None
 
@@ -377,6 +380,7 @@ class AgentRunner:
                 max_buffer_size=params.max_buffer_size,
                 output_format=params.output_format,
                 include_partial_messages=params.include_partial_messages,
+                thinking_tokens=params.thinking_tokens,
                 # User isolation
                 user_id=params.user_id,
                 username=user.username,

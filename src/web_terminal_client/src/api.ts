@@ -11,6 +11,7 @@ import type {
   SSEEvent,
   TaskStartedResponse,
   TokenResponse,
+  UploadResponse,
   User,
 } from './types';
 
@@ -215,6 +216,44 @@ export function getFileDownloadUrl(
   return `${baseUrl}/api/v1/files/${sessionId}/download?${params.toString()}`;
 }
 
+/**
+ * Download a file with authentication.
+ * Fetches the file as a blob with auth headers and triggers a browser download.
+ */
+export async function downloadFile(
+  baseUrl: string,
+  token: string,
+  sessionId: string,
+  filePath: string,
+  fileName?: string
+): Promise<void> {
+  const params = new URLSearchParams({ path: filePath });
+  const url = `${baseUrl}/api/v1/files/${sessionId}/download?${params.toString()}`;
+
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.statusText}`);
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = fileName || filePath.split('/').pop() || 'download';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  // Clean up the object URL after a short delay
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
 export async function deleteFile(
   baseUrl: string,
   token: string,
@@ -229,6 +268,61 @@ export async function deleteFile(
     { method: 'DELETE' },
     token
   );
+}
+
+/**
+ * Upload files to a session's workspace.
+ * Uses multipart/form-data for file upload.
+ *
+ * @param baseUrl - API base URL
+ * @param token - JWT token for authentication
+ * @param sessionId - Session ID to upload to
+ * @param files - Array of File objects to upload
+ * @param path - Target directory path (relative to workspace root, default: root)
+ * @param overwrite - Whether to overwrite existing files (default: false)
+ * @returns Upload response with list of uploaded files and any errors
+ */
+export async function uploadFiles(
+  baseUrl: string,
+  token: string,
+  sessionId: string,
+  files: File[],
+  path: string = '',
+  overwrite: boolean = false
+): Promise<UploadResponse> {
+  const formData = new FormData();
+
+  // Append all files
+  files.forEach((file) => {
+    formData.append('files', file);
+  });
+
+  // Append path and overwrite options
+  if (path) {
+    formData.append('path', path);
+  }
+  if (overwrite) {
+    formData.append('overwrite', 'true');
+  }
+
+  const response = await fetch(
+    `${baseUrl}/api/v1/files/${sessionId}/upload`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        // Note: Don't set Content-Type for FormData - browser sets it with boundary
+      },
+      body: formData,
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Upload failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<UploadResponse>;
 }
 
 // =============================================================================

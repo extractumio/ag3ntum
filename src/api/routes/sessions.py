@@ -329,6 +329,7 @@ def build_task_params(
         max_buffer_size=config.max_buffer_size,
         output_format=config.output_format,
         include_partial_messages=config.include_partial_messages,
+        thinking_tokens=config.thinking_tokens,
         profile=config.profile,
     )
 
@@ -704,13 +705,16 @@ async def stream_events(
 
     queue = await agent_runner.subscribe(session_id)
 
+    # Heartbeat interval - sends heartbeats independently of event processing
+    HEARTBEAT_INTERVAL_SECONDS = 15.0
+
     async def event_generator():
         """
         Generate SSE events for a session.
 
         Handles:
         - Normal event streaming from the agent
-        - Heartbeats during idle periods
+        - Independent heartbeats via background task (not blocked by event loop)
         - Error events if the agent fails before sending events
         - Graceful completion when agent finishes
 
@@ -722,8 +726,115 @@ async def stream_events(
         2. Replay from DB starting at sequence-10 (overlap buffer)
         3. Deduplicate by sequence number (prevents duplicates from overlap)
         This ensures no events are lost while maintaining low latency.
+
+        Independent Heartbeat Architecture:
+        Heartbeats run in a separate background task that is NOT blocked by:
+        - Long-running tool executions
+        - Synchronous operations blocking the event loop
+        - Slow database queries
+        The heartbeat task writes to a dedicated queue, and we use asyncio.wait()
+        to listen to both the event queue and heartbeat queue simultaneously.
         """
+        # Create a dedicated heartbeat queue for independent heartbeat delivery
+        heartbeat_queue: asyncio.Queue[dict] = asyncio.Queue()
+        stop_heartbeat = asyncio.Event()
+        heartbeat_task: asyncio.Task | None = None
+
+        async def heartbeat_producer():
+            """
+            Independent heartbeat producer running in background.
+
+            This task is NOT blocked by the main event processing loop.
+            It runs independently and pushes heartbeats to a queue that
+            the main generator consumes alongside real events.
+            """
+            while not stop_heartbeat.is_set():
+                try:
+                    # Wait for heartbeat interval or stop signal
+                    try:
+                        await asyncio.wait_for(
+                            stop_heartbeat.wait(),
+                            timeout=HEARTBEAT_INTERVAL_SECONDS
+                        )
+                        # If we get here, stop was signaled
+                        break
+                    except asyncio.TimeoutError:
+                        # Timeout expired - time to send heartbeat
+                        pass
+
+                    # Build heartbeat with current session state
+                    try:
+                        current_session = await session_service.get_session(db, session_id)
+                        session_status = current_session.status if current_session else "unknown"
+                        current_last_seq = await event_service.get_last_sequence(session_id)
+                        redis_ok = agent_runner._event_hub is not None
+                    except Exception:
+                        session_status = "unknown"
+                        current_last_seq = 0
+                        redis_ok = False
+
+                    heartbeat_data = {
+                        "type": "heartbeat",
+                        "data": {
+                            "session_status": session_status,
+                            "last_sequence": current_last_seq,
+                            "redis_ok": redis_ok,
+                            "server_time": datetime.now(timezone.utc).isoformat(),
+                        },
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+
+                    # Non-blocking put to heartbeat queue
+                    try:
+                        heartbeat_queue.put_nowait(heartbeat_data)
+                    except asyncio.QueueFull:
+                        # Queue full, skip this heartbeat (old one still pending)
+                        pass
+
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning(f"Heartbeat producer error: {e}")
+                    # Continue trying - heartbeats are critical for connection health
+
+        async def get_next_item():
+            """
+            Wait for either an event or a heartbeat, whichever comes first.
+            Returns tuple of (item, source) where source is 'event' or 'heartbeat'.
+            """
+            event_task = asyncio.create_task(queue.get())
+            heartbeat_get_task = asyncio.create_task(heartbeat_queue.get())
+
+            try:
+                done, pending = await asyncio.wait(
+                    [event_task, heartbeat_get_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Return the completed result
+                completed_task = done.pop()
+                if completed_task is event_task:
+                    return (completed_task.result(), 'event')
+                else:
+                    return (completed_task.result(), 'heartbeat')
+
+            except asyncio.CancelledError:
+                event_task.cancel()
+                heartbeat_get_task.cancel()
+                raise
+
         try:
+            # Start independent heartbeat producer
+            heartbeat_task = asyncio.create_task(heartbeat_producer())
+
             last_sequence = after or 0
             if last_event_id:
                 try:
@@ -762,40 +873,24 @@ async def stream_events(
                 if event.get("type") in ("agent_complete", "error", "cancelled"):
                     return
 
-            # Stream live events from Redis
+            # Stream live events from Redis with independent heartbeats
             while True:
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    # Enhanced heartbeat with session state information
-                    # This helps clients detect session completion even if terminal event was lost
-                    try:
-                        current_session = await session_service.get_session(db, session_id)
-                        session_status = current_session.status if current_session else "unknown"
-                        current_last_seq = await event_service.get_last_sequence(session_id)
-                        redis_ok = agent_runner._event_hub is not None
-                    except Exception:
-                        session_status = "unknown"
-                        current_last_seq = last_sequence
-                        redis_ok = False
+                    item, source = await get_next_item()
+                except asyncio.CancelledError:
+                    break
 
-                    heartbeat_data = {
-                        "type": "heartbeat",
-                        "data": {
-                            "session_status": session_status,
-                            "last_sequence": current_last_seq,
-                            "redis_ok": redis_ok,
-                            "server_time": datetime.now(timezone.utc).isoformat(),
-                        },
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                    yield f"data: {json.dumps(heartbeat_data)}\n\n"
+                if source == 'heartbeat':
+                    # Heartbeat from independent producer
+                    yield f"data: {json.dumps(item)}\n\n"
 
-                    # Check if task finished while waiting
+                    # Check if task finished
                     if not agent_runner.is_running(session_id) and queue.empty():
                         break
                     continue
 
+                # Regular event from queue
+                event = item
                 seq = event.get("sequence", 0)
 
                 # Deduplicate (might overlap with replay)
@@ -830,6 +925,14 @@ async def stream_events(
             yield f"data: {payload}\n\n"
 
         finally:
+            # Stop heartbeat producer
+            stop_heartbeat.set()
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             await agent_runner.unsubscribe(session_id, queue)
 
     return StreamingResponse(

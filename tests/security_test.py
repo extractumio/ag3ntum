@@ -29,7 +29,7 @@ def test_permission_mode_is_rejected():
 
     # Create permission manager
     permission_manager = PermissionManager(
-        profile_path=Path("config/permissions.yaml")
+        profile_path=Path("config/security/permissions.yaml")
     )
 
     # Attempting to create ClaudeAgent with permission_mode should raise error
@@ -61,7 +61,7 @@ def test_permission_mode_none_is_accepted():
 
     # Create permission manager
     permission_manager = PermissionManager(
-        profile_path=Path("config/permissions.yaml")
+        profile_path=Path("config/security/permissions.yaml")
     )
 
     # This should succeed
@@ -92,7 +92,7 @@ def test_permission_mode_empty_string_is_accepted():
 
     # Create permission manager
     permission_manager = PermissionManager(
-        profile_path=Path("config/permissions.yaml")
+        profile_path=Path("config/security/permissions.yaml")
     )
 
     # This should succeed (empty string is acceptable)

@@ -1,0 +1,263 @@
+# Upload Filtering Configuration for Ag3ntum
+# Controls which file types can be uploaded through the API
+#
+# This configuration works alongside waf_filter.py and is loaded by the
+# file upload endpoints in src/api/routes/files.py
+#
+# Priority: blocked takes precedence over allowed
+# If allowed is empty, all non-blocked types are permitted.
+
+version: "1.0"
+
+# =============================================================================
+# File Extension Filtering
+# =============================================================================
+extensions:
+  # Blocked extensions (always rejected)
+  # These are commonly dangerous executable/script types
+  blocked:
+    # Windows executables
+    - ".exe"
+    - ".dll"
+    - ".com"
+    - ".scr"
+    - ".msi"
+    - ".msp"
+    - ".pif"
+    # Windows scripts
+    - ".bat"
+    - ".cmd"
+    - ".ps1"
+    - ".psm1"
+    - ".psd1"
+    - ".vbs"
+    - ".vbe"
+    - ".js"      # Windows Script Host
+    - ".jse"
+    - ".ws"
+    - ".wsf"
+    - ".wsc"
+    - ".wsh"
+    # Unix executables/libraries
+    - ".so"
+    - ".dylib"
+    - ".a"
+    # Java
+    - ".jar"
+    - ".class"
+    - ".war"
+    - ".ear"
+    # Other potentially dangerous
+    - ".app"     # macOS application bundle
+    - ".dmg"     # macOS disk image
+    - ".pkg"     # macOS/Solaris package
+    - ".deb"     # Debian package
+    - ".rpm"     # Red Hat package
+    - ".snap"    # Snap package
+    - ".flatpak" # Flatpak package
+    - ".appimage" # AppImage
+    - ".elf"     # ELF binary
+    # Shell scripts (use .txt and rename if needed)
+    - ".sh"
+    - ".bash"
+    - ".zsh"
+    - ".fish"
+    - ".csh"
+    - ".ksh"
+    # Macro-enabled documents (can contain malicious code)
+    - ".docm"
+    - ".xlsm"
+    - ".pptm"
+    - ".dotm"
+    - ".xltm"
+    - ".potm"
+    # Archive formats that could bypass scanning
+    - ".iso"
+    - ".img"
+    - ".vhd"
+    - ".vmdk"
+    - ".ova"
+
+  # Allowed extensions (if empty, all non-blocked types are allowed)
+  # Uncomment and populate to create a whitelist
+  # allowed:
+  #   # Documents
+  #   - ".txt"
+  #   - ".md"
+  #   - ".pdf"
+  #   - ".doc"
+  #   - ".docx"
+  #   - ".xls"
+  #   - ".xlsx"
+  #   - ".ppt"
+  #   - ".pptx"
+  #   - ".odt"
+  #   - ".ods"
+  #   - ".odp"
+  #   # Code files
+  #   - ".py"
+  #   - ".js"
+  #   - ".ts"
+  #   - ".tsx"
+  #   - ".jsx"
+  #   - ".java"
+  #   - ".c"
+  #   - ".cpp"
+  #   - ".h"
+  #   - ".hpp"
+  #   - ".go"
+  #   - ".rs"
+  #   - ".rb"
+  #   - ".php"
+  #   - ".swift"
+  #   - ".kt"
+  #   - ".scala"
+  #   - ".cs"
+  #   - ".fs"
+  #   - ".r"
+  #   - ".sql"
+  #   - ".html"
+  #   - ".css"
+  #   - ".scss"
+  #   - ".sass"
+  #   - ".less"
+  #   # Data/Config
+  #   - ".json"
+  #   - ".yaml"
+  #   - ".yml"
+  #   - ".xml"
+  #   - ".csv"
+  #   - ".tsv"
+  #   - ".toml"
+  #   - ".ini"
+  #   - ".cfg"
+  #   - ".conf"
+  #   - ".env.example"
+  #   # Images
+  #   - ".png"
+  #   - ".jpg"
+  #   - ".jpeg"
+  #   - ".gif"
+  #   - ".webp"
+  #   - ".svg"
+  #   - ".ico"
+  #   - ".bmp"
+  #   - ".tiff"
+  #   # Archives (safe ones)
+  #   - ".zip"
+  #   - ".tar"
+  #   - ".gz"
+  #   - ".bz2"
+  #   - ".xz"
+  #   - ".7z"
+  #   - ".rar"
+
+# =============================================================================
+# MIME Type Filtering
+# =============================================================================
+mime_types:
+  # Blocked MIME types (always rejected)
+  # These represent executable or potentially dangerous content
+  blocked:
+    # Executables
+    - "application/x-executable"
+    - "application/x-msdos-program"
+    - "application/x-msdownload"
+    - "application/x-dosexec"
+    - "application/x-elf"
+    - "application/x-sharedlib"
+    - "application/x-pie-executable"
+    # Windows
+    - "application/x-msi"
+    - "application/vnd.microsoft.portable-executable"
+    # Scripts
+    - "application/x-sh"
+    - "application/x-csh"
+    - "application/x-shellscript"
+    - "text/x-sh"
+    - "text/x-shellscript"
+    # Java
+    - "application/java-archive"
+    - "application/x-java-archive"
+    - "application/java-vm"
+    # macOS
+    - "application/x-apple-diskimage"
+    - "application/vnd.apple.installer+xml"
+    # Linux packages
+    - "application/x-debian-package"
+    - "application/x-rpm"
+    # Disk images
+    - "application/x-iso9660-image"
+    - "application/x-raw-disk-image"
+    # Macro-enabled Office docs
+    - "application/vnd.ms-word.document.macroEnabled.12"
+    - "application/vnd.ms-excel.sheet.macroEnabled.12"
+    - "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
+
+  # Allowed MIME types (if empty, all non-blocked types are allowed)
+  # Uncomment and populate to create a whitelist
+  # allowed:
+  #   # Text/Code
+  #   - "text/plain"
+  #   - "text/markdown"
+  #   - "text/html"
+  #   - "text/css"
+  #   - "text/javascript"
+  #   - "text/x-python"
+  #   - "text/x-java"
+  #   - "text/x-c"
+  #   - "text/x-c++"
+  #   - "text/x-go"
+  #   - "text/x-rust"
+  #   - "text/x-ruby"
+  #   - "text/x-php"
+  #   - "text/csv"
+  #   - "text/xml"
+  #   # Data
+  #   - "application/json"
+  #   - "application/xml"
+  #   - "application/x-yaml"
+  #   - "application/toml"
+  #   # Documents
+  #   - "application/pdf"
+  #   - "application/msword"
+  #   - "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  #   - "application/vnd.ms-excel"
+  #   - "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  #   - "application/vnd.ms-powerpoint"
+  #   - "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  #   - "application/vnd.oasis.opendocument.text"
+  #   - "application/vnd.oasis.opendocument.spreadsheet"
+  #   - "application/vnd.oasis.opendocument.presentation"
+  #   # Images
+  #   - "image/png"
+  #   - "image/jpeg"
+  #   - "image/gif"
+  #   - "image/webp"
+  #   - "image/svg+xml"
+  #   - "image/x-icon"
+  #   - "image/bmp"
+  #   - "image/tiff"
+  #   # Archives
+  #   - "application/zip"
+  #   - "application/x-tar"
+  #   - "application/gzip"
+  #   - "application/x-bzip2"
+  #   - "application/x-xz"
+  #   - "application/x-7z-compressed"
+  #   - "application/x-rar-compressed"
+
+# =============================================================================
+# Size Limits
+# Note: These can also be set in agent.yaml under file_upload section
+# Values here are fallbacks if not specified in agent.yaml
+# =============================================================================
+size_limits:
+  # Maximum size per individual file (bytes)
+  max_file_size_bytes: 10485760  # 10MB
+
+  # Maximum number of files per upload request
+  max_files_per_upload: 20
+
+  # Maximum total size per upload request (bytes)
+  max_total_upload_size_bytes: 52428800  # 50MB

@@ -9,8 +9,8 @@ DEPRECATION NOTICE
 This module is LEGACY and should not be used for new security logic.
 
 The permission system has been replaced by:
-1. config/permissions.yaml - Runtime permission configuration
-2. config/security/command_filtering.yaml - Command security rules  
+1. config/security/permissions.yaml - Runtime permission configuration
+2. config/security/command-filtering.yaml - Command security rules
 3. src/core/command_security.py - CommandSecurityFilter for dangerous commands
 4. src/core/permission_profiles.py - PermissionManager that loads YAML
 

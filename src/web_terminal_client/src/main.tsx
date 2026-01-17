@@ -44,6 +44,17 @@ if (!container) {
 createRoot(container).render(
   <React.StrictMode>
     <ErrorBoundary>
+      {/* Global CRT scanline overlay effect */}
+      <div
+        className="crt-overlay"
+        style={{
+          position: 'fixed',
+          inset: 0,
+          pointerEvents: 'none',
+          zIndex: 9999,
+          background: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px)',
+        }}
+      />
       <BrowserRouter>
         <TrailingSlashRedirect />
         <Routes>

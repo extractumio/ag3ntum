@@ -17,8 +17,13 @@
  * - Blockquotes (> text)
  * - Horizontal rules (---, ***, ___)
  * - Paragraphs and spacing
+ * - Ag3ntum file/image tags for inline previews
  */
 import React from 'react';
+import {
+  InlineFileViewer,
+  InlineImageViewer,
+} from './FileViewer';
 
 // =============================================================================
 // Types
@@ -31,6 +36,121 @@ export interface MarkdownRenderOptions {
   wrapInContainer?: boolean;
   /** Container class name when wrapInContainer is true */
   containerClass?: string;
+}
+
+// =============================================================================
+// Ag3ntum Tag Parsing
+// =============================================================================
+
+// Regex patterns for ag3ntum tags
+const AG3NTUM_FILE_REGEX = /<ag3ntum-file>([^<]+)<\/ag3ntum-file>/g;
+const AG3NTUM_IMAGE_REGEX = /<ag3ntum-image>([^<]+)<\/ag3ntum-image>/g;
+const AG3NTUM_ATTACHED_FILE_REGEX = /<ag3ntum-attached-file>([^<]+)<\/ag3ntum-attached-file>/g;
+const AG3NTUM_TAG_LINE_REGEX = /^<ag3ntum-(file|image|attached-file)>([^<]+)<\/ag3ntum-\1>$/;
+
+/**
+ * Check if a line is an ag3ntum tag (file, image, or attached-file)
+ */
+function isAg3ntumTagLine(line: string): { type: 'file' | 'image' | 'attached-file'; path: string } | null {
+  const trimmed = line.trim();
+  const match = trimmed.match(AG3NTUM_TAG_LINE_REGEX);
+  if (match) {
+    return { type: match[1] as 'file' | 'image' | 'attached-file', path: match[2] };
+  }
+  return null;
+}
+
+/**
+ * Parse consecutive attached-file tags into a group
+ * Returns the file entries and the number of lines consumed
+ */
+function parseAttachedFileGroup(lines: string[], startIndex: number): { files: Array<{ name: string; size: string }>; linesConsumed: number } {
+  const files: Array<{ name: string; size: string }> = [];
+  let i = startIndex;
+
+  while (i < lines.length) {
+    const tag = isAg3ntumTagLine(lines[i]);
+    if (tag && tag.type === 'attached-file') {
+      // Parse "filename|size" format
+      const [name, size] = tag.path.split('|');
+      files.push({ name: name?.trim() || '', size: size?.trim() || '' });
+      i++;
+    } else {
+      break;
+    }
+  }
+
+  return { files, linesConsumed: i - startIndex };
+}
+
+/**
+ * Strip ag3ntum tags from content (for display in non-rendering contexts)
+ */
+export function stripAg3ntumTags(content: string): string {
+  return content
+    .replace(AG3NTUM_FILE_REGEX, '')
+    .replace(AG3NTUM_IMAGE_REGEX, '')
+    .replace(AG3NTUM_ATTACHED_FILE_REGEX, '');
+}
+
+/**
+ * Component for rendering inline file viewer from ag3ntum-file tags.
+ * Uses the InlineFileViewer which gets context from AgentMessageContext.
+ */
+export function Ag3ntumFilePlaceholder({ filePath }: { filePath: string }): JSX.Element {
+  return <InlineFileViewer filePath={filePath} />;
+}
+
+/**
+ * Component for rendering inline image viewer from ag3ntum-image tags.
+ * Uses the InlineImageViewer which gets context from AgentMessageContext.
+ */
+export function Ag3ntumImagePlaceholder({ imagePath }: { imagePath: string }): JSX.Element {
+  return <InlineImageViewer imagePath={imagePath} />;
+}
+
+/**
+ * Component for rendering attached files from ag3ntum-attached-file tags.
+ * Displays a collapsible list of uploaded files with icons.
+ */
+export function Ag3ntumAttachedFilesPlaceholder({ files }: { files: Array<{ name: string; size: string }> }): JSX.Element {
+  const [expanded, setExpanded] = React.useState(false);
+
+  if (files.length === 0) return <></>;
+
+  const toggleExpanded = () => setExpanded(!expanded);
+
+  return (
+    <div className="ag3ntum-attached-files">
+      <button
+        type="button"
+        className="ag3ntum-attached-files-header"
+        onClick={toggleExpanded}
+        aria-expanded={expanded}
+      >
+        <span className="ag3ntum-attached-files-icon">📎</span>
+        <span className="ag3ntum-attached-files-label">
+          {files.length} file{files.length !== 1 ? 's' : ''} attached
+        </span>
+        <span className={`ag3ntum-attached-files-chevron ${expanded ? 'expanded' : ''}`}>
+          ▶
+        </span>
+      </button>
+      {expanded && (
+        <div className="ag3ntum-attached-files-list">
+          {files.map((file, idx) => (
+            <div key={idx} className="ag3ntum-attached-file-item">
+              <span className="ag3ntum-attached-file-icon">📄</span>
+              <span className="ag3ntum-attached-file-name" title={file.name}>
+                {file.name.length > 40 ? `${file.name.slice(0, 36)}...${file.name.slice(-4)}` : file.name}
+              </span>
+              <span className="ag3ntum-attached-file-size">{file.size}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // =============================================================================
@@ -204,6 +324,28 @@ export function renderMarkdown(
 
     if (inCodeBlock) {
       codeBlockContent.push(line);
+      continue;
+    }
+
+    // Ag3ntum tags (file/image/attached-file references) - check before other block elements
+    const ag3ntumTag = isAg3ntumTagLine(line);
+    if (ag3ntumTag) {
+      if (ag3ntumTag.type === 'file') {
+        elements.push(
+          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.path} />
+        );
+      } else if (ag3ntumTag.type === 'image') {
+        elements.push(
+          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.path} />
+        );
+      } else if (ag3ntumTag.type === 'attached-file') {
+        // Group consecutive attached-file tags together
+        const { files, linesConsumed } = parseAttachedFileGroup(lines, i);
+        elements.push(
+          <Ag3ntumAttachedFilesPlaceholder key={`ag3ntum-attached-${i}`} files={files} />
+        );
+        i += linesConsumed - 1; // -1 because for loop will increment
+      }
       continue;
     }
 
@@ -384,6 +526,28 @@ export function renderMarkdownElements(
 
     if (inCodeBlock) {
       codeBlockContent.push(line);
+      continue;
+    }
+
+    // Ag3ntum tags (file/image/attached-file references) - check before other block elements
+    const ag3ntumTag = isAg3ntumTagLine(line);
+    if (ag3ntumTag) {
+      if (ag3ntumTag.type === 'file') {
+        elements.push(
+          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.path} />
+        );
+      } else if (ag3ntumTag.type === 'image') {
+        elements.push(
+          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.path} />
+        );
+      } else if (ag3ntumTag.type === 'attached-file') {
+        // Group consecutive attached-file tags together
+        const { files, linesConsumed } = parseAttachedFileGroup(lines, i);
+        elements.push(
+          <Ag3ntumAttachedFilesPlaceholder key={`ag3ntum-attached-${i}`} files={files} />
+        );
+        i += linesConsumed - 1; // -1 because for loop will increment
+      }
       continue;
     }
 

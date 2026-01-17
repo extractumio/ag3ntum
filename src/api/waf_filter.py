@@ -27,10 +27,32 @@ logger = logging.getLogger(__name__)
 MAX_TEXT_CONTENT_LENGTH: int = 5 * 1024 * 1024  # 5MB
 
 # Maximum file upload size (10MB in bytes)
+# Can be overridden by file_upload.max_file_size_bytes in agent.yaml
 MAX_FILE_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
 
-# Maximum JSON request body size (15MB - allows for large base64-encoded files)
-MAX_REQUEST_BODY_SIZE: int = 15 * 1024 * 1024  # 15MB
+# Maximum number of files per upload request
+# Can be overridden by file_upload.max_files_per_upload in agent.yaml
+MAX_FILES_PER_UPLOAD: int = 20
+
+# Maximum total upload size per request (50MB)
+# Can be overridden by file_upload.max_total_upload_size_bytes in agent.yaml
+MAX_TOTAL_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
+
+# Maximum JSON request body size (60MB - allows for large multipart uploads)
+# Must be >= MAX_TOTAL_UPLOAD_SIZE + overhead for multipart encoding
+MAX_REQUEST_BODY_SIZE: int = 60 * 1024 * 1024  # 60MB
+
+# Blocked file extensions (dangerous executable types)
+# Can be overridden by file_upload.blocked_extensions in agent.yaml
+BLOCKED_EXTENSIONS: set[str] = {
+    ".exe", ".dll", ".so", ".dylib",
+    ".sh", ".bat", ".cmd", ".ps1", ".vbs",
+    ".jar",
+}
+
+# Allowed file extensions (empty = all allowed except blocked)
+# Can be overridden by file_upload.allowed_extensions in agent.yaml
+ALLOWED_EXTENSIONS: set[str] = set()
 
 
 # =============================================================================
@@ -67,25 +89,114 @@ def truncate_text_content(text: str | None, field_name: str = "content") -> str 
     return text
 
 
-def validate_file_size(content_length: int) -> None:
+def validate_file_size(content_length: int, max_size: int | None = None) -> None:
     """
     Validate file upload size.
-    
+
     Args:
         content_length: Size in bytes
-        
+        max_size: Optional custom max size (defaults to MAX_FILE_UPLOAD_SIZE)
+
     Raises:
-        HTTPException: If size exceeds MAX_FILE_UPLOAD_SIZE
+        HTTPException: If size exceeds limit
     """
-    if content_length > MAX_FILE_UPLOAD_SIZE:
+    limit = max_size if max_size is not None else MAX_FILE_UPLOAD_SIZE
+    if content_length > limit:
         size_mb = content_length / (1024 * 1024)
-        limit_mb = MAX_FILE_UPLOAD_SIZE / (1024 * 1024)
+        limit_mb = limit / (1024 * 1024)
         logger.warning(
             f"WAF: Rejected file upload - size {size_mb:.2f}MB exceeds limit {limit_mb:.2f}MB"
         )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File size ({size_mb:.1f}MB) exceeds maximum allowed size ({limit_mb}MB)"
+        )
+
+
+def validate_file_count(file_count: int, max_files: int | None = None) -> None:
+    """
+    Validate number of files in an upload request.
+
+    Args:
+        file_count: Number of files being uploaded
+        max_files: Optional custom max count (defaults to MAX_FILES_PER_UPLOAD)
+
+    Raises:
+        HTTPException: If count exceeds limit
+    """
+    limit = max_files if max_files is not None else MAX_FILES_PER_UPLOAD
+    if file_count > limit:
+        logger.warning(
+            f"WAF: Rejected upload - {file_count} files exceeds limit of {limit}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Too many files ({file_count}). Maximum allowed is {limit} files per upload."
+        )
+
+
+def validate_total_upload_size(total_size: int, max_total: int | None = None) -> None:
+    """
+    Validate total size of all files in an upload request.
+
+    Args:
+        total_size: Total size in bytes
+        max_total: Optional custom max size (defaults to MAX_TOTAL_UPLOAD_SIZE)
+
+    Raises:
+        HTTPException: If total size exceeds limit
+    """
+    limit = max_total if max_total is not None else MAX_TOTAL_UPLOAD_SIZE
+    if total_size > limit:
+        size_mb = total_size / (1024 * 1024)
+        limit_mb = limit / (1024 * 1024)
+        logger.warning(
+            f"WAF: Rejected upload - total size {size_mb:.2f}MB exceeds limit {limit_mb:.2f}MB"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Total upload size ({size_mb:.1f}MB) exceeds maximum allowed ({limit_mb}MB)"
+        )
+
+
+def validate_file_extension(
+    filename: str,
+    blocked: set[str] | None = None,
+    allowed: set[str] | None = None,
+) -> None:
+    """
+    Validate file extension against blocked/allowed lists.
+
+    Args:
+        filename: Name of the file
+        blocked: Set of blocked extensions (defaults to BLOCKED_EXTENSIONS)
+        allowed: Set of allowed extensions (defaults to ALLOWED_EXTENSIONS, empty = all allowed)
+
+    Raises:
+        HTTPException: If extension is blocked or not in allowed list
+    """
+    blocked_set = blocked if blocked is not None else BLOCKED_EXTENSIONS
+    allowed_set = allowed if allowed is not None else ALLOWED_EXTENSIONS
+
+    # Get extension (lowercase for comparison)
+    ext = ""
+    if "." in filename:
+        ext = "." + filename.rsplit(".", 1)[-1].lower()
+
+    # Check if blocked
+    if ext in blocked_set:
+        logger.warning(f"WAF: Rejected file upload - blocked extension: {ext}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type '{ext}' is not allowed for security reasons"
+        )
+
+    # Check if allowed (only if allowed list is not empty)
+    if allowed_set and ext not in allowed_set:
+        logger.warning(f"WAF: Rejected file upload - extension not in allowed list: {ext}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type '{ext}' is not in the allowed file types"
         )
 
 

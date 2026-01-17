@@ -350,6 +350,17 @@ class ClaudeAgent:
         The SDK discovers skills via setting_sources=["project"] from
         workspace/.claude/skills/.
 
+        IMPORTANT ARCHITECTURE NOTE:
+        Symlinks must point to paths that work in BOTH Docker and bwrap environments:
+        - MCP tools (Read, Write, Glob, etc.) run in Docker container OUTSIDE bwrap
+        - Bash tool runs INSIDE bwrap sandbox
+        - Both environments now have CONSISTENT mounts (see permissions.yaml):
+          - /skills = ./skills (same in both Docker and bwrap)
+          - /users = ./users (same in both Docker and bwrap)
+
+        Symlink paths: /skills/.claude/skills/foo, /users/bar/.claude/skills/foo
+        These work in both MCP tools and Bash.
+
         Args:
             session_id: The session ID for workspace access.
             username: Optional username for user-specific skills.
@@ -368,12 +379,29 @@ class ClaudeAgent:
         # Discover merged skills using shared function (global + user, with user overriding)
         skill_sources = discover_merged_skills(username=username)
 
-        # Create symlinks to discovered skills
+        # Paths used to determine skill source type
+        global_skills_base = SKILLS_DIR / ".claude" / "skills"
+        user_skills_base = USERS_DIR / username / ".claude" / "skills" if username else None
+
+        # Create symlinks pointing to DOCKER paths (not bwrap sandbox paths)
+        # MCP tools run outside bwrap and see Docker's filesystem:
+        #   - Global skills: /skills/.claude/skills/<skill_name>
+        #   - User skills: /users/<username>/.claude/skills/<skill_name>
         for skill_name, source_path in skill_sources.items():
             link_path = skills_target / skill_name
+
+            # Determine Docker path based on skill source
+            # User skills override global, so check user first
+            if user_skills_base and str(source_path).startswith(str(user_skills_base)):
+                # User skill - Docker path: /users/<username>/.claude/skills/<skill_name>
+                docker_path = Path("/users") / username / ".claude" / "skills" / skill_name
+            else:
+                # Global skill - Docker path: /skills/.claude/skills/<skill_name>
+                docker_path = Path("/skills") / ".claude" / "skills" / skill_name
+
             try:
-                link_path.symlink_to(source_path)
-                logger.debug(f"Linked skill: {skill_name} -> {source_path}")
+                link_path.symlink_to(docker_path)
+                logger.debug(f"Linked skill: {skill_name} -> {docker_path} (source: {source_path})")
             except Exception as e:
                 logger.warning(f"Failed to create skill symlink {skill_name}: {e}")
 
@@ -550,15 +578,31 @@ class ClaudeAgent:
         # Configure PathValidator for this session BEFORE creating MCP tools
         # The validator runs in the main Python process (outside bwrap) and
         # translates agent paths (/workspace/...) to real Docker paths
+        #
+        # IMPORTANT: Skills paths must be DOCKER paths (not bwrap paths) because
+        # MCP tools (Read, Write, etc.) run outside bwrap and see the Docker filesystem.
+        # Docker mounts: ./skills:/skills, ./users:/users
+        # So global skills are at /skills/.claude/skills/ and user skills at /users/<user>/.claude/skills/
         try:
+            global_skills = None
+            user_skills = None
+            if self._config.enable_skills:
+                # Global skills: /skills/.claude/skills/
+                global_skills = Path("/skills/.claude/skills")
+                # User skills: /users/<username>/.claude/skills/
+                if username:
+                    user_skills = Path(f"/users/{username}/.claude/skills")
+
             configure_path_validator(
                 session_id=session_info.session_id,
                 workspace_path=workspace_dir,
                 skills_path=self._skills_dir if self._config.enable_skills else None,
+                global_skills_path=global_skills,
+                user_skills_path=user_skills,
             )
             logger.info(
                 f"PathValidator configured for session {session_info.session_id}, "
-                f"workspace={workspace_dir}"
+                f"workspace={workspace_dir}, global_skills={global_skills}, user_skills={user_skills}"
             )
         except Exception as e:
             logger.error(f"Failed to configure PathValidator: {e}")
@@ -636,6 +680,17 @@ class ClaudeAgent:
                 f"disabled: {subagent_manager.list_disabled_agents()})"
             )
 
+        # Build environment variables
+        # Use base_model (without :mode=thinking suffix) for API calls
+        # Set MAX_THINKING_TOKENS when thinking mode is enabled
+        env_vars = {"CLAUDE_CONFIG_DIR": str(session_dir)}
+        thinking_tokens = self._config.effective_thinking_tokens
+        if thinking_tokens:
+            env_vars["MAX_THINKING_TOKENS"] = str(thinking_tokens)
+            logger.info(
+                f"THINKING: Extended thinking enabled with {thinking_tokens} token budget"
+            )
+
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
             f"tools={all_tools}, allowed_tools={allowed_tools}, "
@@ -646,12 +701,13 @@ class ClaudeAgent:
             f"mcp_servers={list(mcp_servers.keys())}, "
             f"bwrap_sandbox={'ENABLED' if sandbox_executor else 'DISABLED'}, "
             f"resume={resume_id}, fork_session={fork_session}, "
-            f"agents={list(agents.keys()) if agents else 'none'}"
+            f"agents={list(agents.keys()) if agents else 'none'}, "
+            f"thinking={'ENABLED (' + str(thinking_tokens) + ' tokens)' if thinking_tokens else 'DISABLED'}"
         )
 
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
-            model=self._config.model,
+            model=self._config.base_model,  # Use base model without :mode=thinking suffix
             max_turns=self._config.max_turns,
             permission_mode=None,  # CRITICAL: Explicitly set to None to use can_use_tool callback
             tools=all_tools,  # Available tools (excluding disabled)
@@ -662,7 +718,7 @@ class ClaudeAgent:
             add_dirs=add_dirs,
             setting_sources=["project"] if self._config.enable_skills else [],
             can_use_tool=can_use_tool,  # Includes bwrap sandboxing for Bash
-            env={"CLAUDE_CONFIG_DIR": str(session_dir)},  # Per-session storage
+            env=env_vars,  # Per-session storage + thinking config
             resume=resume_id,  # Claude's session ID for resumption
             fork_session=fork_session,  # Fork instead of continue when resuming
             enable_file_checkpointing=self._config.enable_file_checkpointing,

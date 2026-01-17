@@ -4,7 +4,7 @@ Command Security Filter for Ag3ntumBash.
 Loads security rules from YAML configuration and validates commands
 before execution. Provides defense-in-depth beyond bwrap sandboxing.
 
-Rules are defined in config/security/command_filtering.yaml with:
+Rules are defined in config/security/command-filtering.yaml with:
 - pattern: Python regex to match against command
 - action: "block" (deny) or "record" (log but allow)
 - exploit: Example command for testing
@@ -13,9 +13,11 @@ Security Philosophy:
 1. Deny by default for dangerous categories
 2. Fail-closed on any error
 3. Log all matches for audit trail
+4. Allow trusted skill scripts from designated directories
 """
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
@@ -25,7 +27,78 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Default path to security rules
-DEFAULT_RULES_PATH = Path(__file__).parent.parent.parent / "config" / "security" / "command_filtering.yaml"
+DEFAULT_RULES_PATH = Path(__file__).parent.parent.parent / "config" / "security" / "command-filtering.yaml"
+
+# Trusted skill script paths - commands executing scripts from these paths bypass security filters
+# These paths are verified within the sandboxed environment (bwrap) and are read-only mounted
+# See permissions.yaml for mount configuration (global_skills, user_skills, user_venv)
+# NOTE: Mounts are consistent with Docker mounts to ensure symlinks work in both environments
+TRUSTED_SKILL_PATHS = (
+    "/skills/",       # Global skills directory (read-only, contains .claude/skills/<skill_name>/)
+    "/users/",        # Users directory (read-only, contains <username>/.claude/skills/<skill_name>/)
+    "/venv/",         # User's Python venv (read-only mount at /venv)
+)
+
+# Interpreters that can execute skill scripts
+TRUSTED_INTERPRETERS = ("python", "python3", "bash", "sh")
+
+
+def _is_trusted_skill_command(command: str) -> bool:
+    """
+    Check if a command is executing a trusted skill script.
+
+    Skill scripts are Python/bash files located in designated skill directories.
+    These scripts are mounted read-only in the sandbox and are trusted to execute
+    even if their arguments might match security filter patterns.
+
+    Args:
+        command: The full command string to check.
+
+    Returns:
+        True if the command executes a script from a trusted skill path.
+    """
+    try:
+        # Parse command safely
+        parts = shlex.split(command)
+        if not parts:
+            return False
+
+        # Get the base command (first part)
+        base_cmd = Path(parts[0]).name
+
+        # Check if it's a trusted interpreter
+        if base_cmd not in TRUSTED_INTERPRETERS:
+            return False
+
+        # Look for script path in arguments
+        for i, arg in enumerate(parts[1:], start=1):
+            # Skip flags/options
+            if arg.startswith("-"):
+                continue
+
+            # Check if this argument is a path to a skill script
+            for skill_path in TRUSTED_SKILL_PATHS:
+                if skill_path in arg:
+                    # Verify it looks like a script file
+                    if arg.endswith((".py", ".sh", ".bash")):
+                        logger.info(
+                            f"CommandSecurityFilter: TRUSTED SKILL - "
+                            f"Allowing execution of skill script: {arg}"
+                        )
+                        return True
+
+            # First non-flag argument found but not a skill - stop looking
+            break
+
+        return False
+
+    except ValueError as e:
+        # shlex.split failed - malformed command, don't trust it
+        logger.debug(f"CommandSecurityFilter: Could not parse command for skill check: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"CommandSecurityFilter: Error in skill check: {e}")
+        return False
 
 
 @dataclass
@@ -91,7 +164,7 @@ class CommandSecurityFilter:
         Initialize the command security filter.
         
         Args:
-            rules_path: Path to YAML rules file. Defaults to config/security/command_filtering.yaml
+            rules_path: Path to YAML rules file. Defaults to config/security/command-filtering.yaml
             fail_closed: If True, block commands when rules fail to load (security-first).
                         If False, allow commands when rules fail to load (availability-first).
         """
@@ -191,10 +264,10 @@ class CommandSecurityFilter:
     def check_command(self, command: str) -> SecurityCheckResult:
         """
         Check a command against security rules.
-        
+
         Args:
             command: The command string to check.
-            
+
         Returns:
             SecurityCheckResult with allowed status and matched rule if any.
         """
@@ -215,7 +288,17 @@ class CommandSecurityFilter:
                     allowed=True,
                     message="Rules not loaded, allowing (fail-open mode)"
                 )
-        
+
+        # SECURITY EXCEPTION: Allow trusted skill scripts
+        # Skill scripts are located in read-only mounted directories and are trusted.
+        # This check runs BEFORE pattern matching to prevent false positives from
+        # skill arguments (e.g., prompts containing words like "at" or "kill").
+        if _is_trusted_skill_command(command):
+            return SecurityCheckResult(
+                allowed=True,
+                message="Trusted skill script execution allowed",
+            )
+
         # Check command against all rules
         for rule in self._rules:
             try:

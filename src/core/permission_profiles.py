@@ -31,6 +31,7 @@ from ..config import (
     CONFIG_DIR,
     DATA_DIR,
     LOGS_DIR,
+    SECURITY_CONFIG_DIR,
     SESSIONS_DIR,
     SKILLS_DIR,
 )
@@ -238,7 +239,7 @@ class PermissionManager:
 
         Args:
             profile_path: Path to permission profile file.
-                         Defaults to AGENT/config/permissions.yaml
+                         Defaults to AGENT/config/security/permissions.yaml
                          (falls back to .json if .yaml not found).
         """
         self._profile_path = (
@@ -284,11 +285,11 @@ class PermissionManager:
             if no file exists (for error reporting).
         """
         for ext in self.SUPPORTED_EXTENSIONS:
-            path = CONFIG_DIR / f"{base_name}{ext}"
+            path = SECURITY_CONFIG_DIR / f"{base_name}{ext}"
             if path.exists():
                 return path
         # Return default .yaml path if nothing exists
-        return CONFIG_DIR / f"{base_name}.yaml"
+        return SECURITY_CONFIG_DIR / f"{base_name}.yaml"
 
     def _notify_profile_loaded(self) -> None:
         """Notify tracer about profile load if tracer is set."""
@@ -823,7 +824,7 @@ def validate_profile_file(config_dir: Optional[Path] = None) -> Path:
 
     Args:
         config_dir: Directory containing profile.
-                   Defaults to AGENT/config/.
+                   Defaults to AGENT/config/security/.
 
     Returns:
         Path to profile file.
@@ -832,7 +833,7 @@ def validate_profile_file(config_dir: Optional[Path] = None) -> Path:
         ProfileNotFoundError: If profile file is missing.
     """
     if config_dir is None:
-        config_dir = CONFIG_DIR
+        config_dir = SECURITY_CONFIG_DIR
 
     manager = PermissionManager(
         profile_path=config_dir / f"{PermissionManager.PROFILE_BASE}.yaml"

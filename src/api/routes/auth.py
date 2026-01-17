@@ -5,7 +5,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
-from ...services.auth_service import auth_service
+from ...services.auth_service import auth_service, UserEnvironmentError
 from ..deps import get_current_user_id
 from ..models import TokenResponse, UserResponse
 
@@ -22,6 +22,8 @@ async def login(
     Login with email and password.
 
     Returns a JWT token valid for 7 days.
+
+    Returns 403 Forbidden if user account is misconfigured (missing home/venv).
     """
     try:
         user, token, expires_in = await auth_service.authenticate(db, email, password)
@@ -30,6 +32,12 @@ async def login(
             token_type="bearer",
             user_id=user.id,
             expires_in=expires_in,
+        )
+    except UserEnvironmentError as e:
+        # User exists but filesystem is misconfigured - must be recreated
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
         )
     except ValueError:
         raise HTTPException(

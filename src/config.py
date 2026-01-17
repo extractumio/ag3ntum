@@ -56,7 +56,10 @@ USERS_DIR: Path = AGENT_DIR.parent / "users"
 # Configuration files
 AGENT_CONFIG_FILE: Path = CONFIG_DIR / "agent.yaml"
 SECRETS_FILE: Path = CONFIG_DIR / "secrets.yaml"
-PERMISSIONS_FILE: Path = CONFIG_DIR / "permissions.json"
+# Security configuration directory
+SECURITY_CONFIG_DIR: Path = CONFIG_DIR / "security"
+
+PERMISSIONS_FILE: Path = SECURITY_CONFIG_DIR / "permissions.yaml"
 
 # Source directories
 SRC_DIR: Path = AGENT_DIR / "src"
@@ -453,10 +456,11 @@ def load_sandboxed_envs(
         if user_envs is None:
             user_envs = {}
 
-        # Convert to string dict
+        # Convert to string dict, filtering out empty/None values
+        # This prevents user secrets with empty values from overwriting global secrets
         user_envs = {
             str(k): str(v) for k, v in user_envs.items()
-            if k and v is not None
+            if k and v is not None and str(v).strip()
         }
 
         logger.info(

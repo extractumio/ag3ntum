@@ -66,6 +66,10 @@ class ConfigResponse(BaseModel):
     default_model: str = Field(
         description="Default model to use"
     )
+    thinking_tokens: Optional[int] = Field(
+        default=None,
+        description="Token budget for extended thinking mode"
+    )
 
 
 # =============================================================================
@@ -133,6 +137,12 @@ class AgentConfigOverrides(BaseModel):
     include_partial_messages: Optional[bool] = Field(
         default=None,
         description="Include partial/incomplete messages in output"
+    )
+
+    # Extended thinking configuration
+    thinking_tokens: Optional[int] = Field(
+        default=None,
+        description="Token budget for extended thinking mode (overrides agent.yaml)"
     )
 
 

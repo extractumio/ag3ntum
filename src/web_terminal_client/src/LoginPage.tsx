@@ -20,7 +20,7 @@ export function LoginPage() {
       <div className="login-container">
         <div className="login-header">
           <span className="login-icon">◆</span>
-          <h1>Ag3ntum</h1>
+          <h1>AG3NTUM</h1>
         </div>
         <p className="login-subtitle">Sign in to continue</p>
 

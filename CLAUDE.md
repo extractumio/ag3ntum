@@ -163,11 +163,12 @@ Native Claude Code tools are **blocked**. All operations use Ag3ntum tools with 
 | File | Purpose |
 |------|---------|
 | `config/agent.yaml` | Agent settings (model, max_turns, timeout, skills) |
-| `config/permissions.yaml` | Tool enablement, sandbox config, session mounts |
 | `config/secrets.yaml` | API keys (ANTHROPIC_API_KEY) |
-| `config/tools_security.yaml` | PathValidator blocklists, network settings |
-| `config/security/command_filtering.yaml` | 140+ regex patterns for command blocking |
 | `config/api.yaml` | API server config (host, port, CORS) |
+| `config/security/permissions.yaml` | Tool enablement, sandbox config, session mounts |
+| `config/security/tools-security.yaml` | PathValidator blocklists, network settings |
+| `config/security/command-filtering.yaml` | 140+ regex patterns for command blocking |
+| `config/security/upload-filtering.yaml` | File upload extension/MIME type whitelist/blacklist |
 
 ## Key Patterns
 
@@ -183,7 +184,7 @@ result = await execute_agent_task(params)
 ```
 
 ### Permission Profiles
-Permission configuration is loaded from `config/permissions.yaml`:
+Permission configuration is loaded from `config/security/permissions.yaml`:
 - `tools.enabled`: Allowed tools (Ag3ntum MCP tools)
 - `tools.disabled`: Blocked tools (native Claude Code tools)
 - `sandbox.*`: Bubblewrap configuration

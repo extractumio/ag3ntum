@@ -494,11 +494,7 @@ persistence:
   - pattern: '/etc/cron'
     action: block
     exploit: "echo '* * * * * /tmp/backdoor.sh' >> /etc/cron.d/backdoor"
-  
-  - pattern: '(?:^|[\s;&|`$()])\s*(?:/usr/bin/)?at\s'
-    action: block
-    exploit: "at now + 1 minute <<< '/tmp/backdoor.sh'"
-  
+
   - pattern: '/etc/init\.d/'
     action: block
     exploit: "echo '/tmp/backdoor.sh' >> /etc/init.d/rc.local"

@@ -385,10 +385,10 @@ class OpenAIProvider(ImageProvider):
 def _get_provider(vendor: Vendor, api_key: str | None = None) -> ImageProvider:
     """Get the appropriate provider based on vendor name."""
     if vendor == "google":
-        key = api_key or os.getenv("GOOGLE_API_KEY", "")
+        key = api_key or os.getenv("GEMINI_API_KEY", "")
         if not key:
             raise ValueError(
-                "Google API key not provided. Set GOOGLE_API_KEY environment variable "
+                "Google API key not provided. Set GEMINI_API_KEY environment variable "
                 "or pass api_key parameter."
             )
         return GoogleProvider(api_key=key)

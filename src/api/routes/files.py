@@ -1,20 +1,22 @@
 """
-File browsing endpoints for Ag3ntum API.
+File browsing and upload endpoints for Ag3ntum API.
 
 Provides endpoints for:
 - GET /files/{session_id}/browse - List directory contents with tree structure
 - GET /files/{session_id}/content - Get file content for preview
 - GET /files/{session_id}/download - Download a file
+- POST /files/{session_id}/upload - Upload files to workspace
 - DELETE /files/{session_id} - Delete a file
 """
 import logging
 import mimetypes
+import re
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...db.database import get_db
 from ...services.session_service import session_service, InvalidSessionIdError
 from ..deps import get_current_user_id, get_current_user_id_from_query_or_header
+from ..waf_filter import (
+    MAX_FILE_UPLOAD_SIZE,
+    MAX_FILES_PER_UPLOAD,
+    MAX_TOTAL_UPLOAD_SIZE,
+    BLOCKED_EXTENSIONS,
+    ALLOWED_EXTENSIONS,
+    validate_file_count,
+    validate_total_upload_size,
+    validate_file_extension,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +101,92 @@ class FileContentResponse(BaseModel):
     error: Optional[str] = None
 
 
+class UploadedFileInfo(BaseModel):
+    """Information about a successfully uploaded file."""
+    name: str
+    path: str  # Relative path from workspace root
+    size: int
+    mime_type: str
+
+
+class UploadResponse(BaseModel):
+    """Response for file upload endpoint."""
+    uploaded: list[UploadedFileInfo]
+    total_count: int
+    errors: list[str] = []  # Per-file errors (file still may be partially successful)
+
+
 def get_mime_type(file_path: Path) -> str:
     """Get MIME type for a file."""
     mime_type, _ = mimetypes.guess_type(str(file_path))
     return mime_type or 'application/octet-stream'
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename for safe storage.
+
+    Removes or replaces dangerous characters to prevent:
+    - Path traversal attacks (../, /, \\)
+    - Null byte injection
+    - Control characters
+    - Shell metacharacters
+
+    Args:
+        filename: Original filename from upload
+
+    Returns:
+        Sanitized filename safe for storage
+
+    Raises:
+        HTTPException: If filename is empty or invalid after sanitization
+    """
+    if not filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Filename cannot be empty",
+        )
+
+    # Remove null bytes
+    sanitized = filename.replace('\x00', '')
+
+    # Remove control characters (ASCII 0-31 except tab which we replace with space)
+    sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
+    sanitized = sanitized.replace('\t', ' ')
+
+    # Remove/replace path separators and traversal patterns
+    sanitized = sanitized.replace('/', '_')
+    sanitized = sanitized.replace('\\', '_')
+    sanitized = re.sub(r'\.\.+', '.', sanitized)  # Replace .. with single .
+
+    # Remove shell metacharacters that could be dangerous
+    # Keep alphanumeric, spaces, dots, dashes, underscores
+    sanitized = re.sub(r'[^\w\s.\-]', '', sanitized, flags=re.UNICODE)
+
+    # Collapse multiple spaces/underscores
+    sanitized = re.sub(r'[\s_]+', '_', sanitized)
+
+    # Remove leading/trailing whitespace and dots (hidden files on Unix)
+    sanitized = sanitized.strip(' ._')
+
+    # Ensure we have something left
+    if not sanitized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Filename contains only invalid characters",
+        )
+
+    # Limit length to 255 characters (common filesystem limit)
+    if len(sanitized) > 255:
+        # Try to preserve extension
+        name_parts = sanitized.rsplit('.', 1)
+        if len(name_parts) == 2 and len(name_parts[1]) < 10:
+            ext = '.' + name_parts[1]
+            sanitized = name_parts[0][:255 - len(ext)] + ext
+        else:
+            sanitized = sanitized[:255]
+
+    return sanitized
 
 
 def validate_path_security(
@@ -614,6 +708,283 @@ async def download_file(
         path=file_path,
         filename=file_path.name,
         media_type=get_mime_type(file_path),
+    )
+
+
+# =============================================================================
+# POST /files/{session_id}/upload - Upload files to workspace
+# =============================================================================
+
+def _get_unique_filename(target_dir: Path, filename: str) -> str:
+    """
+    Generate a unique filename by adding a numeric suffix if file exists.
+
+    Args:
+        target_dir: Directory where file will be saved
+        filename: Original filename
+
+    Returns:
+        Unique filename that doesn't conflict with existing files
+    """
+    target_path = target_dir / filename
+    if not target_path.exists():
+        return filename
+
+    # Split name and extension
+    if "." in filename:
+        name, ext = filename.rsplit(".", 1)
+        ext = "." + ext
+    else:
+        name = filename
+        ext = ""
+
+    # Find unique name with counter
+    counter = 1
+    while True:
+        new_name = f"{name}_{counter}{ext}"
+        if not (target_dir / new_name).exists():
+            return new_name
+        counter += 1
+        # Safety limit to prevent infinite loop
+        if counter > 10000:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot generate unique filename for {filename}"
+            )
+
+
+@router.post("/{session_id}/upload", response_model=UploadResponse)
+async def upload_files(
+    session_id: str,
+    files: list[UploadFile] = File(..., description="Files to upload"),
+    path: str = Form(default="", description="Target directory (relative to workspace root)"),
+    overwrite: bool = Form(default=False, description="Overwrite existing files"),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> UploadResponse:
+    """
+    Upload files to a session's workspace.
+
+    Files are saved to the specified directory within the workspace.
+    By default, existing files are not overwritten (returns error for that file).
+
+    Limits:
+    - Max files per upload: 20 (configurable in agent.yaml)
+    - Max file size: 10MB per file (configurable in agent.yaml)
+    - Max total upload size: 50MB (configurable in agent.yaml)
+    - Blocked extensions: .exe, .dll, .so, .sh, .bat, etc.
+
+    Returns list of successfully uploaded files and any per-file errors.
+    """
+    # ==========================================================================
+    # 1. Validate file count upfront
+    # ==========================================================================
+    validate_file_count(len(files))
+
+    if len(files) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided for upload",
+        )
+
+    # ==========================================================================
+    # 2. Validate and get session
+    # ==========================================================================
+    try:
+        session = await session_service.get_session(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+    except InvalidSessionIdError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session ID format",
+        )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    # Get workspace directory
+    if not session.working_dir:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Session working directory not configured",
+        )
+
+    workspace_root = Path(session.working_dir) / "workspace"
+
+    # Ensure workspace exists
+    if not workspace_root.exists():
+        workspace_root.mkdir(parents=True, exist_ok=True)
+
+    # ==========================================================================
+    # 3. Validate target directory path
+    # ==========================================================================
+    if path:
+        target_dir = validate_path_security(path, workspace_root)
+        # Ensure target is a directory (create if doesn't exist)
+        if target_dir.exists() and not target_dir.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target path is not a directory: {path}",
+            )
+        if not target_dir.exists():
+            target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir = workspace_root
+
+    # ==========================================================================
+    # 4. Pre-validate all files (extension check) before processing any
+    # ==========================================================================
+    for upload_file in files:
+        original_filename = upload_file.filename or "unnamed"
+        try:
+            validate_file_extension(
+                original_filename,
+                blocked=BLOCKED_EXTENSIONS,
+                allowed=ALLOWED_EXTENSIONS if ALLOWED_EXTENSIONS else None,
+            )
+        except HTTPException as e:
+            # Re-raise with filename context
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=f"{original_filename}: {e.detail}",
+            )
+
+    # ==========================================================================
+    # 5. Process files with size tracking
+    # ==========================================================================
+    uploaded: list[UploadedFileInfo] = []
+    errors: list[str] = []
+    total_size: int = 0
+    used_filenames: set[str] = set()  # Track filenames to detect collisions after sanitization
+
+    for upload_file in files:
+        try:
+            original_filename = upload_file.filename or "unnamed"
+
+            # Sanitize filename
+            try:
+                safe_filename = sanitize_filename(original_filename)
+            except HTTPException as e:
+                errors.append(f"{original_filename}: {e.detail}")
+                continue
+
+            # Handle filename collision from sanitization (e.g., "a!b.txt" and "a@b.txt" both become "ab.txt")
+            if safe_filename in used_filenames:
+                safe_filename = _get_unique_filename(target_dir, safe_filename)
+            used_filenames.add(safe_filename)
+
+            # Construct target file path
+            target_path = target_dir / safe_filename
+
+            # Check if file already exists
+            if target_path.exists() and not overwrite:
+                errors.append(f"{safe_filename}: File already exists (use overwrite=true to replace)")
+                continue
+
+            # Check if target is a symlink (don't overwrite symlinks for security)
+            if target_path.exists() and target_path.is_symlink():
+                errors.append(f"{safe_filename}: Cannot overwrite symlinks for security reasons")
+                continue
+
+            # Read file content in chunks to check size without loading all into memory first
+            # For files under MAX_FILE_UPLOAD_SIZE, we read fully; for larger, we detect early
+            CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+            content_chunks: list[bytes] = []
+            file_size = 0
+
+            while True:
+                chunk = await upload_file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+
+                # Check per-file size limit early
+                if file_size > MAX_FILE_UPLOAD_SIZE:
+                    size_mb = file_size / (1024 * 1024)
+                    limit_mb = MAX_FILE_UPLOAD_SIZE / (1024 * 1024)
+                    errors.append(
+                        f"{safe_filename}: File size exceeds maximum allowed size ({limit_mb:.0f}MB)"
+                    )
+                    break
+
+                # Check total upload size limit early
+                if total_size + file_size > MAX_TOTAL_UPLOAD_SIZE:
+                    total_mb = (total_size + file_size) / (1024 * 1024)
+                    limit_mb = MAX_TOTAL_UPLOAD_SIZE / (1024 * 1024)
+                    errors.append(
+                        f"{safe_filename}: Total upload size would exceed limit ({limit_mb:.0f}MB)"
+                    )
+                    break
+
+                content_chunks.append(chunk)
+
+            # Skip if size limits were exceeded
+            if file_size > MAX_FILE_UPLOAD_SIZE or total_size + file_size > MAX_TOTAL_UPLOAD_SIZE:
+                continue
+
+            # Combine chunks and write file
+            content = b"".join(content_chunks)
+            file_size = len(content)  # Recalculate exact size
+
+            # Final size validation
+            if file_size > MAX_FILE_UPLOAD_SIZE:
+                size_mb = file_size / (1024 * 1024)
+                limit_mb = MAX_FILE_UPLOAD_SIZE / (1024 * 1024)
+                errors.append(
+                    f"{safe_filename}: File size ({size_mb:.1f}MB) exceeds "
+                    f"maximum allowed size ({limit_mb:.0f}MB)"
+                )
+                continue
+
+            # Check total size before writing
+            if total_size + file_size > MAX_TOTAL_UPLOAD_SIZE:
+                validate_total_upload_size(total_size + file_size)  # Will raise HTTPException
+
+            # Write file atomically (write to temp, then rename)
+            temp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+            try:
+                temp_path.write_bytes(content)
+                temp_path.rename(target_path)
+            except Exception as e:
+                # Clean up temp file if it exists
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise e
+
+            # Update total size
+            total_size += file_size
+
+            # Get relative path for response
+            relative_path = str(target_path.relative_to(workspace_root))
+
+            uploaded.append(UploadedFileInfo(
+                name=safe_filename,
+                path=relative_path,
+                size=file_size,
+                mime_type=get_mime_type(target_path),
+            ))
+
+            logger.info(
+                f"Uploaded file {relative_path} ({file_size} bytes) "
+                f"to session {session_id} by user {user_id}"
+            )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to upload file {upload_file.filename}: {e}")
+            errors.append(f"{upload_file.filename or 'unnamed'}: Upload failed - {str(e)}")
+
+    return UploadResponse(
+        uploaded=uploaded,
+        total_count=len(uploaded),
+        errors=errors,
     )
 
 

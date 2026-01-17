@@ -5,15 +5,28 @@ Handles JWT token generation and validation with per-user secrets.
 """
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import USERS_DIR
 from ..db.models import User
 
 logger = logging.getLogger(__name__)
+
+
+class UserEnvironmentError(Exception):
+    """
+    Raised when a user's environment is misconfigured.
+
+    This indicates the user account exists in the database but required
+    filesystem resources (home directory, venv) are missing. The user
+    must be recreated to fix this issue.
+    """
+    pass
 
 # JWT configuration
 JWT_ALGORITHM = "HS256"
@@ -30,6 +43,59 @@ class AuthService:
     def __init__(self) -> None:
         """Initialize the auth service."""
         pass
+
+    def validate_user_environment(self, username: str) -> None:
+        """
+        Validate that user's filesystem environment is properly configured.
+
+        Checks for required directories that must exist for the sandbox to work:
+        - Home directory: /users/{username}
+        - Python venv: /users/{username}/venv
+
+        Args:
+            username: The username to validate.
+
+        Raises:
+            UserEnvironmentError: If any required resource is missing.
+        """
+        user_home = USERS_DIR / username
+
+        # Check home directory
+        if not user_home.exists():
+            logger.error(
+                f"SECURITY: User '{username}' home directory missing: {user_home}. "
+                "User account is misconfigured."
+            )
+            raise UserEnvironmentError(
+                f"User '{username}' is misconfigured: home directory does not exist. "
+                "Please contact administrator to recreate the account."
+            )
+
+        # Check venv directory (required for sandbox)
+        venv_path = user_home / "venv"
+        if not venv_path.exists():
+            logger.error(
+                f"SECURITY: User '{username}' venv missing: {venv_path}. "
+                "User account is misconfigured."
+            )
+            raise UserEnvironmentError(
+                f"User '{username}' is misconfigured: Python environment not initialized. "
+                "Please contact administrator to recreate the account."
+            )
+
+        # Check venv has Python binary
+        python_bin = venv_path / "bin" / "python3"
+        if not python_bin.exists():
+            logger.error(
+                f"SECURITY: User '{username}' venv corrupted: {python_bin} missing. "
+                "User account is misconfigured."
+            )
+            raise UserEnvironmentError(
+                f"User '{username}' is misconfigured: Python environment corrupted. "
+                "Please contact administrator to recreate the account."
+            )
+
+        logger.debug(f"User environment validated for '{username}'")
 
     def generate_token(self, user_id: str, user_secret: str) -> tuple[str, int]:
         """
@@ -59,12 +125,19 @@ class AuthService:
         """
         Validate a JWT token using per-user secret (two-phase decode).
 
+        Also validates that the user's filesystem environment is properly
+        configured. If the user's home directory or venv is missing,
+        authentication fails with UserEnvironmentError.
+
         Args:
             token: The JWT token to validate.
             db: Database session.
 
         Returns:
             User ID if valid, None otherwise.
+
+        Raises:
+            UserEnvironmentError: If user's environment is misconfigured.
         """
         try:
             # Phase 1: Decode without verification to get user_id
@@ -78,10 +151,17 @@ class AuthService:
             if not user or not user.is_active:
                 return None
 
+            # Phase 3: Validate user's filesystem environment
+            # This prevents authentication for users with missing home/venv
+            self.validate_user_environment(user.username)
+
             # Verify with user's secret
             payload = jwt.decode(token, user.jwt_secret, algorithms=[JWT_ALGORITHM])
             return payload.get("sub")
 
+        except UserEnvironmentError:
+            # Re-raise environment errors - these should propagate to caller
+            raise
         except jwt.ExpiredSignatureError:
             logger.debug("Token expired")
             return None
@@ -98,6 +178,9 @@ class AuthService:
         """
         Authenticate user and return token.
 
+        Also validates that the user's filesystem environment is properly
+        configured before allowing login.
+
         Args:
             db: Database session.
             email: User email.
@@ -108,6 +191,7 @@ class AuthService:
 
         Raises:
             ValueError: If authentication fails.
+            UserEnvironmentError: If user's environment is misconfigured.
         """
         import bcrypt
 
@@ -119,6 +203,10 @@ class AuthService:
 
         if not bcrypt.checkpw(password.encode(), user.password_hash.encode()):
             raise ValueError("Invalid credentials")
+
+        # Validate user's filesystem environment before issuing token
+        # This prevents login for users with missing home/venv
+        self.validate_user_environment(user.username)
 
         token, expires_in = self.generate_token(user.id, user.jwt_secret)
         return user, token, expires_in

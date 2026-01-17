@@ -151,6 +151,19 @@ export interface FileContentResponse {
 export type FileSortField = 'name' | 'size' | 'created_at' | 'modified_at';
 export type SortOrder = 'asc' | 'desc';
 
+export interface UploadedFileInfo {
+  name: string;
+  path: string;
+  size: number;
+  mime_type: string;
+}
+
+export interface UploadResponse {
+  uploaded: UploadedFileInfo[];
+  total_count: number;
+  errors: string[];
+}
+
 // =============================================================================
 // Skills Types
 // =============================================================================

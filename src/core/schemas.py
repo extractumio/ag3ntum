@@ -103,13 +103,19 @@ def get_model_context_size(model: str) -> int:
     """
     Get the context window size for a model.
 
+    Handles thinking mode suffix by stripping ':mode=thinking' before lookup.
+
     Args:
-        model: The model name/identifier.
+        model: The model name/identifier (e.g., 'claude-sonnet-4-5-20250929:mode=thinking').
 
     Returns:
         The context window size in tokens.
     """
-    return MODEL_CONTEXT_SIZES.get(model, MODEL_CONTEXT_SIZES["default"])
+    # Strip thinking mode suffix for lookup
+    base_model = model
+    if model.endswith(":mode=thinking"):
+        base_model = model[:-len(":mode=thinking")]
+    return MODEL_CONTEXT_SIZES.get(base_model, MODEL_CONTEXT_SIZES["default"])
 
 
 class TokenUsage(BaseModel):
@@ -304,6 +310,43 @@ class AgentConfig(BaseModel):
         description="Include partial/incomplete messages in output"
     )
 
+    # Extended thinking configuration
+    thinking_tokens: Optional[int] = Field(
+        default=None,
+        description="Token budget for extended thinking mode. When set and model has :mode=thinking suffix, enables extended thinking."
+    )
+
+    @property
+    def thinking_enabled(self) -> bool:
+        """
+        Check if thinking mode is enabled for the current model.
+
+        Returns True if the model name ends with ':mode=thinking'.
+        """
+        return self.model.endswith(":mode=thinking")
+
+    @property
+    def base_model(self) -> str:
+        """
+        Get the base model name without the thinking mode suffix.
+
+        E.g., 'claude-sonnet-4-5-20250929:mode=thinking' -> 'claude-sonnet-4-5-20250929'
+        """
+        if self.model.endswith(":mode=thinking"):
+            return self.model[:-len(":mode=thinking")]
+        return self.model
+
+    @property
+    def effective_thinking_tokens(self) -> Optional[int]:
+        """
+        Get the effective thinking tokens budget.
+
+        Returns the thinking_tokens value if thinking is enabled, None otherwise.
+        """
+        if self.thinking_enabled and self.thinking_tokens:
+            return self.thinking_tokens
+        return None
+
 
 class SessionInfo(BaseModel):
     """
@@ -429,6 +472,9 @@ class TaskExecutionParams:
     max_buffer_size: Optional[int] = None
     output_format: Optional[str] = None
     include_partial_messages: Optional[bool] = None
+
+    # Extended thinking configuration
+    thinking_tokens: Optional[int] = None
 
     # User isolation (for OS-level process isolation)
     user_id: Optional[str] = None

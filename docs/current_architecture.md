@@ -339,12 +339,13 @@ config/
 ├── agent.yaml                         # Agent configuration (model, max_turns, etc.)
 ├── secrets.yaml                       # API keys (ANTHROPIC_API_KEY) - from template
 ├── secrets.yaml.template              # Template for secrets.yaml
-├── permissions.yaml                   # Permission profile (tools.enabled/disabled, sandbox)
-├── tools_security.yaml                # PathValidator blocklists, readonly paths, network
 ├── api.yaml                           # API server configuration (host, port, CORS)
 ├── llm-api-proxy.yaml                 # LLM API proxy configuration for multi-provider routing
 └── security/
-    └── command_filtering.yaml         # Command security rules (100+ patterns, 16 categories)
+    ├── permissions.yaml               # Permission profile (tools.enabled/disabled, sandbox)
+    ├── tools-security.yaml            # PathValidator blocklists, readonly paths, network
+    ├── command-filtering.yaml         # Command security rules (100+ patterns, 16 categories)
+    └── upload-filtering.yaml          # File upload extension/MIME type whitelist/blacklist
 ```
 
 ---
@@ -489,7 +490,7 @@ Task reaches agent execution
 │   → Pre-execution regex filtering          │
 │   → Blocks: kill, ps, /proc, sudo, etc.    │
 │   → 100+ rules across 16 categories        │
-│   → config/security/command_filtering.yaml │
+│   → config/security/command-filtering.yaml │
 └────────────────────────────────────────────┘
          │
          ▼
@@ -1075,13 +1076,14 @@ Project/
 ├── config/
 │   ├── agent.yaml            # Agent configuration
 │   ├── api.yaml              # API server configuration
-│   ├── permissions.yaml      # Permission profile (tools.enabled/disabled, sandbox)
-│   ├── tools_security.yaml   # PathValidator config (blocklists, readonly paths)
 │   ├── secrets.yaml          # API keys (from template)
 │   ├── secrets.yaml.template # Template for secrets
 │   ├── llm-api-proxy.yaml    # LLM API proxy configuration
 │   └── security/
-│       └── command_filtering.yaml  # Command security rules (100+ patterns, 16 categories)
+│       ├── permissions.yaml      # Permission profile (tools.enabled/disabled, sandbox)
+│       ├── tools-security.yaml   # PathValidator config (blocklists, readonly paths)
+│       ├── command-filtering.yaml  # Command security rules (100+ patterns)
+│       └── upload-filtering.yaml   # File upload extension/MIME whitelist/blacklist
 ├── prompts/
 │   ├── system.j2             # System prompt template
 │   ├── user.j2               # User prompt template

@@ -184,8 +184,14 @@ class TracerBase(ABC):
         pass
 
     @abstractmethod
-    def on_thinking(self, thinking_text: str) -> None:
-        """Called when the agent is in thinking mode."""
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
+        """
+        Called when the agent is in thinking mode.
+
+        Args:
+            thinking_text: The thinking text (delta for streaming, full for non-streaming).
+            is_partial: True if this is a streaming delta, False if complete.
+        """
         pass
 
     @abstractmethod
@@ -1436,7 +1442,7 @@ class ExecutionTracer(TracerBase):
 
         self._write("")
 
-    def on_thinking(self, thinking_text: str) -> None:
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
         """Called when the agent is in thinking mode."""
         if not self.show_thinking:
             return
@@ -2052,7 +2058,7 @@ class QuietTracer(TracerBase):
         if is_error:
             print(f"[ERROR] {tool_name}: {result}")
 
-    def on_thinking(self, thinking_text: str) -> None:
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
         """Silent thinking."""
         pass
 
@@ -2333,7 +2339,7 @@ class BackendConsoleTracer(TracerBase):
         level = logging.ERROR if is_error else logging.INFO
         self._log(f"Tool: {tool_name} -> {status} ({duration_str})", level=level)
 
-    def on_thinking(self, thinking_text: str) -> None:
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
         """Silent - thinking not logged in backend mode."""
         pass
 
@@ -2691,9 +2697,13 @@ class EventingTracer(TracerBase):
             },
         )
 
-    def on_thinking(self, thinking_text: str) -> None:
-        self._tracer.on_thinking(thinking_text)
-        self.emit_event("thinking", {"text": thinking_text})
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
+        self._tracer.on_thinking(thinking_text, is_partial=is_partial)
+        self.emit_event(
+            "thinking",
+            {"text": thinking_text, "is_partial": is_partial},
+            persist_event=not is_partial,  # Only persist complete thinking blocks
+        )
 
     def on_message(self, text: str, is_partial: bool = False) -> None:
         if is_partial:
@@ -3128,7 +3138,7 @@ class NullTracer(TracerBase):
     ) -> None:
         pass
 
-    def on_thinking(self, thinking_text: str) -> None:
+    def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
         pass
 
     def on_message(self, text: str, is_partial: bool = False) -> None:

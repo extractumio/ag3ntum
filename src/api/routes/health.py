@@ -109,16 +109,19 @@ async def get_config() -> ConfigResponse:
     Get application configuration.
 
     Returns available models and default model for the UI.
+    Models with ':mode=thinking' suffix enable extended thinking mode.
     """
     loader = get_config_loader()
     config = loader.get_config()
 
-    # Get models_available and default_model from agent.yaml config
+    # Get models_available, default_model, and thinking_tokens from agent.yaml config
     models_available = config.get("models_available", [])
     default_model = config.get("default_model", config.get("model", ""))
+    thinking_tokens = config.get("thinking_tokens")
 
     return ConfigResponse(
         models_available=models_available,
         default_model=default_model,
+        thinking_tokens=thinking_tokens,
     )
 
