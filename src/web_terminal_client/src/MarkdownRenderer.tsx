@@ -46,34 +46,154 @@ export interface MarkdownRenderOptions {
 const AG3NTUM_FILE_REGEX = /<ag3ntum-file>([^<]+)<\/ag3ntum-file>/g;
 const AG3NTUM_IMAGE_REGEX = /<ag3ntum-image>([^<]+)<\/ag3ntum-image>/g;
 const AG3NTUM_ATTACHED_FILE_REGEX = /<ag3ntum-attached-file>([^<]+)<\/ag3ntum-attached-file>/g;
-const AG3NTUM_TAG_LINE_REGEX = /^<ag3ntum-(file|image|attached-file)>([^<]+)<\/ag3ntum-\1>$/;
+const AG3NTUM_TAG_LINE_REGEX = /^<ag3ntum-(file|image|attached-file)>(.+)<\/ag3ntum-\1>$/s;
+
+// Type for attached file metadata
+export interface AttachedFileInfo {
+  name: string;
+  size?: number;
+  size_formatted?: string;
+  mime_type?: string;
+  extension?: string;
+  last_modified?: string;
+}
+
+// =============================================================================
+// Security: Filename Sanitization for Display
+// =============================================================================
+
+const MAX_DISPLAY_FILENAME_LENGTH = 100;
+const MAX_DISPLAY_MIME_LENGTH = 50;
+
+/**
+ * Sanitize a filename for safe display.
+ * This is a final defense layer - data should already be sanitized server-side.
+ */
+function sanitizeFilenameForDisplay(name: string | undefined): string {
+  if (!name || typeof name !== 'string') {
+    return 'unnamed_file';
+  }
+
+  let sanitized = name
+    // Remove null bytes and control characters
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    // Remove HTML-like tags to prevent any XSS (React escapes, but belt-and-suspenders)
+    .replace(/<[^>]*>/g, '')
+    // Remove path traversal
+    .replace(/\.\.\//g, '')
+    .replace(/\.\.\\/g, '')
+    // Trim whitespace
+    .trim();
+
+  // Truncate for display
+  if (sanitized.length > MAX_DISPLAY_FILENAME_LENGTH) {
+    const lastDot = sanitized.lastIndexOf('.');
+    if (lastDot > 0 && sanitized.length - lastDot <= 10) {
+      const ext = sanitized.slice(lastDot);
+      sanitized = sanitized.slice(0, MAX_DISPLAY_FILENAME_LENGTH - ext.length - 3) + '...' + ext;
+    } else {
+      sanitized = sanitized.slice(0, MAX_DISPLAY_FILENAME_LENGTH - 3) + '...';
+    }
+  }
+
+  return sanitized || 'unnamed_file';
+}
+
+/**
+ * Sanitize a MIME type for safe display.
+ */
+function sanitizeMimeForDisplay(mime: string | undefined): string {
+  if (!mime || typeof mime !== 'string') {
+    return '';
+  }
+
+  // MIME types should only contain specific safe characters
+  const sanitized = mime
+    .toLowerCase()
+    .replace(/[^a-z0-9/\-+.]/g, '')
+    .slice(0, MAX_DISPLAY_MIME_LENGTH);
+
+  return sanitized;
+}
+
+/**
+ * Sanitize a size string for safe display.
+ */
+function sanitizeSizeForDisplay(size: string | undefined): string {
+  if (!size || typeof size !== 'string') {
+    return '';
+  }
+
+  // Size should only contain digits, dots, spaces, and unit letters
+  return size.replace(/[^0-9.a-zA-Z ]/g, '').slice(0, 20);
+}
+
+/**
+ * Validate and sanitize attached file info.
+ * Returns a safe copy of the file info for display.
+ */
+function sanitizeFileInfo(file: AttachedFileInfo): AttachedFileInfo {
+  return {
+    name: sanitizeFilenameForDisplay(file.name),
+    size: typeof file.size === 'number' && file.size >= 0 ? file.size : undefined,
+    size_formatted: sanitizeSizeForDisplay(file.size_formatted),
+    mime_type: sanitizeMimeForDisplay(file.mime_type),
+    extension: file.extension?.replace(/[^a-z0-9]/gi, '').slice(0, 10).toLowerCase(),
+    last_modified: file.last_modified?.slice(0, 30), // ISO dates are ~24 chars
+  };
+}
 
 /**
  * Check if a line is an ag3ntum tag (file, image, or attached-file)
  */
-function isAg3ntumTagLine(line: string): { type: 'file' | 'image' | 'attached-file'; path: string } | null {
+function isAg3ntumTagLine(line: string): { type: 'file' | 'image' | 'attached-file'; content: string } | null {
   const trimmed = line.trim();
   const match = trimmed.match(AG3NTUM_TAG_LINE_REGEX);
   if (match) {
-    return { type: match[1] as 'file' | 'image' | 'attached-file', path: match[2] };
+    return { type: match[1] as 'file' | 'image' | 'attached-file', content: match[2] };
   }
   return null;
+}
+
+/**
+ * Parse attached-file tag content (JSON array or legacy format)
+ */
+function parseAttachedFileContent(content: string): AttachedFileInfo[] {
+  // Try JSON format first (new format)
+  if (content.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed as AttachedFileInfo[];
+      }
+    } catch {
+      // Fall through to legacy parsing
+    }
+  }
+
+  // Legacy format: "filename|size" (for backwards compatibility)
+  const [name, size] = content.split('|');
+  if (name) {
+    return [{ name: name.trim(), size_formatted: size?.trim() || '' }];
+  }
+
+  return [];
 }
 
 /**
  * Parse consecutive attached-file tags into a group
  * Returns the file entries and the number of lines consumed
  */
-function parseAttachedFileGroup(lines: string[], startIndex: number): { files: Array<{ name: string; size: string }>; linesConsumed: number } {
-  const files: Array<{ name: string; size: string }> = [];
+function parseAttachedFileGroup(lines: string[], startIndex: number): { files: AttachedFileInfo[]; linesConsumed: number } {
+  const files: AttachedFileInfo[] = [];
   let i = startIndex;
 
   while (i < lines.length) {
     const tag = isAg3ntumTagLine(lines[i]);
     if (tag && tag.type === 'attached-file') {
-      // Parse "filename|size" format
-      const [name, size] = tag.path.split('|');
-      files.push({ name: name?.trim() || '', size: size?.trim() || '' });
+      // Parse the content (JSON array or legacy format)
+      const parsedFiles = parseAttachedFileContent(tag.content);
+      files.push(...parsedFiles);
       i++;
     } else {
       break;
@@ -110,15 +230,111 @@ export function Ag3ntumImagePlaceholder({ imagePath }: { imagePath: string }): J
 }
 
 /**
- * Component for rendering attached files from ag3ntum-attached-file tags.
- * Displays a collapsible list of uploaded files with icons.
+ * Get an appropriate icon for a file based on its extension or mime type
  */
-export function Ag3ntumAttachedFilesPlaceholder({ files }: { files: Array<{ name: string; size: string }> }): JSX.Element {
-  const [expanded, setExpanded] = React.useState(false);
+function getFileIcon(file: AttachedFileInfo): string {
+  const ext = file.extension?.toLowerCase() || '';
+  const mime = file.mime_type?.toLowerCase() || '';
 
-  if (files.length === 0) return <></>;
+  // Images
+  if (mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp'].includes(ext)) {
+    return '🖼️';
+  }
+  // PDF
+  if (mime === 'application/pdf' || ext === 'pdf') {
+    return '📕';
+  }
+  // Documents
+  if (['doc', 'docx', 'odt', 'rtf'].includes(ext) || mime.includes('word')) {
+    return '📝';
+  }
+  // Spreadsheets
+  if (['xls', 'xlsx', 'csv', 'ods'].includes(ext) || mime.includes('spreadsheet') || mime.includes('excel')) {
+    return '📊';
+  }
+  // Presentations
+  if (['ppt', 'pptx', 'odp'].includes(ext) || mime.includes('presentation')) {
+    return '📽️';
+  }
+  // Archives
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext) || mime.includes('zip') || mime.includes('archive')) {
+    return '📦';
+  }
+  // Code files
+  if (['js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'swift', 'kt'].includes(ext)) {
+    return '💻';
+  }
+  // Config/data files
+  if (['json', 'yaml', 'yml', 'xml', 'toml', 'ini', 'env'].includes(ext)) {
+    return '⚙️';
+  }
+  // Markdown/text
+  if (['md', 'txt', 'log'].includes(ext) || mime.startsWith('text/')) {
+    return '📄';
+  }
+  // Audio
+  if (mime.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) {
+    return '🎵';
+  }
+  // Video
+  if (mime.startsWith('video/') || ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext)) {
+    return '🎬';
+  }
+  // Default
+  return '📄';
+}
+
+/**
+ * Format a file size in bytes to human readable format
+ */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/**
+ * Format a date string to a more readable format
+ */
+function formatDate(isoString: string): string {
+  try {
+    const date = new Date(isoString);
+    return date.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return isoString;
+  }
+}
+
+/**
+ * Component for rendering attached files from ag3ntum-attached-file tags.
+ * Displays a collapsible list of uploaded files with icons and metadata.
+ *
+ * Security: All file data is sanitized before display to prevent XSS and
+ * other injection attacks, even though React escapes by default.
+ */
+export function Ag3ntumAttachedFilesPlaceholder({ files }: { files: AttachedFileInfo[] }): JSX.Element {
+  const [expanded, setExpanded] = React.useState(true);
+
+  // Sanitize all files for safe display
+  const safeFiles = React.useMemo(
+    () => files.map(sanitizeFileInfo).filter(f => f.name),
+    [files]
+  );
+
+  if (safeFiles.length === 0) return <></>;
 
   const toggleExpanded = () => setExpanded(!expanded);
+
+  // Calculate total size if available (use raw size values, they're validated)
+  const totalSize = safeFiles.reduce((acc, f) => acc + (f.size || 0), 0);
+  const totalSizeFormatted = totalSize > 0 ? formatFileSize(totalSize) : null;
 
   return (
     <div className="ag3ntum-attached-files">
@@ -130,7 +346,8 @@ export function Ag3ntumAttachedFilesPlaceholder({ files }: { files: Array<{ name
       >
         <span className="ag3ntum-attached-files-icon">📎</span>
         <span className="ag3ntum-attached-files-label">
-          {files.length} file{files.length !== 1 ? 's' : ''} attached
+          {safeFiles.length} file{safeFiles.length !== 1 ? 's' : ''} attached
+          {totalSizeFormatted && <span className="ag3ntum-attached-files-total-size">({totalSizeFormatted})</span>}
         </span>
         <span className={`ag3ntum-attached-files-chevron ${expanded ? 'expanded' : ''}`}>
           ▶
@@ -138,15 +355,40 @@ export function Ag3ntumAttachedFilesPlaceholder({ files }: { files: Array<{ name
       </button>
       {expanded && (
         <div className="ag3ntum-attached-files-list">
-          {files.map((file, idx) => (
-            <div key={idx} className="ag3ntum-attached-file-item">
-              <span className="ag3ntum-attached-file-icon">📄</span>
-              <span className="ag3ntum-attached-file-name" title={file.name}>
-                {file.name.length > 40 ? `${file.name.slice(0, 36)}...${file.name.slice(-4)}` : file.name}
-              </span>
-              <span className="ag3ntum-attached-file-size">{file.size}</span>
-            </div>
-          ))}
+          {safeFiles.map((file, idx) => {
+            const icon = getFileIcon(file);
+            const displaySize = file.size_formatted || (file.size ? formatFileSize(file.size) : null);
+            // Truncate display name if needed (already sanitized)
+            const displayName = file.name.length > 50
+              ? `${file.name.slice(0, 44)}...${file.name.slice(-6)}`
+              : file.name;
+
+            return (
+              <div key={idx} className="ag3ntum-attached-file-item">
+                <span className="ag3ntum-attached-file-icon">{icon}</span>
+                <div className="ag3ntum-attached-file-info">
+                  <span className="ag3ntum-attached-file-name" title={file.name}>
+                    {displayName}
+                  </span>
+                  <div className="ag3ntum-attached-file-meta">
+                    {displaySize && (
+                      <span className="ag3ntum-attached-file-size">{displaySize}</span>
+                    )}
+                    {file.mime_type && (
+                      <span className="ag3ntum-attached-file-mime" title={file.mime_type}>
+                        {file.mime_type}
+                      </span>
+                    )}
+                    {file.last_modified && (
+                      <span className="ag3ntum-attached-file-date" title={file.last_modified}>
+                        {formatDate(file.last_modified)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -332,11 +574,11 @@ export function renderMarkdown(
     if (ag3ntumTag) {
       if (ag3ntumTag.type === 'file') {
         elements.push(
-          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.path} />
+          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.content} />
         );
       } else if (ag3ntumTag.type === 'image') {
         elements.push(
-          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.path} />
+          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.content} />
         );
       } else if (ag3ntumTag.type === 'attached-file') {
         // Group consecutive attached-file tags together
@@ -534,11 +776,11 @@ export function renderMarkdownElements(
     if (ag3ntumTag) {
       if (ag3ntumTag.type === 'file') {
         elements.push(
-          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.path} />
+          <Ag3ntumFilePlaceholder key={`ag3ntum-file-${i}`} filePath={ag3ntumTag.content} />
         );
       } else if (ag3ntumTag.type === 'image') {
         elements.push(
-          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.path} />
+          <Ag3ntumImagePlaceholder key={`ag3ntum-image-${i}`} imagePath={ag3ntumTag.content} />
         );
       } else if (ag3ntumTag.type === 'attached-file') {
         // Group consecutive attached-file tags together

@@ -369,9 +369,9 @@ class TestConstants:
         """File upload limit is 10MB."""
         assert MAX_FILE_UPLOAD_SIZE == 10 * 1024 * 1024
 
-    def test_request_limit_is_15mb(self) -> None:
-        """Request body limit is 15MB (allows for base64 overhead)."""
-        assert MAX_REQUEST_BODY_SIZE == 15 * 1024 * 1024
+    def test_request_limit_is_60mb(self) -> None:
+        """Request body limit is 60MB (allows for large prompts and base64 overhead)."""
+        assert MAX_REQUEST_BODY_SIZE == 60 * 1024 * 1024
 
     def test_request_larger_than_file_limit(self) -> None:
         """Request limit is larger than file limit (for base64)."""

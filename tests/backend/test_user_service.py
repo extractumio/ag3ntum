@@ -339,5 +339,8 @@ class TestLinuxUserCreation:
             ]
             with patch('pathlib.Path.mkdir'):
                 with patch('pathlib.Path.chmod'):
-                    with pytest.raises(ValueError, match="Failed to"):
-                        user_service._create_linux_user("testuser", 2000)
+                    # Mock helper methods that also call subprocess
+                    with patch.object(user_service, '_create_user_venv'):
+                        with patch.object(user_service, '_create_user_secrets'):
+                            with pytest.raises(ValueError, match="Failed to"):
+                                user_service._create_linux_user("testuser", 2000)

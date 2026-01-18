@@ -32,9 +32,11 @@ Options:
   --help             Show this help message
 
 Test Options (for 'test' command):
-  (no args)               Run ALL tests (backend + security + E2E)
+  (no args)               Run ALL tests (backend + security + E2E + UI)
   --quick                 Run only quick tests (exclude E2E and slow tests)
-  --subset <names>        Run specific tests by name (comma-separated)
+  --backend               Run only backend tests (Python/pytest)
+  --ui                    Run only UI tests (React/vitest)
+  --subset <names>        Run specific backend tests by name (comma-separated)
                           Examples: "auth", "sessions,streaming", "ask_user_question"
 
 Examples:
@@ -44,8 +46,10 @@ Examples:
   ./deploy.sh cleanup
   ./deploy.sh restart
   ./deploy.sh rebuild --no-cache
-  ./deploy.sh test                          # Run ALL tests (including E2E)
+  ./deploy.sh test                          # Run ALL tests (backend + UI)
   ./deploy.sh test --quick                  # Run quick tests only (no E2E/slow)
+  ./deploy.sh test --backend                # Run backend tests only
+  ./deploy.sh test --ui                     # Run UI/React tests only
   ./deploy.sh test --subset auth            # Run auth tests only
   ./deploy.sh test --subset sessions,auth   # Run sessions and auth tests
   ./deploy.sh shell                         # Open shell in container
@@ -358,16 +362,33 @@ if [[ "${ACTION}" == "restart" ]]; then
   exit 0
 fi
 
+# Function to run UI/React tests
+run_ui_tests() {
+  echo "=== Running UI/React tests ==="
+
+  local WEB_CLIENT_DIR="${ROOT_DIR}/src/web_terminal_client"
+
+  # Check if web_terminal_client directory exists
+  if [[ ! -d "${WEB_CLIENT_DIR}" ]]; then
+    echo "Error: web_terminal_client directory not found at ${WEB_CLIENT_DIR}"
+    return 1
+  fi
+
+  # Check if node_modules exists
+  if [[ ! -d "${WEB_CLIENT_DIR}/node_modules" ]]; then
+    echo "Installing npm dependencies..."
+    (cd "${WEB_CLIENT_DIR}" && npm install)
+  fi
+
+  # Run vitest
+  echo "Running vitest..."
+  (cd "${WEB_CLIENT_DIR}" && npm run test:run)
+  return $?
+}
+
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
-  echo "=== Running tests inside Docker container ==="
-
-  # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
-    echo "Error: ag3ntum-api container is not running."
-    echo "Start it first with: ./deploy.sh build"
-    exit 1
-  fi
+  echo "=== Running tests ==="
 
   # Build pytest command
   PYTEST_CMD="python -m pytest"
@@ -375,6 +396,8 @@ if [[ "${ACTION}" == "test" ]]; then
   # Parse test arguments
   QUICK_MODE=""
   SUBSET=""
+  BACKEND_ONLY=""
+  UI_ONLY=""
 
   ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
   i=0
@@ -383,6 +406,12 @@ if [[ "${ACTION}" == "test" ]]; then
     case "${arg}" in
       --quick)
         QUICK_MODE="1"
+        ;;
+      --backend)
+        BACKEND_ONLY="1"
+        ;;
+      --ui|--frontend)
+        UI_ONLY="1"
         ;;
       --subset)
         ((i++))
@@ -398,12 +427,25 @@ if [[ "${ACTION}" == "test" ]]; then
         ;;
       *)
         echo "Unknown test option: ${arg}"
-        echo "Usage: ./deploy.sh test [--quick] [--subset <names>]"
+        echo "Usage: ./deploy.sh test [--quick] [--backend] [--ui] [--subset <names>]"
         exit 1
         ;;
     esac
     ((i++))
   done
+
+  # Handle UI-only mode
+  if [[ -n "${UI_ONLY}" ]]; then
+    run_ui_tests
+    exit $?
+  fi
+
+  # For backend tests, check if container is running
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    echo "Error: ag3ntum-api container is not running."
+    echo "Start it first with: ./deploy.sh build"
+    exit 1
+  fi
 
   # Build test arguments
   PYTEST_ARGS=()
@@ -450,13 +492,50 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}"
       echo ""
 
-      # Run tests in container (use -t only if TTY available)
-      if [ -t 0 ]; then
-        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-      else
-        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+      # Run backend tests in container (use -t only if TTY available)
+      BACKEND_RESULT=0
+      if [[ -z "${UI_ONLY}" ]]; then
+        if [ -t 0 ]; then
+          docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+        else
+          docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+        fi
+        BACKEND_RESULT=$?
       fi
-      exit $?
+
+      # Run UI tests unless backend-only
+      UI_RESULT=0
+      if [[ -z "${BACKEND_ONLY}" ]]; then
+        echo ""
+        run_ui_tests
+        UI_RESULT=$?
+      fi
+
+      # Print summary for quick mode
+      echo ""
+      echo "========================================"
+      echo "=== QUICK TEST SUMMARY ==="
+      echo "========================================"
+      if [[ -z "${UI_ONLY}" ]]; then
+        if [[ ${BACKEND_RESULT} -eq 0 ]]; then
+          echo "  ✓ Backend tests:  PASSED"
+        else
+          echo "  ✗ Backend tests:  FAILED"
+        fi
+      fi
+      if [[ -z "${BACKEND_ONLY}" ]]; then
+        if [[ ${UI_RESULT} -eq 0 ]]; then
+          echo "  ✓ UI tests:       PASSED"
+        else
+          echo "  ✗ UI tests:       FAILED"
+        fi
+      fi
+      echo "========================================"
+
+      if [[ ${BACKEND_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
+        exit 1
+      fi
+      exit 0
     else
       # Full mode: run backend tests with --run-e2e, then other tests without it
       echo "Running ALL tests (backend with E2E + security + other tests)..."
@@ -507,13 +586,21 @@ if [[ "${ACTION}" == "test" ]]; then
         done
       fi
 
+      # Run UI tests if not backend-only mode
+      UI_RESULT=0
+      if [[ -z "${BACKEND_ONLY}" ]]; then
+        echo ""
+        run_ui_tests
+        UI_RESULT=$?
+      fi
+
       # Print combined summary
       echo ""
       echo "========================================"
       echo "=== COMBINED TEST SUMMARY ==="
       echo "========================================"
-      TOTAL_TESTS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
-      echo "Total tests in suite: ${TOTAL_TESTS:-302}"
+      TOTAL_BACKEND=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+      echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
       echo ""
       if [[ ${BACKEND_RESULT} -eq 0 ]]; then
         echo "  ✓ Backend tests:  PASSED"
@@ -530,10 +617,17 @@ if [[ "${ACTION}" == "test" ]]; then
       else
         echo "  ✗ Other tests:    FAILED"
       fi
+      if [[ -z "${BACKEND_ONLY}" ]]; then
+        if [[ ${UI_RESULT} -eq 0 ]]; then
+          echo "  ✓ UI tests:       PASSED"
+        else
+          echo "  ✗ UI tests:       FAILED"
+        fi
+      fi
       echo "========================================"
 
       # Exit with error if any test suite failed
-      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 ]]; then
+      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo ""
         echo "Some tests failed!"
         exit 1

@@ -5,7 +5,11 @@ Comprehensive coverage of:
 - Token generation and validation with email/password login
 - Response structure validation
 - Authentication protection on endpoints
+- User environment validation
 """
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,7 +157,10 @@ class TestAuthService:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_validate_token_success(self, test_session: AsyncSession, test_user: dict) -> None:
+    @patch.object(AuthService, "validate_user_environment")
+    async def test_validate_token_success(
+        self, mock_validate_env, test_session: AsyncSession, test_user: dict
+    ) -> None:
         """Valid token returns the user ID."""
         auth_service = AuthService()
         token, _ = auth_service.generate_token(
@@ -176,7 +183,10 @@ class TestAuthService:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_validate_token_tampered(self, test_session: AsyncSession, test_user: dict) -> None:
+    @patch.object(AuthService, "validate_user_environment")
+    async def test_validate_token_tampered(
+        self, mock_validate_env, test_session: AsyncSession, test_user: dict
+    ) -> None:
         """Tampered token returns None."""
         auth_service = AuthService()
         token, _ = auth_service.generate_token(
@@ -276,3 +286,62 @@ class TestAuthProtection:
         """Health endpoint is accessible without auth."""
         response = client.get("/api/v1/health")
         assert response.status_code == 200
+
+
+class TestValidateUserEnvironment:
+    """Tests for AuthService.validate_user_environment security checks."""
+
+    @pytest.fixture
+    def auth_service(self) -> AuthService:
+        return AuthService()
+
+    @pytest.fixture
+    def temp_user_dir(self, tmp_path):
+        """Create a temp directory structure for user environment tests."""
+        user_dir = tmp_path / "testuser"
+        user_dir.mkdir()
+        return user_dir
+
+    @pytest.mark.unit
+    def test_missing_home_directory_raises(self, auth_service: AuthService) -> None:
+        """Missing home directory raises UserEnvironmentError."""
+        from src.services.auth_service import UserEnvironmentError
+
+        with patch("src.services.auth_service.USERS_DIR", Path("/nonexistent")):
+            with pytest.raises(UserEnvironmentError, match="home directory does not exist"):
+                auth_service.validate_user_environment("nouser")
+
+    @pytest.mark.unit
+    def test_missing_venv_raises(self, auth_service: AuthService, temp_user_dir) -> None:
+        """Missing venv directory raises UserEnvironmentError."""
+        from src.services.auth_service import UserEnvironmentError
+
+        with patch("src.services.auth_service.USERS_DIR", temp_user_dir.parent):
+            with pytest.raises(UserEnvironmentError, match="Python environment not initialized"):
+                auth_service.validate_user_environment(temp_user_dir.name)
+
+    @pytest.mark.unit
+    def test_missing_python_binary_raises(self, auth_service: AuthService, temp_user_dir) -> None:
+        """Missing python3 binary raises UserEnvironmentError."""
+        from src.services.auth_service import UserEnvironmentError
+
+        # Create venv/bin but no python3
+        venv_bin = temp_user_dir / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+
+        with patch("src.services.auth_service.USERS_DIR", temp_user_dir.parent):
+            with pytest.raises(UserEnvironmentError, match="Python environment corrupted"):
+                auth_service.validate_user_environment(temp_user_dir.name)
+
+    @pytest.mark.unit
+    def test_valid_environment_passes(self, auth_service: AuthService, temp_user_dir) -> None:
+        """Valid user environment passes validation."""
+        # Create complete valid structure
+        venv_bin = temp_user_dir / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        python_bin = venv_bin / "python3"
+        python_bin.touch()
+
+        with patch("src.services.auth_service.USERS_DIR", temp_user_dir.parent):
+            # Should not raise
+            auth_service.validate_user_environment(temp_user_dir.name)

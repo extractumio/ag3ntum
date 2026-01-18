@@ -119,7 +119,7 @@
   --color-bg-highest: #23272f;
   --color-bg-user: #161921;
   --color-bg-agent: #12151a;
-  --color-bg-code: #000000;
+  --color-bg-code: #161616;
 
   /* Legacy aliases (for compatibility) */
   --color-bg: var(--color-bg-base);
@@ -1235,14 +1235,18 @@ body,
 }
 
 .result-file-action {
-  background: var(--color-bg-highest);
+  background: transparent;
   border: 1px solid var(--color-border);
-  color: var(--color-text-primary);
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
-  padding: var(--spacing-xs) var(--spacing-md);
+  padding: var(--spacing-2xs) var(--spacing-xs);
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
 }
 
 .result-file-action:hover {
@@ -1912,7 +1916,7 @@ body,
   gap: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-lg);
   background: var(--color-bg-elevated);
-  border: 1px solid var(--color-border);
+  border: 0px none;
   color: var(--color-text-primary);
   font-size: var(--font-base);
   font-family: inherit;
@@ -2075,11 +2079,10 @@ body,
   display: inline-block;
   padding: var(--spacing-2xs) var(--spacing-md);
   background: rgba(143, 184, 232, 0.12);
-  border: 1px solid rgba(143, 184, 232, 0.3);
   color: var(--color-accent-secondary);
   font-size: var(--font-sm);
   font-weight: 600;
-  margin-bottom: var(--spacing-xs);
+  margin-bottom: var(--spacing-md);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -2099,18 +2102,14 @@ body,
 
 .ask-user-question-inline .ask-option-btn {
   padding: var(--spacing-md) var(--spacing-xl);
-  background: var(--color-bg-base);
-  border: 1px solid var(--color-border);
 }
 
 .ask-user-question-inline .ask-option-btn:hover:not(.disabled) {
   background: var(--color-bg-elevated);
-  border-color: var(--color-accent-secondary);
 }
 
 .ask-user-question-inline .ask-option-btn.selected {
   background: rgba(143, 184, 232, 0.1);
-  border-color: var(--color-accent-secondary);
 }
 
 .ask-user-question-inline .ask-question-actions {
@@ -2840,7 +2839,7 @@ resume-context {
   font-size: var(--font-base);
   line-height: 1.7;
   color: var(--color-text-primary);
-  max-width: 75ch;
+  max-width: 80ch;
 }
 
 /* Markdown Headers - Using modular scale (1.2 ratio) derived from base font */
@@ -2906,6 +2905,51 @@ resume-context {
 
 .md-p:last-child {
   margin-bottom: 0;
+}
+
+/* Markdown Tables */
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: var(--font-base);
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.md-table thead {
+  background: var(--color-bg-elevated);
+}
+
+.md-table th {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-text-bright);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.md-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--color-text-primary);
+  border-bottom: 1px solid var(--color-border-subtle);
+  vertical-align: top;
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table tbody tr:hover {
+  background: var(--color-bg-hover);
+}
+
+.md-table th:not(:last-child),
+.md-table td:not(:last-child) {
+  border-right: 1px solid var(--color-border-subtle);
 }
 
 /* Spacer between elements */
@@ -3776,6 +3820,15 @@ resume-context {
 .ag3ntum-attached-files-label {
   flex: 1;
   color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.ag3ntum-attached-files-total-size {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  opacity: 0.8;
 }
 
 .ag3ntum-attached-files-chevron {
@@ -3798,7 +3851,7 @@ resume-context {
 
 .ag3ntum-attached-file-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
   border-radius: var(--radius-md);
@@ -3807,23 +3860,59 @@ resume-context {
 }
 
 .ag3ntum-attached-file-icon {
-  font-size: var(--font-base);
+  font-size: var(--font-lg);
   flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.ag3ntum-attached-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3xs);
 }
 
 .ag3ntum-attached-file-name {
-  flex: 1;
   color: var(--color-text-primary);
   font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: var(--font-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.ag3ntum-attached-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  align-items: center;
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+
+.ag3ntum-attached-file-size {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.ag3ntum-attached-file-mime {
+  color: var(--color-text-muted);
+  background: var(--color-bg-elevated);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: var(--font-2xs);
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ag3ntum-attached-file-size {
+.ag3ntum-attached-file-date {
   color: var(--color-text-muted);
-  flex-shrink: 0;
-  font-size: var(--font-xs);
+  opacity: 0.8;
 }
 
 /* =============================================================================
@@ -4892,24 +4981,6 @@ resume-context {
   color: var(--color-text-muted);
 }
 
-.file-viewer-markdown table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: var(--spacing-xl) 0;
-}
-
-.file-viewer-markdown th,
-.file-viewer-markdown td {
-  border: 1px solid var(--color-border);
-  padding: var(--spacing-md) var(--spacing-xl);
-  text-align: left;
-}
-
-.file-viewer-markdown th {
-  background: var(--color-bg-elevated);
-  font-weight: 600;
-}
-
 /* Inline File Viewer specific additions */
 .inline-file-viewer-action-btn.active {
   border-color: var(--color-accent-primary);
@@ -5278,6 +5349,7 @@ resume-context {
 .skill-tag:hover {
   border-color: var(--color-accent-primary);
   background: var(--color-bg-highest);
+  cursor: pointer;
 }
 
 .skill-symbol {

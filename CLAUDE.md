@@ -11,6 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Core SDK**: claude-agent-sdk 0.1.19
 - **Architecture**: Dual-mode (CLI direct + FastAPI web server)
 
+### Available python modules
+See @requirements.txt
+
+IMPORTANT: Study the available modules before you start implementing a code so to use available API and not inventing a wheel.
+
+
 ## Deployment & Development (Docker-First)
 
 **Important**: The project is always deployed and tested locally via Docker. The `./deploy.sh` script is the main entry point for all operations.

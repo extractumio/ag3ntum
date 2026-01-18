@@ -376,7 +376,16 @@ def running_server(test_environment: dict, test_user_credentials: dict) -> Gener
             user_dir = temp_users / test_user_credentials["username"]
             user_sessions_dir = user_dir / "sessions"
             user_sessions_dir.mkdir(parents=True, exist_ok=True)
-            print(f"  Created user directory: {user_dir}")
+
+            # Create venv directory structure for validate_user_environment
+            # This creates a minimal venv structure so the auth validation passes
+            user_venv = user_dir / "venv" / "bin"
+            user_venv.mkdir(parents=True, exist_ok=True)
+            # Create dummy python3 binary (just needs to exist)
+            python_bin = user_venv / "python3"
+            python_bin.touch()
+            python_bin.chmod(0o755)
+            print(f"  Created user directory with venv: {user_dir}")
         else:
             print(f"✗ User creation verification failed!")
             

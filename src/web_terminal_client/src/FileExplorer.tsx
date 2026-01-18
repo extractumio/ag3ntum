@@ -41,6 +41,8 @@ interface FileExplorerProps {
   navigateTo?: string | null;
   /** Callback when navigation is complete */
   onNavigateComplete?: () => void;
+  /** Callback when a filename should be inserted into the input (double-click or drag) */
+  onFileNameInsert?: (filename: string) => void;
 }
 
 interface ExpandedFolders {
@@ -374,6 +376,7 @@ interface FileTreeNodeProps {
   onView: (file: FileInfo) => void;
   onDownload: (file: FileInfo) => void;
   onDelete: (file: FileInfo) => void;
+  onFileNameInsert?: (filename: string) => void;
 }
 
 function FileTreeNode({
@@ -387,6 +390,7 @@ function FileTreeNode({
   onView,
   onDownload,
   onDelete,
+  onFileNameInsert,
 }: FileTreeNodeProps): JSX.Element {
   const isExpanded = file.is_directory ? getIsExpanded(file.path) : false;
   const isLoading = file.is_directory ? getIsLoading(file.path) : false;
@@ -398,9 +402,31 @@ function FileTreeNode({
     } else if (file.is_viewable || file.mime_type?.startsWith('image/')) {
       // View text files and images (images open in preview popup)
       onView(file);
-    } else {
-      onDownload(file);
     }
+    // Binary files: do nothing on single click (no download)
+  };
+
+  // Convert path to relative format starting with ./
+  const getRelativePath = (path: string): string => {
+    if (path.startsWith('./')) return path;
+    if (path.startsWith('/')) {
+      // For absolute paths, just use the path as-is (workspace context handles this)
+      return path;
+    }
+    return './' + path;
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onFileNameInsert) {
+      onFileNameInsert(getRelativePath(file.path));
+    }
+  };
+
+  const handleDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.setData('text/plain', getRelativePath(file.path));
+    e.dataTransfer.effectAllowed = 'copy';
   };
 
   return (
@@ -409,7 +435,12 @@ function FileTreeNode({
         className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
-        title={file.is_directory ? file.name : `${file.name}\nSize: ${formatFileSize(file.size)}\nModified: ${new Date(file.modified_at).toLocaleString()}`}
+        onDoubleClick={handleDoubleClick}
+        draggable
+        onDragStart={handleDragStart}
+        title={file.is_directory
+          ? `${file.name}\nDouble-click or drag to insert path`
+          : `${file.name}\nSize: ${formatFileSize(file.size)}\nModified: ${new Date(file.modified_at).toLocaleString()}\nDouble-click or drag to insert path`}
       >
         <span className="file-tree-toggle">
           {file.is_directory ? (isExpanded ? '▼' : '▶') : '\u00A0'}
@@ -477,6 +508,7 @@ function FileTreeNode({
                 onView={onView}
                 onDownload={onDownload}
                 onDelete={onDelete}
+                onFileNameInsert={onFileNameInsert}
               />
             ))
           ) : (
@@ -504,6 +536,7 @@ export function FileExplorer({
   onModalStateChange,
   navigateTo,
   onNavigateComplete,
+  onFileNameInsert,
 }: FileExplorerProps): JSX.Element {
   // State
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -1046,6 +1079,7 @@ export function FileExplorer({
         onView={handleViewFile}
         onDownload={handleDownloadFile}
         onDelete={handleDeleteFile}
+        onFileNameInsert={onFileNameInsert}
       />
     ));
   };

@@ -105,28 +105,28 @@ class TestWorkspaceBoundary:
         self, validator: Ag3ntumPathValidator
     ) -> None:
         """Path traversal attempt '../' is blocked."""
-        with pytest.raises(PathValidationError, match="outside workspace"):
+        with pytest.raises(PathValidationError, match="outside allowed directories"):
             validator.validate_path("../etc/passwd", "read")
 
     def test_double_traversal_blocked(
         self, validator: Ag3ntumPathValidator
     ) -> None:
         """Double path traversal '../../' is blocked."""
-        with pytest.raises(PathValidationError, match="outside workspace"):
+        with pytest.raises(PathValidationError, match="outside allowed directories"):
             validator.validate_path("../../etc/passwd", "read")
 
     def test_absolute_path_outside_workspace_blocked(
         self, validator: Ag3ntumPathValidator
     ) -> None:
         """Absolute path outside workspace is blocked."""
-        with pytest.raises(PathValidationError, match="outside workspace"):
+        with pytest.raises(PathValidationError, match="outside allowed directories"):
             validator.validate_path("/etc/passwd", "read")
 
     def test_home_directory_access_blocked(
         self, validator: Ag3ntumPathValidator
     ) -> None:
         """Home directory access is blocked."""
-        with pytest.raises(PathValidationError, match="outside workspace"):
+        with pytest.raises(PathValidationError, match="outside allowed directories"):
             validator.validate_path("/home/user/.bashrc", "read")
 
     def test_symlink_escape_attempt_blocked(
@@ -141,7 +141,7 @@ class TestWorkspaceBoundary:
             pytest.skip("Cannot create symlinks in this environment")
 
         # When resolved, path will be /etc/passwd which is outside workspace
-        with pytest.raises(PathValidationError, match="outside workspace"):
+        with pytest.raises(PathValidationError, match="outside allowed directories"):
             validator.validate_path("evil_link", "read")
 
 

@@ -24,7 +24,7 @@ from claude_agent_sdk import (
     ToolPermissionContext,
 )
 
-from .hooks import HooksManager, create_permission_hook
+from .hooks import HooksManager, create_permission_hook, create_header_reminder_hook
 from .tool_utils import build_actionable_denial_message, build_tool_call_string
 
 from .permission_config import (
@@ -557,6 +557,12 @@ def create_permission_hooks(
         system_message_builder=system_message_builder,
     )
     manager.add_pre_tool_hook(permission_hook)
+
+    # Add header reminder hook to reinforce structured output requirements
+    # This injects a system reminder after tool completions to ensure the agent
+    # starts its next response with the required header block
+    header_reminder_hook = create_header_reminder_hook(enable=True)
+    manager.add_post_tool_hook(header_reminder_hook)
 
     return manager.build_hooks_config()
 

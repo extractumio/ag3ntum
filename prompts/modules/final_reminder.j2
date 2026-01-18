@@ -1,0 +1,17 @@
+{# Module: Final Reminder - Critical instructions reinforced at the end of prompt #}
+
+# CRITICAL REMINDER (READ BEFORE EVERY RESPONSE)
+
+<system-reminder>
+**STRUCTURED HEADER - MANDATORY**
+
+You MUST start EVERY response with this header block as the VERY FIRST content:
+
+---
+status: COMPLETE|PARTIAL|FAILED
+error:
+---
+
+NEVER write any text before this header. The header must be the absolute first thing in your response.
+After the closing `---`, write your normal response.
+</system-reminder>

@@ -151,10 +151,15 @@ class CacheManager:
 
             # Relevant params (sorted for consistency)
             # Filter to only cache-relevant params
+            # Note: All params that affect extracted content MUST be included here
+            # - pages: PDF page selection
+            # - sheet/rows/columns: Tabular data selection (not cached, but included for safety)
+            # - mode/archive_path/pattern: Archive extraction parameters
+            # - include_metadata: Affects output formatting for PDF/Office
             cache_params = {
                 k: v
                 for k, v in params.items()
-                if k in ("pages", "sheet", "rows", "columns", "mode", "pattern")
+                if k in ("pages", "sheet", "rows", "columns", "mode", "pattern", "archive_path", "include_metadata")
             }
             param_str = json.dumps(cache_params, sort_keys=True)
             hasher.update(param_str.encode())

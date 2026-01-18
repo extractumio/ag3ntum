@@ -253,16 +253,18 @@ def test_app(test_db_override, mock_agent_runner, temp_sessions_dir):
         with patch("src.api.routes.sessions.session_service", temp_session_service):
             # Patch USERS_DIR to use temp directory for user session folders
             with patch("src.api.routes.sessions.USERS_DIR", temp_sessions_dir):
-                app = create_app()
+                # Patch validate_user_environment to skip filesystem checks in tests
+                with patch("src.services.auth_service.AuthService.validate_user_environment"):
+                    app = create_app()
 
-                # Override database dependency
-                app.dependency_overrides[get_db] = test_db_override
+                    # Override database dependency
+                    app.dependency_overrides[get_db] = test_db_override
 
-                # Patch agent runner for session routes
-                with patch("src.api.routes.sessions.agent_runner", mock_agent_runner):
-                    yield app
+                    # Patch agent runner for session routes
+                    with patch("src.api.routes.sessions.agent_runner", mock_agent_runner):
+                        yield app
 
-                app.dependency_overrides.clear()
+                    app.dependency_overrides.clear()
 
 
 @pytest.fixture

@@ -58,8 +58,115 @@ _ATTACHED_FILES_PATTERN = re.compile(
 )
 
 # Pattern to parse individual file entries from attached-files block
-# Matches: - filename.ext (size)
+# Legacy format: - filename.ext (size)
 _ATTACHED_FILE_ENTRY_PATTERN = re.compile(r'-\s+(.+?)\s+\(([^)]+)\)')
+
+# Maximum lengths for sanitization
+_MAX_FILENAME_LENGTH = 255
+_MAX_MIME_LENGTH = 100
+_MAX_EXTENSION_LENGTH = 10
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Sanitize a filename to prevent security issues.
+
+    Defends against:
+    - Path traversal (../)
+    - Control characters and null bytes
+    - Excessively long names
+    - HTML/script injection via special characters
+
+    Args:
+        name: Raw filename from user input.
+
+    Returns:
+        Sanitized filename safe for display.
+    """
+    if not name:
+        return 'unnamed_file'
+
+    # Remove null bytes and control characters
+    sanitized = re.sub(r'[\x00-\x1f\x7f]', '', name)
+
+    # Remove path traversal sequences
+    sanitized = sanitized.replace('../', '').replace('..\\', '')
+
+    # Remove characters that could cause issues in display or storage
+    # Keep: alphanumeric, spaces, dots, dashes, underscores, parentheses
+    sanitized = re.sub(r'[<>:"|?*\\]', '_', sanitized)
+
+    # Remove leading/trailing whitespace and dots
+    sanitized = sanitized.strip(' .')
+
+    # Collapse multiple spaces
+    sanitized = re.sub(r'\s+', ' ', sanitized)
+
+    # Truncate if too long (preserve extension if possible)
+    if len(sanitized) > _MAX_FILENAME_LENGTH:
+        last_dot = sanitized.rfind('.')
+        if last_dot > 0 and len(sanitized) - last_dot <= _MAX_EXTENSION_LENGTH + 1:
+            ext = sanitized[last_dot:]
+            base = sanitized[:_MAX_FILENAME_LENGTH - len(ext) - 3]
+            sanitized = base + '...' + ext
+        else:
+            sanitized = sanitized[:_MAX_FILENAME_LENGTH - 3] + '...'
+
+    return sanitized or 'unnamed_file'
+
+
+def _sanitize_mime_type(mime: str) -> str:
+    """
+    Sanitize a MIME type string.
+
+    Args:
+        mime: Raw MIME type from user input.
+
+    Returns:
+        Sanitized MIME type (alphanumeric, /, -, +, . only).
+    """
+    if not mime:
+        return ''
+
+    # MIME types should only contain specific characters
+    sanitized = re.sub(r'[^a-zA-Z0-9/\-+.]', '', mime).lower()
+    return sanitized[:_MAX_MIME_LENGTH]
+
+
+def _sanitize_extension(ext: str) -> str:
+    """
+    Sanitize a file extension.
+
+    Args:
+        ext: Raw extension from user input.
+
+    Returns:
+        Sanitized extension (alphanumeric only, lowercase).
+    """
+    if not ext:
+        return ''
+
+    # Extensions should only be alphanumeric
+    sanitized = re.sub(r'[^a-zA-Z0-9]', '', ext).lower()
+    return sanitized[:_MAX_EXTENSION_LENGTH]
+
+
+def _sanitize_size_formatted(size_str: str) -> str:
+    """
+    Sanitize a formatted size string.
+
+    Args:
+        size_str: Raw size string (e.g., "1.5MB").
+
+    Returns:
+        Sanitized size string.
+    """
+    if not size_str:
+        return ''
+
+    # Size strings should only contain digits, dots, and unit letters
+    sanitized = re.sub(r'[^0-9.a-zA-Z ]', '', size_str)
+    return sanitized[:20]  # Reasonable max length for "999.99 GB" etc.
 
 
 def strip_system_reminders(text: str) -> str:
@@ -103,18 +210,30 @@ def transform_attached_files(text: str) -> str:
     Transform <attached-files> blocks to <ag3ntum-attached-file> format.
 
     Converts the system-injected attached-files format into a structured
-    format that the frontend can render as an expandable file list widget.
+    JSON format that the frontend can render as an expandable file list widget.
 
-    Input format:
+    Supports two input formats:
+
+    Legacy format:
         <attached-files>
         The user is attaching the following files (uploading to workspace):
         - filename1.txt (10.5KB)
         - filename2.pdf (1.2MB)
         </attached-files>
 
-    Output format:
-        <ag3ntum-attached-file>filename1.txt|10.5KB</ag3ntum-attached-file>
-        <ag3ntum-attached-file>filename2.pdf|1.2MB</ag3ntum-attached-file>
+    New YAML format:
+        <attached-files>
+        files:
+        - name: "filename1.txt"
+          size: 10752
+          size_formatted: "10.5KB"
+          mime_type: "text/plain"
+          extension: "txt"
+          last_modified: "2024-01-15T10:30:00.000Z"
+        </attached-files>
+
+    Output format (JSON array):
+        <ag3ntum-attached-file>[{"name":"filename1.txt","size":10752,...}]</ag3ntum-attached-file>
 
     Args:
         text: Input text that may contain attached-files blocks.
@@ -122,22 +241,102 @@ def transform_attached_files(text: str) -> str:
     Returns:
         Text with attached-files blocks transformed to ag3ntum-attached-file tags.
     """
+    import json
+
     if '<attached-files>' not in text:
         return text
 
+    def parse_yaml_files(content: str) -> list[dict[str, any]]:
+        """Parse YAML-formatted file entries with security sanitization."""
+        import yaml
+
+        files = []
+        try:
+            # Parse YAML properly
+            data = yaml.safe_load(content)
+            if not isinstance(data, dict) or 'files' not in data:
+                return []
+
+            file_list = data.get('files', [])
+            if not isinstance(file_list, list):
+                return []
+
+            for entry in file_list:
+                if not isinstance(entry, dict):
+                    continue
+
+                # Get and sanitize name (required field)
+                raw_name = entry.get('name')
+                if not raw_name or not isinstance(raw_name, str):
+                    continue
+
+                file_info: dict[str, any] = {'name': _sanitize_filename(raw_name)}
+
+                # Size (integer, capped)
+                size_val = entry.get('size')
+                if isinstance(size_val, (int, float)):
+                    file_info['size'] = max(0, min(int(size_val), 10**15))
+
+                # Formatted size
+                size_fmt = entry.get('size_formatted')
+                if isinstance(size_fmt, str):
+                    file_info['size_formatted'] = _sanitize_size_formatted(size_fmt)
+
+                # MIME type
+                mime = entry.get('mime_type')
+                if isinstance(mime, str):
+                    sanitized_mime = _sanitize_mime_type(mime)
+                    if sanitized_mime:
+                        file_info['mime_type'] = sanitized_mime
+
+                # Extension
+                ext = entry.get('extension')
+                if isinstance(ext, str):
+                    sanitized_ext = _sanitize_extension(ext)
+                    if sanitized_ext:
+                        file_info['extension'] = sanitized_ext
+
+                # Last modified (validate ISO date format)
+                modified = entry.get('last_modified')
+                if isinstance(modified, str):
+                    if re.match(r'^\d{4}-\d{2}-\d{2}', modified) and len(modified) <= 30:
+                        file_info['last_modified'] = modified
+
+                files.append(file_info)
+
+        except yaml.YAMLError:
+            # If YAML parsing fails, return empty list
+            pass
+
+        return files
+
+    def parse_legacy_files(content: str) -> list[dict[str, any]]:
+        """Parse legacy format file entries with security sanitization."""
+        files = []
+        entries = _ATTACHED_FILE_ENTRY_PATTERN.findall(content)
+        for filename, size in entries:
+            files.append({
+                'name': _sanitize_filename(filename.strip()),
+                'size_formatted': _sanitize_size_formatted(size.strip())
+            })
+        return files
+
     def replace_block(match: re.Match) -> str:
         content = match.group(1)
-        # Parse individual file entries
-        entries = _ATTACHED_FILE_ENTRY_PATTERN.findall(content)
-        if not entries:
+
+        # Check if it's YAML format (contains "files:" or "- name:")
+        if 'files:' in content or '- name:' in content:
+            files = parse_yaml_files(content)
+        else:
+            # Fall back to legacy format
+            files = parse_legacy_files(content)
+
+        if not files:
             return ''  # Remove empty blocks
-        # Build ag3ntum-attached-file tags for each file
-        result_parts = []
-        for filename, size in entries:
-            filename = filename.strip()
-            size = size.strip()
-            result_parts.append(f'<ag3ntum-attached-file>{filename}|{size}</ag3ntum-attached-file>')
-        return '\n'.join(result_parts)
+
+        # Output as single tag with JSON array
+        json_data = json.dumps(files, separators=(',', ':'))
+        return f'<ag3ntum-attached-file>{json_data}</ag3ntum-attached-file>'
 
     return _ATTACHED_FILES_PATTERN.sub(replace_block, text)
 

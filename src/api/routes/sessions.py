@@ -892,9 +892,16 @@ async def stream_events(
                 # Regular event from queue
                 event = item
                 seq = event.get("sequence", 0)
+                event_type = event.get("type")
 
-                # Deduplicate (might overlap with replay)
-                if seq in seen_sequences or seq <= last_sequence:
+                # CRITICAL: Never skip terminal events - they must always be delivered
+                # to ensure SSE stream properly terminates. This prevents the "infinite
+                # processing..." bug when partial message sequence numbers cause gaps.
+                # See: Session 20260118_184501_4e5cf999 analysis for details.
+                is_terminal = event_type in ("agent_complete", "error", "cancelled")
+
+                # Deduplicate (might overlap with replay) - but NEVER skip terminal events
+                if not is_terminal and (seq in seen_sequences or seq <= last_sequence):
                     continue
 
                 seen_sequences.add(seq)
@@ -903,8 +910,7 @@ async def stream_events(
                 yield f"id: {seq}\n"
                 yield f"data: {payload}\n\n"
 
-                event_type = event.get("type")
-                if event_type in ("agent_complete", "error", "cancelled"):
+                if is_terminal:
                     break
                 last_sequence = seq
 

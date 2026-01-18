@@ -471,6 +471,55 @@ def create_audit_hook(
     return audit_hook
 
 
+# Header reminder message for PostToolUse
+_HEADER_REMINDER = """<system-reminder>
+REMEMBER: Start your NEXT response with the structured header:
+---
+status: COMPLETE|PARTIAL|FAILED
+error:
+---
+The header MUST be the first content. Do NOT write any text before it.
+</system-reminder>"""
+
+
+def create_header_reminder_hook(
+    enable: bool = True,
+    skip_tools: Optional[set[str]] = None,
+) -> HookCallback:
+    """
+    Create a PostToolUse hook that reminds the agent to start with headers.
+
+    This hook injects a system reminder after tool completions to reinforce
+    the requirement that all responses must start with the structured header.
+
+    Args:
+        enable: Whether the reminder is enabled.
+        skip_tools: Set of tool names to skip (e.g., internal tools).
+
+    Returns:
+        Async hook callback function.
+    """
+    _skip = skip_tools or {"TodoWrite", "AskUserQuestion"}
+
+    async def header_reminder_hook(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any
+    ) -> dict[str, Any]:
+        """PostToolUse hook to inject header reminder."""
+        if not enable:
+            return {}
+
+        tool_name = input_data.get("tool_name", "")
+        # Skip internal/meta tools
+        if any(skip in tool_name for skip in _skip):
+            return {}
+
+        return {"systemMessage": _HEADER_REMINDER}
+
+    return header_reminder_hook
+
+
 def create_prompt_enhancement_hook(
     add_timestamp: bool = True,
     add_context: Optional[str] = None,

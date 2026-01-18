@@ -52,6 +52,43 @@ function CheckIconSvg(): JSX.Element {
   );
 }
 
+// Result file action icons (matching FileExplorer style)
+function EyeIcon(): JSX.Element {
+  return (
+    <span className="action-icon-wrapper">
+      <svg className="action-icon-svg" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+        <path
+          d="M0 16q0.064 0.128 0.16 0.352t0.48 0.928 0.832 1.344 1.248 1.536 1.664 1.696 2.144 1.568 2.624 1.344 3.136 0.896 3.712 0.352 3.712-0.352 3.168-0.928 2.592-1.312 2.144-1.6 1.664-1.632 1.248-1.6 0.832-1.312 0.48-0.928l0.16-0.352q-0.032-0.128-0.16-0.352t-0.48-0.896-0.832-1.344-1.248-1.568-1.664-1.664-2.144-1.568-2.624-1.344-3.136-0.896-3.712-0.352-3.712 0.352-3.168 0.896-2.592 1.344-2.144 1.568-1.664 1.664-1.248 1.568-0.832 1.344-0.48 0.928zM10.016 16q0-2.464 1.728-4.224t4.256-1.76 4.256 1.76 1.76 4.224-1.76 4.256-4.256 1.76-4.256-1.76-1.728-4.256zM12 16q0 1.664 1.184 2.848t2.816 1.152 2.816-1.152 1.184-2.848-1.184-2.816-2.816-1.184-2.816 1.184l2.816 2.816h-4z"
+          fill="currentColor"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function DownloadIcon(): JSX.Element {
+  return (
+    <span className="action-icon-wrapper">
+      <svg className="action-icon-svg" viewBox="0 -0.5 21 21" xmlns="http://www.w3.org/2000/svg">
+        <path
+          d="M11.55,11 L11.55,4 L9.45,4 L9.45,11 L5.9283,11 L10.38345,16.243 L15.1263,11 L11.55,11 Z M12.6,0 L12.6,2 L18.9,2 L18.9,8 L21,8 L21,0 L12.6,0 Z M18.9,18 L12.6,18 L12.6,20 L21,20 L21,12 L18.9,12 L18.9,18 Z M2.1,12 L0,12 L0,20 L8.4,20 L8.4,18 L2.1,18 L2.1,12 Z M2.1,8 L0,8 L0,0 L8.4,0 L8.4,2 L2.1,2 L2.1,8 Z"
+          fill="currentColor"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function FolderIcon(): JSX.Element {
+  return (
+    <span className="action-icon-wrapper">
+      <svg className="action-icon-svg" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 1H6L9 4H16V14H0V1Z" fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
 type ResultStatus = 'complete' | 'partial' | 'failed' | 'running' | 'cancelled';
 
 type ConversationItem =
@@ -404,31 +441,12 @@ function coerceStructuredFields(value: unknown): Record<string, string> | null {
   return Object.keys(fields).length > 0 ? fields : null;
 }
 
-function parseStructuredMessage(text: string): StructuredMessage {
-  if (!text) {
-    return { body: text, fields: {} };
-  }
-
-  const lines = text.split('\n');
-  const isFenced = lines[0]?.trim().startsWith('```');
-  const startIndex = isFenced ? 1 : 0;
-  if (lines.length < startIndex + 3 || lines[startIndex]?.trim() !== '---') {
-    return { body: text, fields: {} };
-  }
-
-  let endIndex = -1;
-  for (let i = startIndex + 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === '---') {
-      endIndex = i;
-      break;
-    }
-  }
-  if (endIndex === -1) {
-    return { body: text, fields: {} };
-  }
-
+/**
+ * Extract fields from a header block between start and end indices.
+ */
+function parseHeaderBlock(lines: string[], startIdx: number, endIdx: number): Record<string, string> {
   const fields: Record<string, string> = {};
-  lines.slice(startIndex + 1, endIndex).forEach((line) => {
+  lines.slice(startIdx + 1, endIdx).forEach((line) => {
     if (!line.trim()) {
       return;
     }
@@ -442,27 +460,123 @@ function parseStructuredMessage(text: string): StructuredMessage {
       fields[key] = value;
     }
   });
+  return fields;
+}
 
-  let bodyStartIndex = endIndex + 1;
+/**
+ * Find a trailing header block at the end of lines.
+ * Returns [startIndex, endIndex] or [-1, -1] if not found.
+ */
+function findTrailingHeader(lines: string[]): [number, number] {
+  // Search backwards for the closing ---
+  let endIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() === '---') {
+      endIdx = i;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    return [-1, -1];
+  }
+
+  // Search backwards from endIdx for the opening ---
+  let startIdx = -1;
+  for (let i = endIdx - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() === '---') {
+      startIdx = i;
+      break;
+    }
+  }
+  if (startIdx === -1) {
+    return [-1, -1];
+  }
+
+  // Verify this looks like a valid header block (has key: value pairs)
+  let hasField = false;
+  for (let i = startIdx + 1; i < endIdx; i += 1) {
+    const stripped = lines[i].trim();
+    if (stripped && stripped.includes(':')) {
+      hasField = true;
+      break;
+    }
+  }
+  if (!hasField) {
+    return [-1, -1];
+  }
+
+  return [startIdx, endIdx];
+}
+
+function parseStructuredMessage(text: string): StructuredMessage {
+  if (!text) {
+    return { body: text, fields: {} };
+  }
+
+  let payload = text;
+  const isFenced = payload.trim().startsWith('```');
   if (isFenced) {
-    while (bodyStartIndex < lines.length && lines[bodyStartIndex].trim() === '') {
-      bodyStartIndex += 1;
-    }
-    if (lines[bodyStartIndex]?.trim().startsWith('```')) {
-      bodyStartIndex += 1;
+    const fenceEnd = payload.indexOf('\n');
+    if (fenceEnd !== -1) {
+      payload = payload.slice(fenceEnd + 1);
     }
   }
 
-  let body = lines.slice(bodyStartIndex).join('\n');
-  if (body.startsWith('\n')) {
-    body = body.slice(1);
+  const lines = payload.split('\n');
+
+  // Try to find header at the START of the message
+  if (lines.length >= 3 && lines[0]?.trim() === '---') {
+    let endIndex = -1;
+    for (let i = 1; i < lines.length; i += 1) {
+      if (lines[i].trim() === '---') {
+        endIndex = i;
+        break;
+      }
+    }
+    if (endIndex !== -1) {
+      const fields = parseHeaderBlock(lines, 0, endIndex);
+      if (Object.keys(fields).length > 0) {
+        let bodyStartIndex = endIndex + 1;
+        if (isFenced) {
+          while (bodyStartIndex < lines.length && lines[bodyStartIndex].trim() === '') {
+            bodyStartIndex += 1;
+          }
+          if (lines[bodyStartIndex]?.trim().startsWith('```')) {
+            bodyStartIndex += 1;
+          }
+        }
+        let body = lines.slice(bodyStartIndex).join('\n');
+        if (body.startsWith('\n')) {
+          body = body.slice(1);
+        }
+        const statusRaw = fields.status;
+        const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+        const error = fields.error ?? undefined;
+        return { body, fields, status, error };
+      }
+    }
   }
 
-  const statusRaw = fields.status;
-  const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-  const error = fields.error ?? undefined;
+  // Try to find header at the END of the message
+  const [startIdx, endIdx] = findTrailingHeader(lines);
+  if (startIdx !== -1 && endIdx !== -1) {
+    const fields = parseHeaderBlock(lines, startIdx, endIdx);
+    if (Object.keys(fields).length > 0) {
+      // Body is everything before the trailing header
+      let bodyLines = lines.slice(0, startIdx);
+      // Remove trailing empty lines from body
+      while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
+        bodyLines.pop();
+      }
+      const body = bodyLines.join('\n');
+      const statusRaw = fields.status;
+      const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+      const error = fields.error ?? undefined;
+      return { body, fields, status, error };
+    }
+  }
 
-  return { body, fields, status, error };
+  return { body: text, fields: {} };
 }
 
 function formatDuration(durationMs?: number | null): string {
@@ -522,7 +636,9 @@ function formatTimestamp(timestamp?: string): string {
 
 // Wrapper for shared markdown renderer - uses 'md' class prefix for agent messages
 function renderMarkdown(text: string): JSX.Element[] {
-  return renderMarkdownElements(text, 'md');
+  // Replace trailing colon with period for cleaner message display
+  const processedText = text.replace(/:\s*$/, '.');
+  return renderMarkdownElements(processedText, 'md');
 }
 
 function isSafeRelativePath(path: string): boolean {
@@ -1831,6 +1947,7 @@ function ResultSection({
   filesExpanded,
   onToggleFiles,
   onFileAction,
+  onShowInExplorer,
 }: {
   comments?: string;
   commentsExpanded?: boolean;
@@ -1839,6 +1956,7 @@ function ResultSection({
   filesExpanded?: boolean;
   onToggleFiles?: () => void;
   onFileAction?: (filePath: string, mode: 'view' | 'download') => void;
+  onShowInExplorer?: (filePath: string) => void;
 }): JSX.Element | null {
   const hasComments = Boolean(comments);
   const hasFiles = Boolean(files && files.length > 0);
@@ -1879,24 +1997,38 @@ function ResultSection({
                 <div key={file} className="result-file-item">
                   <span className="result-file-icon">📄</span>
                   <span className="result-file-name">{file}</span>
-                  {onFileAction && (
-                    <div className="result-file-actions">
+                  <div className="result-file-actions">
+                    {onFileAction && (
+                      <>
+                        <button
+                          type="button"
+                          className="result-file-action"
+                          onClick={() => onFileAction(file, 'view')}
+                          title="View file"
+                        >
+                          <EyeIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="result-file-action"
+                          onClick={() => onFileAction(file, 'download')}
+                          title="Download file"
+                        >
+                          <DownloadIcon />
+                        </button>
+                      </>
+                    )}
+                    {onShowInExplorer && (
                       <button
                         type="button"
                         className="result-file-action"
-                        onClick={() => onFileAction(file, 'view')}
+                        onClick={() => onShowInExplorer(file)}
+                        title="Show in File Explorer"
                       >
-                        view
+                        <FolderIcon />
                       </button>
-                      <button
-                        type="button"
-                        className="result-file-action"
-                        onClick={() => onFileAction(file, 'download')}
-                      >
-                        download
-                      </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1919,6 +2051,7 @@ function RightPanelDetails({
   filesExpanded,
   onToggleFiles,
   onFileAction,
+  onShowInExplorer,
   onExpandAll,
   onCollapseAll,
 }: {
@@ -1932,6 +2065,7 @@ function RightPanelDetails({
   filesExpanded: boolean;
   onToggleFiles: () => void;
   onFileAction?: (file: string, action: 'view' | 'download') => void;
+  onShowInExplorer?: (filePath: string) => void;
   onExpandAll: () => void;
   onCollapseAll: () => void;
 }): JSX.Element {
@@ -2022,6 +2156,7 @@ function RightPanelDetails({
           filesExpanded={filesExpanded}
           onToggleFiles={onToggleFiles}
           onFileAction={onFileAction}
+          onShowInExplorer={onShowInExplorer}
         />
       )}
     </div>
@@ -2263,6 +2398,7 @@ function OutputBlock({
   status,
   error,
   onFileAction,
+  onShowInExplorer,
   rightPanelCollapsed,
   isMobile,
   mobileExpanded,
@@ -2280,6 +2416,7 @@ function OutputBlock({
   status: ResultStatus;
   error?: string;
   onFileAction: (filePath: string, mode: 'view' | 'download') => void;
+  onShowInExplorer?: (filePath: string) => void;
   rightPanelCollapsed: boolean;
   isMobile: boolean;
   mobileExpanded: boolean;
@@ -2337,6 +2474,7 @@ function OutputBlock({
               filesExpanded={filesExpanded}
               onToggleFiles={onToggleFiles}
               onFileAction={onFileAction}
+              onShowInExplorer={onShowInExplorer}
             />
           </div>
         )}
@@ -2470,7 +2608,28 @@ function InputField({
     e.stopPropagation();
     dragCounter.current = 0;
     setIsDragging(false);
-    
+
+    // Check for text/plain first (filename from file explorer drag)
+    const textData = e.dataTransfer.getData('text/plain');
+    if (textData && !e.dataTransfer.files.length) {
+      // Insert the filename at cursor position or append to value
+      const textarea = textareaRef.current;
+      if (textarea) {
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const newValue = value.slice(0, start) + textData + value.slice(end);
+        onChange(newValue);
+        // Set cursor position after inserted text
+        setTimeout(() => {
+          textarea.selectionStart = textarea.selectionEnd = start + textData.length;
+          textarea.focus();
+        }, 0);
+      } else {
+        onChange(value + (value && !value.endsWith(' ') ? ' ' : '') + textData);
+      }
+      return;
+    }
+
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
       onAttachFiles(files);
@@ -2801,6 +2960,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const outputRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const activeTurnRef = useRef(0);
+  const lastStableRightPanelMessageRef = useRef<ConversationItem | null>(null);
 
   const isRunning = status === 'running';
   const statusLabel = STATUS_LABELS[status] ?? STATUS_LABELS.idle;
@@ -3155,14 +3315,96 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     };
 
     // Build preliminary file context (describes files before upload completes)
+    // Uses YAML format for structured metadata that the UI can render nicely
     const buildPreliminaryFileContext = (): string => {
       if (attachedFiles.length === 0) return '';
+
+      // Security: Sanitize filename to prevent injection attacks
+      // - Remove control characters and non-printable chars
+      // - Remove path traversal attempts
+      // - Truncate to reasonable length
+      // - Escape special characters for YAML
+      const sanitizeFilename = (name: string): string => {
+        const MAX_FILENAME_LENGTH = 255;
+
+        let sanitized = name
+          // Remove null bytes and control characters (0x00-0x1F, 0x7F)
+          .replace(/[\x00-\x1F\x7F]/g, '')
+          // Remove path traversal sequences
+          .replace(/\.\.\//g, '')
+          .replace(/\.\.\\/g, '')
+          // Remove leading/trailing dots and spaces (Windows issues)
+          .replace(/^[\s.]+|[\s.]+$/g, '')
+          // Replace multiple spaces/dots with single
+          .replace(/\s+/g, ' ')
+          // Remove characters that could break YAML or cause issues
+          .replace(/[<>:"|?*\x00-\x1F]/g, '_');
+
+        // Truncate if too long (preserve extension)
+        if (sanitized.length > MAX_FILENAME_LENGTH) {
+          const lastDot = sanitized.lastIndexOf('.');
+          if (lastDot > 0 && sanitized.length - lastDot <= 10) {
+            // Preserve extension (up to 10 chars)
+            const ext = sanitized.slice(lastDot);
+            const nameWithoutExt = sanitized.slice(0, MAX_FILENAME_LENGTH - ext.length - 3);
+            sanitized = nameWithoutExt + '...' + ext;
+          } else {
+            sanitized = sanitized.slice(0, MAX_FILENAME_LENGTH - 3) + '...';
+          }
+        }
+
+        // If completely empty after sanitization, use placeholder
+        return sanitized || 'unnamed_file';
+      };
+
+      // Helper to get file extension (sanitized)
+      const getExtension = (filename: string): string => {
+        const lastDot = filename.lastIndexOf('.');
+        if (lastDot <= 0) return '';
+        // Limit extension to alphanumeric, max 10 chars
+        const ext = filename.slice(lastDot + 1).toLowerCase();
+        return ext.replace(/[^a-z0-9]/g, '').slice(0, 10);
+      };
+
+      // Security: Sanitize MIME type
+      const sanitizeMimeType = (mime: string): string => {
+        // MIME types should only contain: a-z, 0-9, /, -, +, .
+        const sanitized = mime.toLowerCase().replace(/[^a-z0-9/\-+.]/g, '');
+        // Limit length
+        return sanitized.slice(0, 100);
+      };
+
+      // Build YAML entries for each file
+      const fileEntries = attachedFiles.map((f) => {
+        const file = f.file;
+        const safeName = sanitizeFilename(file.name);
+        const ext = getExtension(file.name);
+        // Format last modified as ISO string if available
+        const lastModified = file.lastModified
+          ? new Date(file.lastModified).toISOString()
+          : null;
+
+        // Build YAML block for this file
+        // Escape quotes and backslashes for YAML string safety
+        const yamlEscape = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+        let yaml = `- name: "${yamlEscape(safeName)}"`;
+        yaml += `\n  size: ${Math.max(0, Math.floor(file.size))}`; // Ensure non-negative integer
+        yaml += `\n  size_formatted: "${formatFileSizeForContext(file.size)}"`;
+        if (file.type) {
+          yaml += `\n  mime_type: "${yamlEscape(sanitizeMimeType(file.type))}"`;
+        }
+        if (ext) {
+          yaml += `\n  extension: "${ext}"`;
+        }
+        if (lastModified) {
+          yaml += `\n  last_modified: "${lastModified}"`;
+        }
+        return yaml;
+      }).join('\n');
+
       return (
-        '\n\n<attached-files>\nThe user is attaching the following files (uploading to workspace):\n' +
-        attachedFiles
-          .map((f) => `- ${f.file.name} (${formatFileSizeForContext(f.file.size)})`)
-          .join('\n') +
-        '\n</attached-files>'
+        '\n\n<attached-files>\nfiles:\n' + fileEntries + '\n</attached-files>'
       );
     };
 
@@ -4217,6 +4459,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   }, [events]);
 
   // Auto-select the latest agent message for the right panel
+  // Only update when streaming is complete to reduce blinking and unnecessary re-renders
   useEffect(() => {
     // Find the last agent_message or output with content
     const messagesWithDetails = conversation.filter(
@@ -4225,12 +4468,19 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
     if (messagesWithDetails.length > 0) {
       const lastMessage = messagesWithDetails[messagesWithDetails.length - 1];
+
+      // Check if the last message is still streaming - skip update if so
+      const isLastMessageStreaming = lastMessage.type === 'agent_message' && lastMessage.isStreaming;
+
       // Auto-select the latest message when:
       // 1. Nothing is selected yet
       // 2. The selected message no longer exists
-      // 3. Session is running (to follow the active message)
+      // 3. Session is running AND streaming is complete (to follow the active message without flickering)
       const selectedExists = conversation.find((item) => item.id === selectedMessageId);
-      if (!selectedMessageId || !selectedExists || status === 'running') {
+      const shouldAutoSelect = !selectedMessageId || !selectedExists || (status === 'running' && !isLastMessageStreaming);
+
+      // Only update state if the ID actually changes to avoid unnecessary re-renders
+      if (shouldAutoSelect && lastMessage.id !== selectedMessageId) {
         setSelectedMessageId(lastMessage.id);
       }
     }
@@ -4265,6 +4515,38 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   }, [conversation]);
 
   const totalSubagentCalls = Object.values(subagentStats).reduce((sum, count) => sum + count, 0);
+
+  // Memoize the selected message for the right panel to avoid re-renders during streaming
+  // Only update when streaming is complete or tool calls/subagents change
+  const selectedMessageForRightPanel = useMemo(() => {
+    if (!selectedMessageId) {
+      lastStableRightPanelMessageRef.current = null;
+      return null;
+    }
+    const message = conversation.find((item) => item.id === selectedMessageId);
+    if (!message) {
+      // Keep the last stable message if the selected one doesn't exist yet
+      return lastStableRightPanelMessageRef.current;
+    }
+
+    // For agent messages that are streaming, only update when there's meaningful content
+    if (message.type === 'agent_message' && message.isStreaming) {
+      const hasToolsOrSubagents = message.toolCalls.length > 0 || message.subagents.length > 0;
+
+      // If streaming with no tools/subagents, keep the last stable message
+      if (!hasToolsOrSubagents) {
+        // If the last stable message was for a different ID, show empty state for new message
+        if (lastStableRightPanelMessageRef.current?.id !== selectedMessageId) {
+          return null;
+        }
+        return lastStableRightPanelMessageRef.current;
+      }
+    }
+
+    // Update the stable reference and return the message
+    lastStableRightPanelMessageRef.current = message;
+    return message;
+  }, [conversation, selectedMessageId]);
 
   // Extract system events (permission denials, hook triggers, profile switches)
   const systemEvents = useMemo<SystemEventView[]>(() => {
@@ -4594,20 +4876,28 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         event.preventDefault();
         handleNewSession();
       }
-      // Alt + E: Toggle file explorer
+      // Alt + E: Switch to File Explorer tab
       if (event.code === 'KeyE' && event.altKey) {
         event.preventDefault();
-        setFileExplorerVisible((prev) => {
-          if (!prev) {
-            setFileExplorerRefreshKey((k) => k + 1);
-          }
-          return !prev;
-        });
+        event.stopImmediatePropagation();
+        setRightPanelMode('explorer');
+        if (!fileExplorerVisible) {
+          setFileExplorerVisible(true);
+          setFileExplorerRefreshKey((k) => k + 1);
+        }
+        return;
+      }
+      // Alt + D: Switch to Details tab
+      if (event.code === 'KeyD' && event.altKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setRightPanelMode('details');
+        return;
       }
     };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [handleCancel, isRunning, toggleAllSections, handleNewSession, fileExplorerVisible, fileExplorerModalOpen]);
+    window.addEventListener('keydown', handleKey, true); // capture phase to prevent input from receiving special chars
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [handleCancel, isRunning, toggleAllSections, handleNewSession, fileExplorerVisible, fileExplorerModalOpen, setRightPanelMode]);
 
   return (
     <div className="terminal-app">
@@ -4769,6 +5059,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                           status={item.status}
                           error={item.error}
                           onFileAction={handleFileAction}
+                          onShowInExplorer={handleShowInExplorer}
                           rightPanelCollapsed={rightPanelCollapsed}
                           isMobile={isMobile}
                           mobileExpanded={mobileExpandedMessages.has(item.id)}
@@ -4877,6 +5168,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               type="button"
               className={`right-panel-tab ${rightPanelMode === 'details' ? 'active' : ''}`}
               onClick={() => setRightPanelMode('details')}
+              title="Details (Alt+D)"
             >
               Details
             </button>
@@ -4890,6 +5182,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   setFileExplorerRefreshKey((k) => k + 1);
                 }
               }}
+              title="File Explorer (Alt+E)"
             >
               File Explorer
             </button>
@@ -4904,25 +5197,23 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             )}
           </div>
           <div className="right-panel-content">
-            {rightPanelMode === 'details' ? (() => {
-              const displayMessageId = selectedMessageId;
-              return (
+            {rightPanelMode === 'details' ? (
                 <RightPanelDetails
-                  message={conversation.find((item) => item.id === displayMessageId) ?? null}
+                  message={selectedMessageForRightPanel}
                   toolExpanded={expandedTools}
                   onToggleTool={toggleTool}
                   subagentExpanded={expandedSubagents}
                   onToggleSubagent={toggleSubagent}
-                  commentsExpanded={displayMessageId ? expandedComments.has(displayMessageId) : false}
-                  onToggleComments={() => displayMessageId && toggleComments(displayMessageId)}
-                  filesExpanded={displayMessageId ? expandedFiles.has(displayMessageId) : false}
-                  onToggleFiles={() => displayMessageId && toggleFiles(displayMessageId)}
+                  commentsExpanded={selectedMessageId ? expandedComments.has(selectedMessageId) : false}
+                  onToggleComments={() => selectedMessageId && toggleComments(selectedMessageId)}
+                  filesExpanded={selectedMessageId ? expandedFiles.has(selectedMessageId) : false}
+                  onToggleFiles={() => selectedMessageId && toggleFiles(selectedMessageId)}
                   onFileAction={handleFileAction}
+                  onShowInExplorer={handleShowInExplorer}
                   onExpandAll={expandAllSections}
                   onCollapseAll={collapseAllSections}
                 />
-              );
-            })() : currentSession && config && token ? (
+              ) : currentSession && config && token ? (
               <>
                 <div className="file-explorer-options">
                   <label className="file-explorer-hidden-toggle">
@@ -4944,6 +5235,12 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   onModalStateChange={setFileExplorerModalOpen}
                   navigateTo={navigateToPath}
                   onNavigateComplete={handleNavigateComplete}
+                  onFileNameInsert={(filename) => {
+                    setInputValue((prev) => {
+                      const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+                      return prev + (needsSpace ? ' ' : '') + filename;
+                    });
+                  }}
                 />
               </>
             ) : (

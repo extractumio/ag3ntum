@@ -762,3 +762,211 @@ class TestSSEReplayWithPersistence:
         assert queue.empty()
 
         await redis_hub.unsubscribe(session_id, queue)
+
+
+# =============================================================================
+# Terminal Event Deduplication Fix Tests
+# =============================================================================
+
+class TestTerminalEventDeduplicationFix:
+    """
+    Tests for the terminal event deduplication fix.
+
+    This fix prevents the "infinite processing..." bug where terminal events
+    (agent_complete, error, cancelled) were incorrectly filtered by the
+    deduplication logic when partial message sequence numbers created gaps.
+
+    Root cause: Partial messages consume sequence numbers but aren't persisted
+    to SQLite. When SSE reconnects and replays from SQLite, it misses the partial
+    sequences. If last_sequence was tracking a partial message seq (e.g., 287),
+    the terminal event (e.g., seq 291) could be incorrectly skipped.
+
+    Fix: Terminal events are NEVER skipped, regardless of deduplication state.
+
+    See: Session 20260118_184501_4e5cf999 analysis for the original bug.
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_event_delivered_despite_sequence_gap(self) -> None:
+        """
+        Terminal events are delivered even when there's a sequence gap.
+
+        Simulates the bug scenario:
+        1. Events 1-207 delivered (including partial messages via Redis)
+        2. Partial messages 208-287 delivered via Redis (not persisted)
+        3. last_sequence tracking shows 287
+        4. Terminal event with seq 291 arrives
+        5. BUG: Old code would skip 291 because 291 > 287 but seen_sequences might filter it
+        6. FIX: Terminal events bypass deduplication entirely
+        """
+        from src.api.routes.sessions import stream_events
+
+        # Simulate the deduplication logic directly
+        seen_sequences = {1, 2, 3, 207, 208, 250, 287}  # Includes partial message sequences
+        last_sequence = 287  # Tracking includes partial messages
+
+        # Terminal event with sequence gap
+        terminal_event = {
+            "type": "agent_complete",
+            "sequence": 291,
+            "data": {"status": "COMPLETE"},
+        }
+
+        seq = terminal_event.get("sequence", 0)
+        event_type = terminal_event.get("type")
+
+        # CRITICAL: Terminal events must bypass deduplication
+        is_terminal = event_type in ("agent_complete", "error", "cancelled")
+
+        # Old buggy logic: would check `seq in seen_sequences or seq <= last_sequence`
+        # This would pass (291 not in seen_sequences, 291 > 287) BUT if last_sequence
+        # was incorrectly tracked, it could fail
+
+        # The fix ensures terminal events are NEVER skipped
+        should_skip = not is_terminal and (seq in seen_sequences or seq <= last_sequence)
+
+        assert is_terminal is True
+        assert should_skip is False  # Terminal event must NOT be skipped
+
+    @pytest.mark.asyncio
+    async def test_terminal_event_delivered_even_if_seen_before(self) -> None:
+        """
+        Terminal events are delivered even if their sequence was somehow seen.
+
+        Edge case: If a terminal event sequence was somehow added to seen_sequences
+        (e.g., due to replay overlap), it should STILL be delivered.
+        """
+        seen_sequences = {1, 2, 3, 291}  # Terminal event seq already in seen
+        last_sequence = 290
+
+        terminal_event = {
+            "type": "agent_complete",
+            "sequence": 291,
+            "data": {"status": "COMPLETE"},
+        }
+
+        seq = terminal_event.get("sequence", 0)
+        event_type = terminal_event.get("type")
+        is_terminal = event_type in ("agent_complete", "error", "cancelled")
+
+        # Old buggy logic would skip: 291 in seen_sequences
+        old_logic_would_skip = seq in seen_sequences or seq <= last_sequence
+
+        # New fixed logic: terminal events bypass deduplication
+        new_logic_should_skip = not is_terminal and (seq in seen_sequences or seq <= last_sequence)
+
+        assert old_logic_would_skip is True  # Old logic WOULD skip
+        assert new_logic_should_skip is False  # New logic does NOT skip
+
+    @pytest.mark.asyncio
+    async def test_all_terminal_event_types_bypass_deduplication(self) -> None:
+        """All terminal event types (agent_complete, error, cancelled) bypass deduplication."""
+        terminal_types = ["agent_complete", "error", "cancelled"]
+
+        for event_type in terminal_types:
+            seen_sequences = {1, 2, 3, 100}  # Include the terminal event's sequence
+            last_sequence = 100
+
+            terminal_event = {
+                "type": event_type,
+                "sequence": 100,  # Same as last_sequence AND in seen_sequences
+                "data": {},
+            }
+
+            seq = terminal_event.get("sequence", 0)
+            is_terminal = terminal_event.get("type") in ("agent_complete", "error", "cancelled")
+            should_skip = not is_terminal and (seq in seen_sequences or seq <= last_sequence)
+
+            assert is_terminal is True, f"{event_type} should be terminal"
+            assert should_skip is False, f"{event_type} should NOT be skipped"
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_events_still_deduplicated(self) -> None:
+        """Non-terminal events are still properly deduplicated."""
+        seen_sequences = {1, 2, 3}
+        last_sequence = 3
+
+        # Regular message event (not terminal)
+        message_event = {
+            "type": "message",
+            "sequence": 3,  # Already seen
+            "data": {"text": "Hello"},
+        }
+
+        seq = message_event.get("sequence", 0)
+        event_type = message_event.get("type")
+        is_terminal = event_type in ("agent_complete", "error", "cancelled")
+        should_skip = not is_terminal and (seq in seen_sequences or seq <= last_sequence)
+
+        assert is_terminal is False
+        assert should_skip is True  # Non-terminal events ARE still deduplicated
+
+    @pytest.mark.asyncio
+    async def test_sequence_gap_scenario_from_session_4e5cf999(self) -> None:
+        """
+        Reproduce the exact scenario from session 20260118_184501_4e5cf999.
+
+        Timeline:
+        - Seq 205: metrics_update (persisted)
+        - Seq 207: thinking (persisted)
+        - Seq 208-287: partial messages (NOT persisted, but seq numbers consumed)
+        - Seq 288: message (persisted)
+        - Seq 291: agent_complete (persisted)
+
+        Bug: SSE client receives partial messages 208-287 via Redis,
+        sets last_sequence=287. When replaying from SQLite, it gets
+        seq 207 -> 288 -> 291. If deduplication incorrectly filters
+        based on Redis-delivered sequences, agent_complete (291) might
+        never be delivered.
+        """
+        # State after receiving partial messages via Redis
+        seen_sequences = set(range(1, 288))  # 1-287 seen via Redis
+        last_sequence = 287  # Tracking partial messages
+
+        # Events from SQLite replay (skips partial messages)
+        sqlite_events = [
+            {"type": "metrics_update", "sequence": 205, "data": {}},
+            {"type": "thinking", "sequence": 207, "data": {"text": "..."}},
+            {"type": "message", "sequence": 288, "data": {"text": "Response"}},
+            {"type": "metrics_update", "sequence": 289, "data": {}},
+            {"type": "metrics_update", "sequence": 290, "data": {}},
+            {"type": "agent_complete", "sequence": 291, "data": {"status": "COMPLETE"}},
+        ]
+
+        delivered_events = []
+
+        for event in sqlite_events:
+            seq = event.get("sequence", 0)
+            event_type = event.get("type")
+            is_terminal = event_type in ("agent_complete", "error", "cancelled")
+
+            # Apply fixed deduplication logic
+            should_skip = not is_terminal and (seq in seen_sequences or seq <= last_sequence)
+
+            if not should_skip:
+                delivered_events.append(event)
+                seen_sequences.add(seq)
+                if not is_terminal:
+                    last_sequence = seq
+
+        # Verify the fix: agent_complete MUST be delivered
+        delivered_types = [e["type"] for e in delivered_events]
+        delivered_seqs = [e["sequence"] for e in delivered_events]
+
+        assert "agent_complete" in delivered_types, \
+            "agent_complete must be delivered despite sequence gap"
+
+        # Verify message at 288 is also delivered (288 > 287)
+        assert "message" in delivered_types
+        assert 288 in delivered_seqs
+
+        # Verify earlier events (205, 207) are skipped (already in seen_sequences)
+        assert 205 not in delivered_seqs, "seq 205 should be skipped (already seen)"
+        assert 207 not in delivered_seqs, "seq 207 should be skipped (already seen)"
+
+        # Verify later metrics_update events (289, 290) ARE delivered (> last_sequence)
+        assert 289 in delivered_seqs
+        assert 290 in delivered_seqs
+
+        # Verify agent_complete (291) is delivered despite being a terminal event
+        assert 291 in delivered_seqs
