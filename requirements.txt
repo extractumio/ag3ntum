@@ -1,0 +1,35 @@
+# Install with: pip install -r requirements.txt
+
+claude-agent-sdk==0.1.19
+jinja2==3.1.6
+pydantic==2.12.5
+pyyaml==6.0.3
+python-dotenv==1.2.1
+colorlog==6.10.1
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+aiosqlite==0.22.1
+sqlalchemy[asyncio]==2.0.45
+pyjwt==2.10.1
+httpx==0.28.1
+rich==13.7.0
+python-multipart==0.0.21
+bcrypt==4.2.1
+cryptography==44.0.0
+redis==7.1.0
+pytest==9.0.2
+pytest-asyncio==1.3.0
+flake8==7.3.0
+
+# ReadDocument tool dependencies
+python-magic==0.4.27
+pymupdf==1.25.3
+Pillow==10.4.0
+exifread==3.0.0
+mutagen==1.47.0
+py7zr==0.22.0
+pandas>=2.2.3
+pyarrow>=17.0.0
+openpyxl==3.1.2
+
+

@@ -1,0 +1,194 @@
+# Unified security configuration for all Ag3ntum tools
+# Single source of truth for path validation and tool behavior
+#
+# NOTE: This is a TEMPLATE - workspace_path is set per-session at runtime!
+# The values here are defaults that can be overridden.
+
+path_validator:
+  # These are TEMPLATE values - actual paths set per-session by agent_runner.py
+  # At runtime: workspace_path = /users/{username}/sessions/{session_id}/workspace
+  
+  # Skills directory (REAL Docker path, mounted inside workspace/skills)
+  skills_path: "/skills"
+  
+  # Log all path access attempts (for debugging)
+  log_all_access: true
+  
+  # Patterns blocked even within workspace (matched against relative paths)
+  blocklist:
+    - "*.env"
+    - "*.key"
+    - ".git/**"
+    - "__pycache__/**"
+    - "*.pyc"
+    - ".secrets/**"
+    - "*.pem"
+    - "*.p12"
+    - "*.pfx"
+  
+  # If set, only these patterns are allowed (null = allow all not in blocklist)
+  # allowlist:
+  #   - "**/*.py"
+  #   - "**/*.yaml"
+  #   - "**/*.json"
+  
+  # Read-only path prefixes (relative to workspace)
+  readonly_prefixes:
+    - "skills/"
+
+# Network tool configuration
+network:
+  # Enable network tools (WebFetch, etc.)
+  enabled: true
+  
+  # Domain allowlist (empty = allow all)
+  allowed_domains: []
+  
+  # Domain blocklist
+  blocked_domains:
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
+    - "metadata.google.internal"
+    - "169.254.169.254"  # AWS metadata
+    - "metadata.azure.com"
+  
+  # Request timeout (seconds)
+  timeout: 30
+  
+  # Maximum response size (bytes)
+  max_response_size: 10485760  # 10MB
+
+# Tool-specific settings
+tools:
+  bash:
+    # Command execution timeout (seconds) - enforced via Linux `timeout` command
+    # Commands running longer than this will receive SIGTERM
+    timeout: 300  # 5 minutes
+    # Grace period before SIGKILL (seconds) - uses `timeout --kill-after`
+    # After SIGTERM, waits this long before sending SIGKILL to force termination
+    kill_after: 10
+    # Output preview mode: "tail" or "head"
+    preview_mode: "tail"
+    # Number of lines to preview
+    preview_lines: 20
+    # Maximum preview lines
+    max_preview_lines: 100
+    # Temporary output directory (relative to workspace)
+    output_dir: ".tmp/cmd"
+  
+  read:
+    # Maximum file size to read (bytes)
+    max_file_size: 10485760  # 10MB
+    # Bytes to check for binary detection
+    binary_preview_bytes: 8192
+  
+  write:
+    # Patterns that require confirmation (future feature)
+    sensitive_patterns: []
+    # Maximum file size to write (bytes)
+    max_file_size: 52428800  # 50MB
+  
+  edit:
+    # Maximum file size to edit (bytes)
+    max_file_size: 10485760  # 10MB
+  
+  grep:
+    # Maximum results to return
+    max_results: 1000
+    # Context lines before/after match
+    context_lines: 3
+  
+  glob:
+    # Maximum files to return
+    max_results: 10000
+  
+  ls:
+    # Maximum entries to return
+    max_entries: 1000
+    # Include hidden files by default
+    include_hidden: false
+
+  read_document:
+    # Global timeout for any single file read (seconds)
+    global_timeout: 180  # 3 minutes
+
+    # File size limits by category (bytes)
+    limits:
+      text: 10485760          # 10MB
+      pdf: 104857600          # 100MB
+      office: 52428800        # 50MB
+      archive: 524288000      # 500MB
+      image: 52428800         # 50MB
+      tabular: 104857600      # 100MB
+      audio: 52428800         # 50MB
+
+    # PDF-specific settings
+    pdf:
+      max_pages_text: 100
+      max_pages_ocr: 20
+      per_page_timeout: 5
+      ocr_per_page_timeout: 30
+      # Auto-OCR threshold: pages with fewer chars are considered scanned
+      ocr_text_threshold: 50
+
+    # Archive security
+    archive:
+      max_compression_ratio: 100
+      max_total_size: 524288000     # 500MB
+      max_file_count: 10000
+      max_single_file: 104857600    # 100MB
+      max_nesting_depth: 3
+      # Extraction destination within session workspace
+      extraction_dir: ".tmp/extracted"
+      # Banned extensions - compiled binaries/executables only
+      # NOTE: Scripts (.sh, .bat, .ps1, .php, .js, .cgi, etc.) are ALLOWED
+      # to support reading website backups (PHP, NodeJS, CGI projects)
+      banned_extensions:
+        - ".exe"      # Windows executable
+        - ".dll"      # Windows dynamic library
+        - ".so"       # Linux shared object
+        - ".dylib"    # macOS dynamic library
+        - ".com"      # DOS executable
+        - ".scr"      # Windows screensaver (executable)
+        - ".msi"      # Windows installer package
+        - ".app"      # macOS application bundle
+        - ".deb"      # Debian package
+        - ".rpm"      # RPM package
+        - ".dmg"      # macOS disk image
+        - ".iso"      # Disk image
+        - ".img"      # Disk image
+
+    # Output sanitization (LLM context protection)
+    output:
+      max_chars: 500000
+      max_lines: 10000
+      max_cell_content: 1000
+      strip_null_bytes: true
+      strip_control_chars: true
+      max_metadata_fields: 50
+      max_metadata_value_len: 1000
+      truncation_marker: "\n... [content truncated] ..."
+
+    # Timeouts (seconds)
+    timeouts:
+      global: 180               # 3 minutes max per file
+      pdf_per_page: 5           # 5 seconds per PDF page
+      ocr_per_page: 30          # 30 seconds per OCR page
+      archive_list: 30          # 30 seconds for archive listing
+      archive_extract: 60       # 60 seconds per file extraction
+      pandoc: 60                # 60 seconds for Office conversion
+      tabular_load: 60          # 60 seconds for loading tabular data
+
+    # Memory limits
+    memory:
+      max_dataframe_rows: 100000
+      max_dataframe_cols: 500
+      chunk_size: 10000
+
+    # Caching
+    cache:
+      enabled: true
+      directory: "~/.tmp/doc-cache"
+      max_size_mb: 1024
+      ttl_days: 7

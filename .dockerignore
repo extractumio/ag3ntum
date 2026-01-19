@@ -1,0 +1,30 @@
+# Directories mounted as volumes - don't include in build context
+users/
+data/
+logs/
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Node modules (handled by named volume)
+node_modules/
+
+# Git
+.git/
+
+# IDE
+.vscode/
+.cursor/
+.idea/
+
+# Tests (mounted separately)
+# tests/
+
+# Design docs
+design/
+docs/

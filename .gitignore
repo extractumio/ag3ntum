@@ -1,0 +1,56 @@
+# Logs and sessions
+logs/
+sessions/
+
+# Environment and Secrets
+.env
+config/secrets.yaml
+config/user_secrets.yaml
+.venv/
+venv/
+
+# User config files (not committed)
+config/external-mounts.yaml
+
+# Auto-generated files (created by deploy.sh)
+data/auto-generated/
+
+docs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Node.js / Frontend
+node_modules/
+package-lock.json
+dist/
+.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Output files
+output.yaml
+
+design/
+
+.DS_Store
+
+*.db
+# Auto-generated
+docker-compose.override.yml
+
+users/
+
+.claude/
+!skills/.claude/
+TODO
+tmp_*.py

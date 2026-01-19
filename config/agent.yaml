@@ -1,0 +1,115 @@
+# Ag3ntum Agent Configuration
+# Override via CLI: --set agent.model=... or --model ...
+
+agent:
+  # Default Claude model to use
+  default_model: claude-haiku-4-5-20251001
+
+  # Available Claude models for the UI dropdown
+  # Models with ":mode=thinking" suffix enable extended thinking mode
+  # The thinking_tokens budget will be applied to thinking-enabled models
+  models_available:
+    - claude-haiku-4-5-20251001
+    - claude-haiku-4-5-20251001:mode=thinking
+    - claude-sonnet-4-5-20250929
+    - claude-sonnet-4-5-20250929:mode=thinking
+    - claude-opus-4-5-20251101
+    - claude-opus-4-5-20251101:mode=thinking
+
+  # Extended thinking token budget (used when model has :mode=thinking suffix)
+  # This controls the maximum tokens the model can use for internal reasoning
+  # before producing its final response. Higher values allow deeper reasoning.
+  # Recommended range: 2000-16000 depending on task complexity
+  thinking_tokens: 8000
+
+  # Deprecated: Use default_model instead
+  # Kept for backward compatibility with CLI overrides
+  model: claude-haiku-4-5-20251001
+
+  # Maximum conversation turns before stopping
+  max_turns: 100
+
+  # Execution timeout in seconds (1800 = 30 minutes)
+  timeout_seconds: 1800
+
+  # Enable custom skills from skills/ directory
+  enable_skills: true
+
+  # Enable file change tracking for checkpoint/rewind functionality
+  enable_file_checkpointing: true
+
+  # Note: permission_mode is configured in config/security/permissions.yaml (defaultMode field)
+  # Do not set it here to avoid SDK bypassing permission checks
+
+  # Role template name (loads prompts/roles/<role>.md)
+  # Create custom roles in prompts/roles/ directory
+  role: default
+
+  # SDK-specific options
+  # Maximum buffer size for streaming (null = SDK default)
+  max_buffer_size: null
+
+  # Output format: null (default), text, json, stream-json
+  output_format: stream-json
+
+  # Include partial/incomplete messages in output
+  include_partial_messages: true
+
+# Large user input handling
+# When user submits input larger than the threshold, it's saved to a file
+# and the agent receives a reference to read from that file instead
+large_input:
+  # Size threshold in bytes (default: 200KB = 204800)
+  # Inputs larger than this are stored to file
+  threshold_bytes: 204800
+
+  # Filename to store large inputs in the workspace
+  filename: huge_user_input.txt
+
+  # Message template sent to agent when input exceeds threshold
+  # Placeholders: {filename}, {size}
+  message_template: "Run the user request from the file ./{filename} ({size})"
+
+# File Explorer settings
+file_explorer:
+  # Show hidden files (starting with .) by default
+  show_hidden_files: false
+
+  # Maximum number of files to display per directory
+  max_files_per_directory: 1000
+
+  # Default sort field: name, size, created_at, modified_at
+  default_sort: modified_at
+
+  # Default sort order: asc, desc
+  default_sort_order: desc
+
+# File Upload settings
+file_upload:
+  # Maximum size per individual file in bytes (10MB)
+  max_file_size_bytes: 10485760
+
+  # Maximum number of files per upload request
+  max_files_per_upload: 20
+
+  # Maximum total size per upload request in bytes (50MB)
+  # This limits total size even if individual files are under the per-file limit
+  max_total_upload_size_bytes: 52428800
+
+  # Allowed file extensions (empty list = all allowed)
+  # Example: [".txt", ".pdf", ".py", ".js", ".json", ".md"]
+  allowed_extensions: []
+
+  # Blocked file extensions (takes precedence over allowed)
+  # Common dangerous extensions that should never be uploaded
+  blocked_extensions:
+    - ".exe"
+    - ".dll"
+    - ".so"
+    - ".dylib"
+    - ".sh"
+    - ".bat"
+    - ".cmd"
+    - ".ps1"
+    - ".vbs"
+    - ".jar"

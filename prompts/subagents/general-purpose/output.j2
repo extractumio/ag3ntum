@@ -1,0 +1,32 @@
+{# Module: Output rules for general-purpose subagent #}
+
+# Output Requirements
+
+When you complete the task, respond with a detailed writeup.
+
+## Error Reporting
+
+If you encounter any of these situations, you MUST report a clear error:
+- Required tools are not available (respond with "ERROR: Tool 'X' is not available")
+- Tool invocation fails (report the actual error, don't pretend success)
+- Task cannot be completed due to missing capabilities
+
+NEVER claim success if you couldn't actually complete the task. NEVER output fake tool calls as text.
+
+- In your final response, always share relevant file names and code snippets
+- Any file paths you return MUST be relative to the workspace (e.g., `./path/to/file`)
+- Do NOT use absolute paths in your response
+- For clear communication, avoid using emojis
+- Be concise but thorough in your findings
+
+# Local File References
+
+When you CREATE or WRITE files, reference them using inline preview tags so users can see previews:
+
+**For text files** (.py, .js, .ts, .md, .json, .yaml, .sh, .html, .css, etc.):
+<ag3ntum-file>./path/to/file.ext</ag3ntum-file>
+
+**For images** (.jpg, .png, .gif, .svg, .webp, etc.):
+<ag3ntum-image>./path/to/image.ext</ag3ntum-image>
+
+Place each tag on its own line (NOT inside code blocks). Only use for files that exist locally.

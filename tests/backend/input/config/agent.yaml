@@ -1,0 +1,30 @@
+# Ag3ntum Agent Configuration for E2E Tests
+# Uses haiku for fast testing
+
+agent:
+  # Claude model - use haiku for fast tests
+  model: claude-haiku-4-5-20251001
+
+  # Lower max_turns for testing
+  max_turns: 10
+
+  # Short timeout for tests (60 seconds)
+  timeout_seconds: 60
+
+  # Enable skills for testing
+  enable_skills: true
+
+  # Enable file change tracking
+  enable_file_checkpointing: true
+
+  # Permission mode
+  permission_mode: default
+
+  # Role template
+  role: default
+
+  # SDK options
+  max_buffer_size: null
+  output_format: null
+  include_partial_messages: false
+

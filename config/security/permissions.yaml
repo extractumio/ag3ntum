@@ -1,0 +1,310 @@
+# Permission profile for Ag3ntum agent.
+# Loaded once at startup and used throughout execution.
+#
+# Native Claude Code tools (Read, Write, Bash, etc.) are BLOCKED.
+# All file/command operations go through Ag3ntum MCP tools which have:
+# - Ag3ntumPathValidator for Python file tools (Ag3ntumRead/Write/Edit/etc.)
+# - Bubblewrap sandbox for subprocess execution (Ag3ntumBash)
+
+name: user
+description: User profile for task execution with Ag3ntum tools.
+defaultMode: default
+
+tools:
+  # Ag3ntum MCP tools - these replace native Claude Code tools
+  # They have built-in security (PathValidator + bwrap sandbox)
+  enabled:
+    # Ag3ntum file tools (use PathValidator)
+    - mcp__ag3ntum__Read
+    - mcp__ag3ntum__ReadDocument
+    - mcp__ag3ntum__Write
+    - mcp__ag3ntum__Edit
+    - mcp__ag3ntum__MultiEdit
+    - mcp__ag3ntum__Glob
+    - mcp__ag3ntum__Grep
+    - mcp__ag3ntum__LS
+    # Ag3ntum command tool (uses bwrap sandbox)
+    - mcp__ag3ntum__Bash
+    # Ag3ntum network tool (uses domain blocklist)
+    - mcp__ag3ntum__WebFetch
+    # Ag3ntum interactive tool (waits for user input via web UI)
+    - mcp__ag3ntum__AskUserQuestion
+    # Native tools that don't need replacement
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - NotebookEdit
+    - WebSearch
+    
+  # BLOCKED: Native Claude Code tools - replaced by Ag3ntum versions
+  disabled:
+    - Bash      # Use mcp__ag3ntum__Bash instead
+    - Read      # Use mcp__ag3ntum__Read instead
+    - Write     # Use mcp__ag3ntum__Write instead
+    - Edit      # Use mcp__ag3ntum__Edit instead
+    - MultiEdit # Use mcp__ag3ntum__MultiEdit instead
+    - Glob      # Use mcp__ag3ntum__Glob instead
+    - Grep      # Use mcp__ag3ntum__Grep instead
+    - LS        # Use mcp__ag3ntum__LS instead
+    - WebFetch  # Use mcp__ag3ntum__WebFetch instead
+    - AskUserQuestion  # Use mcp__ag3ntum__AskUserQuestion instead
+    
+  # Legacy: permission checking is now done by tools themselves
+  permission_checked: []
+
+session_workspace:
+  description: |
+    LEGACY: Pattern-based permissions are no longer the primary security layer.
+    Security is now enforced by:
+    1. Bubblewrap mount namespace (for Ag3ntumBash subprocesses)
+    2. Ag3ntumPathValidator (for Python file tools like Ag3ntumRead/Write/Edit)
+    3. Native Claude Code tools are blocked via tools.disabled
+    
+    These patterns are kept for backward compatibility but Ag3ntum tools
+    handle their own validation.
+  allow:
+    # Allow all Ag3ntum tools (they have built-in security)
+    - mcp__ag3ntum__Bash(*)
+    - mcp__ag3ntum__Read(*)
+    - mcp__ag3ntum__ReadDocument(*)
+    - mcp__ag3ntum__Write(*)
+    - mcp__ag3ntum__Edit(*)
+    - mcp__ag3ntum__MultiEdit(*)
+    - mcp__ag3ntum__Glob(*)
+    - mcp__ag3ntum__Grep(*)
+    - mcp__ag3ntum__LS(*)
+    - mcp__ag3ntum__WebFetch(*)
+    - mcp__ag3ntum__AskUserQuestion(*)
+    # Other allowed tools
+    - Task
+    - Skill
+    - TodoRead
+    - TodoWrite
+    - NotebookEdit
+    - WebSearch
+    
+  deny:
+    # Block ALL native Claude Code tools - use Ag3ntum versions instead
+    - Bash(*)
+    - Read(*)
+    - Write(*)
+    - Edit(*)
+    - MultiEdit(*)
+    - Glob(*)
+    - Grep(*)
+    - LS(*)
+    - WebFetch(*)
+    - AskUserQuestion(*)
+    
+  allowed_dirs:
+    - "{workspace}"
+
+# Sandbox configuration (bubblewrap). Toggle for non-docker runs as needed.
+#
+# MOUNT POINTS (inside sandbox):
+# - /workspace        - User's session workspace (read-write)
+# - /venv             - User's Python venv (read-only)
+# - /skills           - Global skills directory (read-only)
+# - /user-skills      - User's custom skills (read-only)
+#
+# PYTHON: Use /venv/bin/python3 for skill scripts
+# SKILLS: Run as `python3 /skills/<skill_name>/script.py` or `/user-skills/<skill_name>/script.py`
+#
+# SECURITY NOTE: Network data transfer tools (curl, wget, ssh, scp, etc.) are
+# blocked by Command Security Filter in config/security/command-filtering.yaml
+# (category: network_data_transfer). Agents should use mcp__ag3ntum__WebFetch
+# for allowed network requests, which enforces domain allowlisting.
+sandbox:
+  enabled: true
+  file_sandboxing: true
+  network_sandboxing: true
+  bwrap_path: "bwrap"
+  use_tmpfs_root: true
+
+  # /proc filtering configuration (security enhancement for nested containers)
+  # When enabled, agents cannot see other processes or read their environments
+  proc_filtering:
+    enabled: true  # Recommended: true (hides processes from agents)
+    allowed_entries:
+      # Essential entries for process operation
+      - "/proc/self"      # Own process info (required for many tools)
+
+      # Safe system information (read-only, no sensitive data)
+      - "/proc/cpuinfo"   # CPU information
+      - "/proc/meminfo"   # Memory statistics
+      - "/proc/uptime"    # System uptime
+      - "/proc/version"   # Kernel version
+
+      # Optional: Uncomment if needed by specific skills
+      # - "/proc/loadavg"   # Load average
+      # - "/proc/stat"      # System statistics
+      # - "/proc/diskstats" # Disk I/O statistics
+
+    # Note: When enabled, commands like ps/top/htop won't work inside agent sandbox
+    # This is expected and improves security (principle of least privilege)
+
+  static_mounts:
+    # System binaries (read-only)
+    system_usr:
+      source: "/usr"
+      target: "/usr"
+      mode: ro
+    system_lib:
+      source: "/lib"
+      target: "/lib"
+      mode: ro
+    system_bin:
+      source: "/bin"
+      target: "/bin"
+      mode: ro
+    # DNS resolution (required for network requests)
+    etc_resolv:
+      source: "/etc/resolv.conf"
+      target: "/etc/resolv.conf"
+      mode: ro
+    # SSL certificates (required for HTTPS)
+    etc_ssl:
+      source: "/etc/ssl"
+      target: "/etc/ssl"
+      mode: ro
+  session_mounts:
+    # Session workspace (read-write)
+    workspace:
+      source: "/users/{username}/sessions/{session_id}/workspace"
+      target: "/workspace"
+      mode: rw
+
+    # User-specific Python venv (read-only for security)
+    # Created during user registration at /users/<username>/venv/
+    # Contains packages from user's requirements.txt
+    user_venv:
+      source: "/users/{username}/venv"
+      target: "/venv"
+      mode: ro
+
+    # Global skills - mounted at /skills path (read-only)
+    # IMPORTANT: Mount the WHOLE skills directory (not just .claude/skills) to be
+    # consistent with Docker's ./skills:/skills mount. This way symlinks work in
+    # both MCP tools (outside bwrap) and Bash (inside bwrap).
+    # Access as: /skills/.claude/skills/<skill_name>/script.py
+    global_skills:
+      source: "{skills_dir}"
+      target: "/skills"
+      mode: ro
+
+    # User skills - mounted at /users path (read-only)
+    # IMPORTANT: Mount the WHOLE users directory to be consistent with Docker's
+    # ./users:/users mount. This ensures symlinks work in both environments.
+    # Access as: /users/{username}/.claude/skills/<skill_name>/script.py
+    user_skills:
+      source: "/users"
+      target: "/users"
+      mode: ro
+
+    # =========================================================================
+    # EXTERNAL MOUNTS - User-mounted folders from host system
+    # =========================================================================
+    # These are configured via deploy.sh --mount-ro and --mount-rw options.
+    # Host folders are mounted to /mounts/ro/* and /mounts/rw/* in Docker,
+    # then bind-mounted into the sandbox at /workspace/external/*.
+    #
+    # Agent accesses them as:
+    #   ./external/ro/{name}/    - Read-only external mounts
+    #   ./external/rw/{name}/    - Read-write external mounts
+    #   ./external/persistent/   - Per-user persistent storage
+
+    # Read-only external mounts from host
+    # Optional: may not exist if no --mount-ro options were used
+    #
+    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/ro).
+    # The workspace has symlinks: ./external/ro/{name} -> /mounts/ro/{name}
+    # These symlinks must resolve correctly inside bwrap, so /mounts/ro must exist.
+    external_ro:
+      source: "/mounts/ro"
+      target: "/mounts/ro"
+      mode: ro
+      optional: true
+
+    # Read-write external mounts from host
+    # Optional: may not exist if no --mount-rw options were used
+    #
+    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/rw).
+    # The workspace has symlinks: ./external/rw/{name} -> /mounts/rw/{name}
+    external_rw:
+      source: "/mounts/rw"
+      target: "/mounts/rw"
+      mode: rw
+      optional: true
+
+    # Per-user persistent storage
+    # This directory survives across sessions and is unique to each user.
+    # Created during user registration and verified during session setup.
+    #
+    # IMPORTANT: We mount this as an OVERLAY on the /users path (same source/target).
+    # This is necessary because bwrap cannot mount to a path INSIDE another mount
+    # when both are Docker bind mounts. The workspace has a symlink
+    # ./external/persistent -> /users/{username}/ag3ntum/persistent
+    # which resolves through the /users mount. The overlay makes it writable.
+    persistent_storage:
+      source: "/users/{username}/ag3ntum/persistent"
+      target: "/users/{username}/ag3ntum/persistent"
+      mode: rw
+
+    # =========================================================================
+    # GIT REPOSITORY SUPPORT - SSH and Git configuration
+    # =========================================================================
+    # These mounts enable git operations with SSH authentication (private repos)
+    # and user-specific git configuration (author name, email, etc.)
+
+    # User's SSH directory for git SSH authentication
+    # Contains: id_rsa, id_ed25519, known_hosts, config
+    # Optional: only mounted if user has configured SSH keys at /users/{username}/.ssh/
+    user_ssh:
+      source: "/users/{username}/.ssh"
+      target: "/root/.ssh"
+      mode: ro
+      optional: true
+
+    # User's git configuration file
+    # Contains: user.name, user.email, aliases, etc.
+    # Optional: only mounted if user has a .gitconfig at /users/{username}/.gitconfig
+    user_gitconfig:
+      source: "/users/{username}/.gitconfig"
+      target: "/root/.gitconfig"
+      mode: ro
+      optional: true
+
+  dynamic_mounts: []
+  network:
+    enabled: true
+    allowed_domains: []
+    allow_localhost: true
+  environment:
+    home: "/workspace"
+    # User's venv (/venv/bin) must be first for python3/pip
+    # This is user-specific, NOT the backend system venv
+    path: "/venv/bin:/usr/bin:/bin"
+    clear_env: true
+  writable_paths:
+    - "/workspace"
+    - "/mounts/rw"                  # Global read-write external mounts (symlink target)
+    - "/mounts/user-rw"             # Per-user read-write external mounts (symlink target)
+    - "/users/{username}/ag3ntum/persistent" # Per-user persistent storage (overlay mount)
+  readonly_paths:
+    - "/venv"                       # User's Python venv (read-only)
+    - "/skills"                     # Global skills directory
+    - "/user-skills"                # User's custom skills
+    - "/mounts/ro"                  # Global read-only external mounts (symlink target)
+    - "/mounts/user-ro"             # Per-user read-only external mounts (symlink target)
+    - "/usr"
+    - "/lib"
+    - "/bin"
+
+# File checkpointing configuration
+checkpointing:
+  # Tools that trigger automatic checkpoint creation after execution
+  auto_checkpoint_tools:
+    - Write
+    - Edit
+    - MultiEdit
