@@ -11,8 +11,9 @@ import {
   getFileDownloadUrl,
   getSession,
   getSessionEvents,
-  getSkills,
-  listSessions,
+  getSkillsCached,
+  invalidateSessionsCache,
+  listSessionsCached,
   runTask,
   uploadFiles,
 } from './api';
@@ -28,7 +29,21 @@ import {
 import { renderMarkdownElements } from './MarkdownRenderer';
 import { ProtectedRoute } from './ProtectedRoute';
 import { connectSSE } from './sse';
-import type { AppConfig, SessionResponse, SkillInfo, TerminalEvent } from './types';
+import type { AppConfig, SessionListResponse, SessionResponse, SkillInfo, TerminalEvent } from './types';
+
+// Global hotkey codes that should be blocked from inserting characters in input fields
+// On macOS, Option+key produces special characters (e.g., Option+E = ´, Option+N = ˜)
+const BLOCKED_HOTKEY_CODES = ['KeyE', 'KeyD', 'KeyN', 'BracketLeft', 'BracketRight'];
+
+// Handler to block Alt+key hotkeys from inserting characters in input fields
+const blockAltKeyHotkeys = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>): boolean => {
+  if (e.altKey && BLOCKED_HOTKEY_CODES.includes(e.nativeEvent.code)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return true; // Indicates the event was blocked
+  }
+  return false;
+};
 
 // Copy button icons (matching FileViewer style)
 function CopyIconSvg(): JSX.Element {
@@ -1497,6 +1512,7 @@ function AskUserQuestionBlock({
                 placeholder="Optional: Add any additional context or comments..."
                 value={additionalComments}
                 onChange={(e) => setAdditionalComments(e.target.value)}
+                onKeyDown={blockAltKeyHotkeys}
                 rows={3}
               />
             </div>
@@ -1594,6 +1610,7 @@ function AskUserQuestionBlock({
                 placeholder="Optional: Add any additional context or comments..."
                 value={additionalComments}
                 onChange={(e) => setAdditionalComments(e.target.value)}
+                onKeyDown={blockAltKeyHotkeys}
                 rows={3}
               />
             </div>
@@ -2651,6 +2668,9 @@ function InputField({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Block Alt+key hotkeys from inserting special characters
+    if (blockAltKeyHotkeys(e)) return;
+
     if (e.key === 'Enter') {
       // Shift+Enter = new line (let default behavior happen)
       if (e.shiftKey) {
@@ -2955,6 +2975,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [viewerLoading, setViewerLoading] = useState(false);
   const [viewerImageUrl, setViewerImageUrl] = useState<string | undefined>(undefined);
 
+  // Security alert state (for sensitive data detection notifications)
+  const [securityAlert, setSecurityAlert] = useState<{
+    message: string;
+    typeLabels: string[];
+    filesWithSecrets: number;
+    totalSecrets: number;
+  } | null>(null);
+
   const isMobile = useIsMobile();
 
   const outputRef = useRef<HTMLDivElement | null>(null);
@@ -2998,11 +3026,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     if (!config || !token) {
       return;
     }
-    getSkills(config.api.base_url, token)
-      .then((response) => {
+    getSkillsCached(config.api.base_url, token)
+      .then((response: { skills: SkillInfo[] }) => {
         setLoadedSkills(response.skills);
       })
-      .catch((err) => {
+      .catch((err: Error) => {
         console.error('Failed to load skills:', err);
       });
   }, [config, token]);
@@ -3012,9 +3040,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       return;
     }
 
-    listSessions(config.api.base_url, token)
-      .then((response) => setSessions(response.sessions))
-      .catch((err) => setError(`Failed to load sessions: ${err.message}`));
+    listSessionsCached(config.api.base_url, token)
+      .then((response: SessionListResponse) => setSessions(response.sessions))
+      .catch((err: Error) => setError(`Failed to load sessions: ${err.message}`));
   }, [config, token]);
 
   useEffect(() => {
@@ -3152,6 +3180,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           )
         );
 
+        // Invalidate cache and refresh to sync with server
+        invalidateSessionsCache();
         refreshSessions();
       }
 
@@ -3169,6 +3199,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               }
             : null
         );
+        // Invalidate cache and refresh to sync with server
+        invalidateSessionsCache();
         refreshSessions();
       }
 
@@ -3203,6 +3235,22 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               : session
           )
         );
+      }
+
+      // Handle security alert events (sensitive data detected and redacted)
+      if (event.type === 'security_alert') {
+        const alertData = event.data as {
+          message?: string;
+          type_labels?: string[];
+          files_with_secrets?: number;
+          total_secrets?: number;
+        };
+        setSecurityAlert({
+          message: alertData.message ?? 'Sensitive data was detected and redacted.',
+          typeLabels: alertData.type_labels ?? [],
+          filesWithSecrets: alertData.files_with_secrets ?? 0,
+          totalSecrets: alertData.total_secrets ?? 0,
+        });
       }
     },
     [appendEvent, currentSession, refreshSessions]
@@ -3239,7 +3287,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         (heartbeatData) => {
           if (heartbeatData.session_status &&
               ['completed', 'failed', 'cancelled'].includes(heartbeatData.session_status)) {
-            // Session ended - refresh to get final state
+            // Session ended - invalidate cache and refresh to get final state
+            invalidateSessionsCache();
             refreshSessions();
           }
         },
@@ -3459,6 +3508,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         setAttachedFiles([]);
         const lastSequence = getLastServerSequence(events);
         startSSE(currentSession.id, lastSequence);
+        // Invalidate cache since session status changed
+        invalidateSessionsCache();
         refreshSessions();
       } catch (err) {
         setStatus('failed');
@@ -3536,6 +3587,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         setInputValue('');
         setAttachedFiles([]);
         startSSE(sessionId, null);
+        // Invalidate cache since new session was created
+        invalidateSessionsCache();
         refreshSessions();
         navigate(`/session/${sessionId}/`, { replace: true });
       } catch (err) {
@@ -4838,14 +4891,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     setExpandedFiles(new Set());
   };
 
-  const toggleAllSections = () => {
-    if (expandedTools.size > 0 || expandedSubagents.size > 0 || expandedComments.size > 0 || expandedFiles.size > 0) {
-      collapseAllSections();
-    } else {
-      expandAllSections();
-    }
-  };
-
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       // ESC key handling - close overlays first, then cancel running session
@@ -4866,15 +4911,29 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           return;
         }
       }
-      // Alt + [: Expand/Collapse all sections (use event.code for macOS compatibility)
+      // All Alt+ hotkeys use stopImmediatePropagation() to prevent special characters
+      // from being inserted into focused input fields (macOS Option key produces characters)
+
+      // Alt + [: Expand all sections
       if (event.code === 'BracketLeft' && event.altKey) {
         event.preventDefault();
-        toggleAllSections();
+        event.stopImmediatePropagation();
+        expandAllSections();
+        return;
       }
-      // Alt + N: New session (use event.code for macOS compatibility where Option+N produces ñ)
+      // Alt + ]: Collapse all sections
+      if (event.code === 'BracketRight' && event.altKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        collapseAllSections();
+        return;
+      }
+      // Alt + N: New session (macOS Option+N produces ñ)
       if (event.code === 'KeyN' && event.altKey) {
         event.preventDefault();
+        event.stopImmediatePropagation();
         handleNewSession();
+        return;
       }
       // Alt + E: Switch to File Explorer tab
       if (event.code === 'KeyE' && event.altKey) {
@@ -4897,7 +4956,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     };
     window.addEventListener('keydown', handleKey, true); // capture phase to prevent input from receiving special chars
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [handleCancel, isRunning, toggleAllSections, handleNewSession, fileExplorerVisible, fileExplorerModalOpen, setRightPanelMode]);
+  }, [handleCancel, isRunning, expandAllSections, collapseAllSections, handleNewSession, fileExplorerVisible, fileExplorerModalOpen, setRightPanelMode]);
 
   return (
     <div className="terminal-app">
@@ -5260,6 +5319,43 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             onDownload={handleViewerDownload}
             imageUrl={viewerImageUrl}
           />
+        )}
+
+        {/* Security Alert Toast - Requires manual dismissal */}
+        {securityAlert && (
+          <div className="security-alert-toast" role="alert" aria-live="assertive">
+            <div className="security-alert-header">
+              <span className="security-alert-icon">⚠️</span>
+              <h3 className="security-alert-title">Sensitive Data Detected</h3>
+            </div>
+            <p className="security-alert-message">{securityAlert.message}</p>
+            <div className="security-alert-details">
+              <div className="security-alert-detail-row">
+                <span className="security-alert-detail-label">Files affected:</span>
+                <span className="security-alert-detail-value">{securityAlert.filesWithSecrets}</span>
+              </div>
+              <div className="security-alert-detail-row">
+                <span className="security-alert-detail-label">Items redacted:</span>
+                <span className="security-alert-detail-value">{securityAlert.totalSecrets}</span>
+              </div>
+              {securityAlert.typeLabels.length > 0 && (
+                <div className="security-alert-types">
+                  {securityAlert.typeLabels.map((label, idx) => (
+                    <span key={idx} className="security-alert-type-badge">{label}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="security-alert-actions">
+              <button
+                type="button"
+                className="security-alert-dismiss"
+                onClick={() => setSecurityAlert(null)}
+              >
+                I Understand
+              </button>
+            </div>
+          </div>
         )}
       </main>
 

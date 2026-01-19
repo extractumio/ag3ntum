@@ -158,6 +158,35 @@ class UserService:
             skills_dir.mkdir(parents=True, exist_ok=True)
             skills_dir.chmod(0o700)
 
+            # Create ag3ntum directory structure
+            # This directory contains user-specific ag3ntum data
+            ag3ntum_dir = home_dir / "ag3ntum"
+            ag3ntum_dir.mkdir(parents=True, exist_ok=True)
+            ag3ntum_dir.chmod(0o700)
+
+            # Create persistent storage directory
+            # This directory survives across sessions and is mounted at
+            # /workspace/external/persistent/ inside the sandbox
+            persistent_dir = ag3ntum_dir / "persistent"
+            persistent_dir.mkdir(parents=True, exist_ok=True)
+            persistent_dir.chmod(0o700)
+
+            # Create README explaining persistent storage
+            readme_path = persistent_dir / "README.md"
+            if not readme_path.exists():
+                readme_path.write_text(
+                    "# Persistent Storage\n\n"
+                    "Files in this directory persist across sessions.\n\n"
+                    "## Access from Agent Sessions\n"
+                    "```\n"
+                    "./external/persistent/\n"
+                    "```\n\n"
+                    "## Use Cases\n"
+                    "- Cache data you want to reuse between sessions\n"
+                    "- Store files that should survive session cleanup\n"
+                    "- Share data between multiple sessions\n"
+                )
+
             # Create user-specific Python venv
             # This is separate from the backend venv and mounted read-only in sandbox
             self._create_user_venv(home_dir, username)
@@ -359,6 +388,163 @@ class UserService:
             logger.error(f"Failed to create secrets for {username}: {e}")
             # Don't raise - secrets creation is not critical for user creation
             # User can create it manually if needed
+
+
+    async def delete_user(
+        self,
+        db: AsyncSession,
+        username: str,
+        delete_linux_user: bool = True,
+    ) -> bool:
+        """
+        Delete a user and their associated resources.
+
+        This method is primarily intended for test cleanup but can be used
+        for user account deletion.
+
+        Steps:
+        1. Find user in database
+        2. Delete Linux user (if exists and delete_linux_user=True)
+        3. Remove user home directory
+        4. Remove user from database
+
+        Args:
+            db: Database session
+            username: Username to delete
+            delete_linux_user: Whether to delete the Linux user account
+
+        Returns:
+            True if user was deleted, False if user not found
+
+        Raises:
+            ValueError: If deletion fails
+        """
+        # Find user in database
+        result = await db.execute(
+            select(User).where(User.username == username)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            logger.warning(f"User {username} not found in database")
+            return False
+
+        home_dir = USERS_DIR / username
+
+        # Delete Linux user if requested
+        if delete_linux_user and user.linux_uid:
+            try:
+                self._delete_linux_user(username)
+            except Exception as e:
+                logger.warning(f"Failed to delete Linux user {username}: {e}")
+                # Continue with cleanup even if Linux user deletion fails
+
+        # Remove home directory
+        if home_dir.exists():
+            try:
+                shutil.rmtree(home_dir)
+                logger.info(f"Removed home directory for {username}")
+            except Exception as e:
+                logger.warning(f"Failed to remove home directory for {username}: {e}")
+                # Try with sudo if normal deletion fails
+                try:
+                    subprocess.run(
+                        ["sudo", "rm", "-rf", str(home_dir)],
+                        check=True,
+                        capture_output=True,
+                    )
+                    logger.info(f"Removed home directory for {username} with sudo")
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to remove home directory with sudo: {e}")
+
+        # Delete from database
+        await db.delete(user)
+        await db.commit()
+
+        logger.info(f"Deleted user {username}")
+        return True
+
+    def _delete_linux_user(self, username: str) -> None:
+        """Delete Linux user account."""
+        try:
+            subprocess.run(
+                ["sudo", "userdel", username],
+                check=True,
+                capture_output=True,
+            )
+            logger.info(f"Deleted Linux user {username}")
+        except subprocess.CalledProcessError as e:
+            if e.returncode == 6:
+                # User doesn't exist - that's fine
+                logger.debug(f"Linux user {username} doesn't exist")
+            else:
+                logger.warning(f"Failed to delete Linux user {username}: {e.stderr.decode()}")
+                raise
+
+    def cleanup_test_users(self, pattern: str = "testuser_") -> int:
+        """
+        Clean up test user directories from /users/.
+
+        This method removes directories that match the test user pattern
+        without requiring database access. Use this for manual cleanup
+        or when the database is unavailable.
+
+        Args:
+            pattern: Pattern prefix to match (default: "testuser_")
+
+        Returns:
+            Number of directories removed
+        """
+        removed = 0
+        patterns_to_clean = [pattern, "testuser2_", "e2e_user_"]
+
+        for p in patterns_to_clean:
+            for user_dir in USERS_DIR.glob(f"{p}*"):
+                if user_dir.is_dir():
+                    try:
+                        # Try normal deletion first
+                        shutil.rmtree(user_dir)
+                        logger.info(f"Removed test user directory: {user_dir}")
+                        removed += 1
+                    except PermissionError:
+                        # Try with sudo
+                        try:
+                            subprocess.run(
+                                ["sudo", "rm", "-rf", str(user_dir)],
+                                check=True,
+                                capture_output=True,
+                            )
+                            logger.info(f"Removed test user directory with sudo: {user_dir}")
+                            removed += 1
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Failed to remove {user_dir}: {e}")
+                    except Exception as e:
+                        logger.error(f"Failed to remove {user_dir}: {e}")
+
+        # Also try to delete corresponding Linux users
+        for p in patterns_to_clean:
+            try:
+                result = subprocess.run(
+                    ["getent", "passwd"],
+                    capture_output=True,
+                    text=True,
+                )
+                for line in result.stdout.splitlines():
+                    username = line.split(":")[0]
+                    if username.startswith(p):
+                        try:
+                            subprocess.run(
+                                ["sudo", "userdel", username],
+                                check=True,
+                                capture_output=True,
+                            )
+                            logger.info(f"Deleted Linux user: {username}")
+                        except subprocess.CalledProcessError:
+                            pass  # User might already be deleted
+            except Exception as e:
+                logger.debug(f"Could not enumerate Linux users: {e}")
+
+        return removed
 
 
 user_service = UserService()

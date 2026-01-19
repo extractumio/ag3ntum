@@ -304,15 +304,20 @@ class TestLinuxUserCreation:
         """Linux user creation runs useradd via sudo."""
         with patch('subprocess.run') as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
+            with patch('pathlib.Path.mkdir'):
+                with patch('pathlib.Path.chmod'):
+                    with patch('pathlib.Path.write_text'):
+                        with patch('pathlib.Path.exists', return_value=False):
+                            with patch.object(user_service, '_create_user_venv'):
+                                with patch.object(user_service, '_create_user_secrets'):
+                                    user_service._create_linux_user("testuser", 2000)
 
-            user_service._create_linux_user("testuser", 2000)
-
-            # Should have called subprocess.run at least once
-            assert mock_run.called
-            # Check for useradd call (might be 3 calls: chown, chmod, useradd, chown)
-            calls = mock_run.call_args_list
-            useradd_call = [c for c in calls if 'useradd' in str(c)]
-            assert len(useradd_call) > 0
+                                    # Should have called subprocess.run at least once
+                                    assert mock_run.called
+                                    # Check for useradd call (might be 3 calls: chown, chmod, useradd, chown)
+                                    calls = mock_run.call_args_list
+                                    useradd_call = [c for c in calls if 'useradd' in str(c)]
+                                    assert len(useradd_call) > 0
 
     def test_linux_user_creation_uses_correct_uid(self, user_service: UserService) -> None:
         """Linux user creation uses the provided UID."""
@@ -320,12 +325,16 @@ class TestLinuxUserCreation:
             mock_run.return_value = MagicMock(returncode=0)
             with patch('pathlib.Path.mkdir'):
                 with patch('pathlib.Path.chmod'):
-                    user_service._create_linux_user("testuser", 2005)
+                    with patch('pathlib.Path.write_text'):
+                        with patch('pathlib.Path.exists', return_value=False):
+                            with patch.object(user_service, '_create_user_venv'):
+                                with patch.object(user_service, '_create_user_secrets'):
+                                    user_service._create_linux_user("testuser", 2005)
 
-                    # Find the useradd call
-                    calls = [str(c) for c in mock_run.call_args_list]
-                    useradd_calls = [c for c in calls if 'useradd' in c]
-                    assert any('2005' in c for c in useradd_calls)
+                                    # Find the useradd call
+                                    calls = [str(c) for c in mock_run.call_args_list]
+                                    useradd_calls = [c for c in calls if 'useradd' in c]
+                                    assert any('2005' in c for c in useradd_calls)
 
     def test_linux_user_creation_failure_raises(self, user_service: UserService) -> None:
         """Failed Linux user creation raises ValueError."""
@@ -339,8 +348,10 @@ class TestLinuxUserCreation:
             ]
             with patch('pathlib.Path.mkdir'):
                 with patch('pathlib.Path.chmod'):
-                    # Mock helper methods that also call subprocess
-                    with patch.object(user_service, '_create_user_venv'):
-                        with patch.object(user_service, '_create_user_secrets'):
-                            with pytest.raises(ValueError, match="Failed to"):
-                                user_service._create_linux_user("testuser", 2000)
+                    with patch('pathlib.Path.write_text'):
+                        with patch('pathlib.Path.exists', return_value=False):
+                            # Mock helper methods that also call subprocess
+                            with patch.object(user_service, '_create_user_venv'):
+                                with patch.object(user_service, '_create_user_secrets'):
+                                    with pytest.raises(ValueError, match="Failed to"):
+                                        user_service._create_linux_user("testuser", 2000)

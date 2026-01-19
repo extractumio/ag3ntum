@@ -4,7 +4,12 @@ LABEL org.opencontainers.image.title="ag3ntum"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+# Fetch GitHub CLI GPG key using Docker ADD (no curl needed)
+ADD https://cli.github.com/packages/githubcli-archive-keyring.gpg /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+RUN chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
@@ -12,20 +17,30 @@ RUN apt-get update \
         python3-dev \
         build-essential \
         ca-certificates \
-        curl \
         git \
+        git-lfs \
+        gh \
+        openssh-client \
         nodejs \
         npm \
         bubblewrap \
         sudo \
         libmagic1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install
 
 # Create ag3ntum_api user (UID 45045, well outside typical user range to avoid conflicts)
 RUN useradd -m -u 45045 -s /bin/bash ag3ntum_api
 
 # Create /users directory with proper permissions
 RUN mkdir -p /users && chmod 755 /users
+
+# Create external mount point directories
+# /mounts/ro - for read-only external mounts (host folders mounted as read-only)
+# /mounts/rw - for read-write external mounts (host folders mounted as read-write)
+# These will be bind-mounted into sandbox at /workspace/external/ro and /workspace/external/rw
+RUN mkdir -p /mounts/ro /mounts/rw \
+    && chmod 755 /mounts /mounts/ro /mounts/rw
 
 # Configure sudoers for restricted access
 # Allow both -m (create home) and -M (don't create home) for useradd
@@ -54,7 +69,7 @@ RUN chmod +x /entrypoint-web.sh
 
 # Create runtime directories and set ownership of application directories to ag3ntum_api
 RUN mkdir -p /data /sessions \
-    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions \
+    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts \
     && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /requirements.txt
 
 ENV AG3NTUM_ROOT=/

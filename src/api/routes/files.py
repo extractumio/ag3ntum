@@ -7,10 +7,14 @@ Provides endpoints for:
 - GET /files/{session_id}/download - Download a file
 - POST /files/{session_id}/upload - Upload files to workspace
 - DELETE /files/{session_id} - Delete a file
+
+Sensitive Data: Uploaded text files are scanned for API keys, tokens, passwords.
+Detected secrets are redacted with same-length placeholders to preserve formatting.
 """
 import logging
 import mimetypes
 import re
+import unicodedata
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
 from ...services.session_service import session_service, InvalidSessionIdError
+from ...security import scan_and_redact, is_scanner_enabled
+from ...services.mount_service import (
+    resolve_external_symlink,
+    resolve_file_path_for_external_mount,
+)
 from ..deps import get_current_user_id, get_current_user_id_from_query_or_header
 from ..waf_filter import (
     MAX_FILE_UPLOAD_SIZE,
@@ -78,6 +87,9 @@ class FileInfo(BaseModel):
     mime_type: Optional[str] = None
     is_hidden: bool = False
     is_viewable: bool = False  # True if content can be previewed
+    is_readonly: bool = False  # True if file/folder is in read-only area
+    is_external: bool = False  # True if file is in external mount
+    mount_type: Optional[Literal["ro", "rw", "persistent", "user-ro", "user-rw"]] = None  # Type of external mount
     children: Optional[list["FileInfo"]] = None  # For directories when expanded
 
 
@@ -201,7 +213,10 @@ def validate_path_security(
         workspace_root: Absolute path to the workspace root
 
     Returns:
-        Resolved absolute path that is guaranteed to be within workspace
+        Resolved absolute path that is guaranteed to be within workspace.
+        For external mount paths with symlinks, returns the unresolved path
+        to handle Docker container mount symlinks that point to non-existent
+        host paths.
 
     Raises:
         HTTPException: If the path is invalid or escapes the workspace
@@ -217,8 +232,15 @@ def validate_path_security(
             detail="Invalid path: null bytes not allowed",
         )
 
-    # Normalize the user path
-    normalized = user_path.strip()
+    # Normalize the user path - ensure UTF-8 handling
+    # URL-decode the path in case it was double-encoded
+    try:
+        # First URL-decode (handles %XX sequences)
+        decoded_path = urllib.parse.unquote(user_path)
+        # Normalize Unicode to NFC form (macOS uses NFD by default)
+        normalized = unicodedata.normalize('NFC', decoded_path.strip())
+    except Exception:
+        normalized = user_path.strip()
 
     # Remove leading slashes to ensure it's relative
     while normalized.startswith('/') or normalized.startswith('\\'):
@@ -252,7 +274,30 @@ def validate_path_security(
     # Construct the target path
     target_path = workspace_root / normalized
 
-    # Resolve to get the real path (follows symlinks)
+    # Check if path is within the external/ directory (mount points)
+    # External mounts are intentional symlinks that point outside workspace
+    is_external_path = normalized.startswith("external/") or normalized == "external"
+
+    # For external paths, we need special handling because symlinks may point
+    # to Docker container paths (e.g., /mounts/ro/name) that don't exist on host
+    if is_external_path:
+        # For external paths, don't follow symlinks - just validate structure
+        # Check each component exists (as file, dir, or symlink)
+        current = workspace_root
+        for part in path_parts:
+            if not part or part == '.':
+                continue
+            current = current / part
+            # Use lexists to check if path exists (including broken symlinks)
+            if not current.exists() and not current.is_symlink():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Path not found: {normalized}",
+                )
+        # Return unresolved path for external mounts
+        return target_path
+
+    # For non-external paths, resolve to get the real path (follows symlinks)
     try:
         resolved_path = target_path.resolve()
     except (OSError, ValueError) as e:
@@ -263,7 +308,6 @@ def validate_path_security(
         )
 
     # CRITICAL: Verify the resolved path is within the workspace
-    # Use try/except for is_relative_to compatibility
     try:
         resolved_path.relative_to(workspace_root)
     except ValueError:
@@ -286,7 +330,7 @@ def validate_path_security(
             continue
         current = current / part
         if current.is_symlink():
-            # Resolve this symlink and check if it points outside workspace
+            # For non-external symlinks, check if they point outside workspace
             try:
                 symlink_target = current.resolve()
                 symlink_target.relative_to(workspace_root)
@@ -331,10 +375,43 @@ def is_viewable_file(file_path: Path) -> bool:
     return False
 
 
+def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
+    """
+    Determine if a path is in an external mount and its type.
+
+    Args:
+        relative_path: Path relative to workspace root
+
+    Returns:
+        Tuple of (is_external, is_readonly, mount_type)
+        mount_type is one of: "ro", "rw", "persistent", "user-ro", "user-rw", or None
+    """
+    # Normalize path separators
+    normalized = relative_path.replace("\\", "/")
+
+    # Check for external mount paths (order matters - more specific first)
+    if normalized.startswith("external/user-ro/") or normalized == "external/user-ro":
+        return True, True, "user-ro"
+    elif normalized.startswith("external/user-rw/") or normalized == "external/user-rw":
+        return True, False, "user-rw"
+    elif normalized.startswith("external/ro/") or normalized == "external/ro":
+        return True, True, "ro"
+    elif normalized.startswith("external/rw/") or normalized == "external/rw":
+        return True, False, "rw"
+    elif normalized.startswith("external/persistent/") or normalized == "external/persistent":
+        return True, False, "persistent"
+    elif normalized == "external":
+        # The external directory itself
+        return True, False, None
+
+    return False, False, None
+
+
 def get_file_info(
     file_path: Path,
     workspace_root: Path,
-    include_hidden: bool = False
+    include_hidden: bool = False,
+    relative_path_prefix: Optional[str] = None
 ) -> Optional[FileInfo]:
     """
     Get information about a file or directory.
@@ -343,12 +420,15 @@ def get_file_info(
         file_path: Absolute path to the file
         workspace_root: Root workspace directory for relative path calculation
         include_hidden: Whether to include hidden files
+        relative_path_prefix: If provided, use this prefix for the relative path
+            instead of computing from workspace_root. Used for external mounts.
 
     Returns:
         FileInfo object or None if file should be excluded
     """
     try:
-        name = file_path.name
+        # Normalize filename to NFC (macOS uses NFD by default)
+        name = unicodedata.normalize('NFC', file_path.name)
         is_hidden = name.startswith('.')
 
         # Skip hidden files if not requested
@@ -359,12 +439,19 @@ def get_file_info(
         file_stat = file_path.stat()
 
         # Calculate relative path
-        try:
-            relative_path = str(file_path.relative_to(workspace_root))
-        except ValueError:
-            relative_path = name
+        if relative_path_prefix:
+            # For external mounts, use the provided prefix
+            relative_path = f"{relative_path_prefix}/{name}"
+        else:
+            try:
+                relative_path = str(file_path.relative_to(workspace_root))
+            except ValueError:
+                relative_path = name
 
         is_dir = file_path.is_dir()
+
+        # Determine mount info (is_external, is_readonly, mount_type)
+        is_external, is_readonly, mount_type = get_mount_info(relative_path)
 
         return FileInfo(
             name=name,
@@ -380,6 +467,9 @@ def get_file_info(
             mime_type=None if is_dir else get_mime_type(file_path),
             is_hidden=is_hidden,
             is_viewable=False if is_dir else is_viewable_file(file_path),
+            is_readonly=is_readonly,
+            is_external=is_external,
+            mount_type=mount_type,
         )
     except (OSError, PermissionError) as e:
         logger.warning(f"Failed to get info for {file_path}: {e}")
@@ -393,6 +483,7 @@ def list_directory(
     sort_by: str = "modified_at",
     sort_order: str = "desc",
     limit: int = MAX_FILES_PER_DIRECTORY,
+    relative_path_prefix: Optional[str] = None,
 ) -> tuple[list[FileInfo], int, bool]:
     """
     List contents of a directory.
@@ -404,6 +495,9 @@ def list_directory(
         sort_by: Field to sort by (name, size, created_at, modified_at)
         sort_order: Sort order (asc, desc)
         limit: Maximum number of items to return
+        relative_path_prefix: If provided, use this prefix for relative paths
+            instead of computing from workspace_root. Used for external mounts
+            where the actual directory is outside the workspace.
 
     Returns:
         Tuple of (file_list, total_count, truncated)
@@ -418,7 +512,7 @@ def list_directory(
 
     # Get file info for each entry
     for entry in entries:
-        info = get_file_info(entry, workspace_root, include_hidden)
+        info = get_file_info(entry, workspace_root, include_hidden, relative_path_prefix)
         if info:
             files.append(info)
 
@@ -519,13 +613,34 @@ async def browse_files(
     else:
         target_dir = workspace_root.resolve()
 
-    if not target_dir.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Directory not found: {path}",
-        )
+    # Check if this is an external mount path that needs special handling
+    is_external_path = path and (path.startswith("external/") or path == "external")
+    actual_dir = target_dir
 
-    if not target_dir.is_dir():
+    if is_external_path:
+        # For external paths, try to resolve the mount symlink to actual path
+        if target_dir.is_symlink():
+            resolved = resolve_external_symlink(target_dir)
+            if resolved:
+                actual_dir = resolved
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"External mount not accessible: {path}",
+                )
+        elif not target_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Directory not found: {path}",
+            )
+    else:
+        if not target_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Directory not found: {path}",
+            )
+
+    if not actual_dir.is_dir():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Not a directory: {path}",
@@ -533,12 +648,13 @@ async def browse_files(
 
     # List directory contents (use resolved workspace root for consistency)
     files, total_count, truncated = list_directory(
-        directory=target_dir,
+        directory=actual_dir,
         workspace_root=workspace_root.resolve(),
         include_hidden=include_hidden,
         sort_by=sort_by,
         sort_order=sort_order,
         limit=limit,
+        relative_path_prefix=path if is_external_path else None,
     )
 
     return DirectoryListing(
@@ -597,26 +713,31 @@ async def get_file_content(
     # Validate path with security checks
     file_path = validate_path_security(path, workspace_root)
 
-    if not file_path.exists():
+    # Resolve external mount paths to actual filesystem paths
+    actual_file, is_external = resolve_file_path_for_external_mount(
+        workspace_root, path
+    )
+
+    if not actual_file.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File not found: {path}",
         )
 
-    if file_path.is_dir():
+    if actual_file.is_dir():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot preview directory: {path}",
         )
 
     # Get file info
-    file_stat = file_path.stat()
-    mime_type = get_mime_type(file_path)
-    is_binary = not is_viewable_file(file_path)
+    file_stat = actual_file.stat()
+    mime_type = get_mime_type(actual_file)
+    is_binary = not is_viewable_file(actual_file)
 
     response = FileContentResponse(
         path=path,
-        name=file_path.name,
+        name=actual_file.name,
         mime_type=mime_type,
         size=file_stat.st_size,
         is_binary=is_binary,
@@ -627,14 +748,14 @@ async def get_file_content(
         try:
             if file_stat.st_size > MAX_PREVIEW_SIZE:
                 # Read only first portion
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                with open(actual_file, 'r', encoding='utf-8', errors='replace') as f:
                     response.content = f.read(MAX_PREVIEW_SIZE)
                 response.is_truncated = True
             else:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                with open(actual_file, 'r', encoding='utf-8', errors='replace') as f:
                     response.content = f.read()
         except Exception as e:
-            logger.warning(f"Failed to read file {file_path}: {e}")
+            logger.warning(f"Failed to read file {actual_file}: {e}")
             response.is_binary = True
             response.error = "Failed to read file content"
 
@@ -692,22 +813,27 @@ async def download_file(
     # Validate path with security checks
     file_path = validate_path_security(path, workspace_root)
 
-    if not file_path.exists():
+    # Resolve external mount paths to actual filesystem paths
+    actual_file, is_external = resolve_file_path_for_external_mount(
+        workspace_root, path
+    )
+
+    if not actual_file.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File not found: {path}",
         )
 
-    if file_path.is_dir():
+    if actual_file.is_dir():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot download directory: {path}",
         )
 
     return FileResponse(
-        path=file_path,
-        filename=file_path.name,
-        media_type=get_mime_type(file_path),
+        path=actual_file,
+        filename=actual_file.name,
+        media_type=get_mime_type(actual_file),
     )
 
 
@@ -946,6 +1072,28 @@ async def upload_files(
             if total_size + file_size > MAX_TOTAL_UPLOAD_SIZE:
                 validate_total_upload_size(total_size + file_size)  # Will raise HTTPException
 
+            # Scan text files for sensitive data before writing
+            secrets_redacted = 0
+            ext = Path(safe_filename).suffix.lower()
+            is_text_file = ext in TEXT_EXTENSIONS
+
+            if is_scanner_enabled() and is_text_file:
+                try:
+                    # Decode as text for scanning
+                    text_content = content.decode("utf-8", errors="replace")
+                    scan_result = scan_and_redact(text_content)
+                    if scan_result.has_secrets:
+                        # Re-encode the redacted content
+                        content = scan_result.redacted_text.encode("utf-8")
+                        file_size = len(content)
+                        secrets_redacted = scan_result.secret_count
+                        logger.warning(
+                            f"Redacted {secrets_redacted} secrets from uploaded file "
+                            f"{safe_filename} in session {session_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to scan uploaded file {safe_filename}: {e}")
+
             # Write file atomically (write to temp, then rename)
             temp_path = target_path.with_suffix(target_path.suffix + ".tmp")
             try:
@@ -970,10 +1118,10 @@ async def upload_files(
                 mime_type=get_mime_type(target_path),
             ))
 
-            logger.info(
-                f"Uploaded file {relative_path} ({file_size} bytes) "
-                f"to session {session_id} by user {user_id}"
-            )
+            log_msg = f"Uploaded file {relative_path} ({file_size} bytes) to session {session_id} by user {user_id}"
+            if secrets_redacted > 0:
+                log_msg += f" ({secrets_redacted} secrets redacted)"
+            logger.info(log_msg)
 
         except HTTPException:
             raise
@@ -1035,13 +1183,30 @@ async def delete_file(
     # Validate path with security checks
     file_path = validate_path_security(path, workspace_root)
 
-    if not file_path.exists():
+    # Check if this is an external mount path
+    is_external_path = path.startswith("external/") or path == "external"
+
+    # Prevent deletion of files in read-only external mounts
+    if is_external_path:
+        is_external, is_readonly, mount_type = get_mount_info(path)
+        if is_readonly:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete files in read-only external mounts",
+            )
+
+    # Resolve external mount paths to actual filesystem paths
+    actual_file, _ = resolve_file_path_for_external_mount(
+        workspace_root, path
+    )
+
+    if not actual_file.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File not found: {path}",
         )
 
-    if file_path.is_dir():
+    if actual_file.is_dir():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete directories. Delete files individually.",
@@ -1049,14 +1214,14 @@ async def delete_file(
 
     # Additional safety check: don't delete symlinks that point outside workspace
     # (validate_path_security already checks this, but defense in depth)
-    if file_path.is_symlink():
+    if actual_file.is_symlink():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete symlinks for security reasons",
         )
 
     try:
-        file_path.unlink()
+        actual_file.unlink()
         logger.info(f"Deleted file {path} from session {session_id} by user {user_id}")
         return {"status": "deleted", "path": path}
     except Exception as e:
@@ -1065,3 +1230,115 @@ async def delete_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete file: {str(e)}",
         )
+
+
+# =============================================================================
+# GET /files/{session_id}/mounts - Get mount configuration
+# =============================================================================
+
+class MountInfo(BaseModel):
+    """Information about an external mount."""
+    name: str
+    path: str  # Relative path from workspace root (e.g., "./external/ro/downloads")
+    description: Optional[str] = None
+
+
+class MountsResponse(BaseModel):
+    """Response for mount configuration endpoint."""
+    ro: list[MountInfo]  # Read-only mounts
+    rw: list[MountInfo]  # Read-write mounts
+    persistent: bool  # Whether persistent storage is available
+
+
+@router.get("/{session_id}/mounts", response_model=MountsResponse)
+async def get_mounts(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> MountsResponse:
+    """
+    Get external mount configuration for a session.
+
+    Returns information about available external mounts:
+    - ro: Read-only mounts (agent cannot write)
+    - rw: Read-write mounts (agent can modify)
+    - persistent: Whether persistent storage is available
+    """
+    import yaml
+
+    # Validate and get session
+    try:
+        session = await session_service.get_session(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+    except InvalidSessionIdError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session ID format",
+        )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+
+    # Load mounts configuration
+    # TODO: Consider extracting to shared utility (duplicated in agent_core.py)
+    ro_mounts: list[MountInfo] = []
+    rw_mounts: list[MountInfo] = []
+    has_persistent = False
+
+    # Load from mounts manifest (auto-generated by deploy.sh)
+    mounts_file = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    if mounts_file.exists():
+        try:
+            with open(mounts_file, "r", encoding="utf-8") as f:
+                manifest = yaml.safe_load(f) or {}
+
+            mounts_data = manifest.get("mounts", {})
+
+            # Read-only mounts
+            if isinstance(mounts_data.get("ro"), list):
+                for mount in mounts_data["ro"]:
+                    if isinstance(mount, dict) and mount.get("name"):
+                        ro_mounts.append(MountInfo(
+                            name=mount["name"],
+                            path=f"./external/ro/{mount['name']}",
+                            description=mount.get("description"),
+                        ))
+
+            # Read-write mounts
+            if isinstance(mounts_data.get("rw"), list):
+                for mount in mounts_data["rw"]:
+                    if isinstance(mount, dict) and mount.get("name"):
+                        rw_mounts.append(MountInfo(
+                            name=mount["name"],
+                            path=f"./external/rw/{mount['name']}",
+                            description=mount.get("description"),
+                        ))
+
+        except Exception as e:
+            logger.warning(f"Failed to load mounts config: {e}")
+
+    # Check for persistent storage
+    # Get username from session's user_id
+    from sqlalchemy import select
+    from ...db.models import User
+
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user:
+            persistent_dir = Path(f"/users/{user.username}/ag3ntum/persistent")
+            has_persistent = persistent_dir.exists()
+    except Exception as e:
+        logger.warning(f"Failed to check persistent storage: {e}")
+
+    return MountsResponse(
+        ro=ro_mounts,
+        rw=rw_mounts,
+        persistent=has_persistent,
+    )

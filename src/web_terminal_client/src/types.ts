@@ -18,7 +18,8 @@ export type SSEEventType =
   | 'subagent_message'
   | 'subagent_stop'
   | 'heartbeat'
-  | 'infrastructure_error';
+  | 'infrastructure_error'
+  | 'security_alert';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -127,6 +128,9 @@ export interface FileInfo {
   mime_type: string | null;
   is_hidden: boolean;
   is_viewable: boolean;
+  is_readonly: boolean;  // True if file/folder is in read-only area
+  is_external: boolean;  // True if file is in external mount
+  mount_type: 'ro' | 'rw' | 'persistent' | 'user-ro' | 'user-rw' | null;  // Type of external mount
   children?: FileInfo[] | null;
 }
 
@@ -176,4 +180,25 @@ export interface SkillInfo {
 
 export interface SkillsListResponse {
   skills: SkillInfo[];
+}
+
+// =============================================================================
+// Security Alert Types
+// =============================================================================
+
+export interface SecurityAlertFile {
+  path: string;
+  secrets_count: number;
+  redacted: boolean;
+}
+
+export interface SecurityAlertData {
+  session_id: string;
+  files_scanned: number;
+  files_with_secrets: number;
+  total_secrets: number;
+  secret_types: string[];
+  type_labels: string[];
+  message: string;
+  files: SecurityAlertFile[];
 }

@@ -1,0 +1,220 @@
+# Sensitive Data Scanner Configuration
+# Used by Ag3ntum to detect and redact sensitive information like API keys, tokens, passwords.
+#
+# This scanner is integrated at multiple points:
+# 1. File write operations (Ag3ntumWrite tool)
+# 2. File read operations (Ag3ntumRead tool)
+# 3. Database event persistence (event_service)
+# 4. Post-request session file scanning
+#
+# When sensitive data is detected:
+# - It is redacted with same-length placeholders (preserves formatting)
+# - A security alert is sent via SSE to the web terminal client
+# - The alert requires manual dismissal by the user
+
+enabled: true
+
+# Replacement format options:
+# - "asterisk": Replace with asterisks (same length)
+# - "redact_typed": Replace with [REDACTED:TYPE] (variable length)
+# - "hash": Replace with hash prefix (same length)
+replacement_format: "asterisk"
+
+# Detection patterns (uses detect-secrets library + custom patterns)
+detection:
+  # Enable detect-secrets library plugins
+  detect_secrets_plugins:
+    - AWSKeyDetector
+    - AzureStorageKeyDetector
+    - GitHubTokenDetector
+    - GitLabTokenDetector
+    - SlackDetector
+    - StripeDetector
+    - TwilioKeyDetector
+    - JwtTokenDetector
+    - PrivateKeyDetector
+    - BasicAuthDetector
+    - KeywordDetector
+    - DiscordBotTokenDetector
+    - MailchimpDetector
+    - NpmDetector
+    - SendGridDetector
+    - SquareOAuthDetector
+
+  # High entropy string detection thresholds
+  entropy:
+    base64_limit: 4.5
+    hex_limit: 3.0
+
+  # Custom regex patterns (in addition to detect-secrets)
+  # Note: Use double quotes for patterns with special characters
+  custom_patterns:
+    # API keys and tokens
+    generic_api_key:
+      - "(?i)(?:api[_-]?key|apikey)[\"\\s:=]+[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+      - "(?i)(?:access[_-]?token|accesstoken)[\"\\s:=]+[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+      - "(?i)(?:auth[_-]?token|authtoken)[\"\\s:=]+[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+      - "(?i)(?:secret[_-]?key|secretkey)[\"\\s:=]+[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+
+    bearer_token:
+      - "(?i)bearer\\s+([a-zA-Z0-9_\\-\\.]{20,})"
+
+    password:
+      - "(?i)(?:password|passwd|pwd)[\"\\s:=]+[\"']?([^\\s\"']{8,})[\"']?"
+
+    connection_string:
+      - "(?i)(?:mongodb|postgres|mysql|redis|amqp):\\/\\/[^\\s]+"
+      - "(?i)Server=[^;]+;.*(?:Password|Pwd)=[^;]+"
+
+    private_key:
+      - "-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+
+    # Anthropic/OpenAI API keys
+    anthropic_key:
+      - "sk-ant-[a-zA-Z0-9_-]{40,}"
+
+    openai_key:
+      - "sk-[a-zA-Z0-9]{32,}"
+
+    # Cloud provider keys
+    gcp_key:
+      - "AIza[0-9A-Za-z_-]{35}"
+
+    # Webhook URLs with secrets
+    webhook_secret:
+      - "https://hooks\\.[^\\s]+[?&](?:token|key|secret)=[a-zA-Z0-9_-]+"
+
+# File scanning configuration (post-request session scan)
+session_scan:
+  enabled: true
+
+  # Maximum depth for directory traversal (from session workspace root)
+  max_depth: 5
+
+  # Maximum number of files to scan per session
+  max_files: 100
+
+  # Maximum file size to scan (bytes) - skip larger files
+  max_file_size_bytes: 1048576  # 1MB
+
+  # File extensions to scan (leave empty to scan all text files)
+  scan_extensions:
+    - .txt
+    - .json
+    - .jsonl
+    - .yaml
+    - .yml
+    - .env
+    - .config
+    - .conf
+    - .ini
+    - .properties
+    - .xml
+    - .py
+    - .js
+    - .ts
+    - .sh
+    - .bash
+    - .log
+    - .md
+    - .csv
+
+  # Patterns to skip (glob patterns)
+  skip_patterns:
+    - "*.pyc"
+    - "*.pyo"
+    - "__pycache__/*"
+    - ".git/*"
+    - "node_modules/*"
+    - "*.bin"
+    - "*.exe"
+    - "*.dll"
+    - "*.so"
+    - "*.dylib"
+    - "*.whl"
+    - "*.egg"
+    - "*.tar"
+    - "*.gz"
+    - "*.zip"
+    - "*.png"
+    - "*.jpg"
+    - "*.jpeg"
+    - "*.gif"
+    - "*.ico"
+    - "*.pdf"
+    - "*.doc"
+    - "*.docx"
+
+  # Paths that are read-only (mounted r/o) - will not be scanned
+  # These are relative to /workspace (agent's view)
+  readonly_mount_paths:
+    - "external/ro"
+
+  # Only scan files modified after this many seconds before request completion
+  # This ensures we only scan recently created/modified files
+  recent_files_window_seconds: 3600  # 1 hour
+
+# Alert configuration
+alerts:
+  # Send SSE alert to web terminal client
+  sse_enabled: true
+
+  # Log alerts to application log
+  log_enabled: true
+
+  # Alert message templates
+  messages:
+    single_file: "Sensitive data detected in {filename}: {types}. Content has been redacted."
+    multiple_files: "Sensitive data detected in {count} files: {types}. Content has been redacted."
+
+  # Categories to show in alerts (human-readable names)
+  type_labels:
+    AWSKeyDetector: "AWS Key"
+    AzureStorageKeyDetector: "Azure Key"
+    GitHubTokenDetector: "GitHub Token"
+    GitLabTokenDetector: "GitLab Token"
+    SlackDetector: "Slack Token"
+    StripeDetector: "Stripe Key"
+    TwilioKeyDetector: "Twilio Key"
+    JwtTokenDetector: "JWT Token"
+    PrivateKeyDetector: "Private Key"
+    BasicAuthDetector: "Basic Auth"
+    KeywordDetector: "Password/Secret"
+    generic_api_key: "API Key"
+    bearer_token: "Bearer Token"
+    password: "Password"
+    connection_string: "Connection String"
+    private_key: "Private Key"
+    anthropic_key: "Anthropic API Key"
+    openai_key: "OpenAI API Key"
+    gcp_key: "GCP Key"
+    webhook_secret: "Webhook Secret"
+    Base64HighEntropyString: "High-Entropy String"
+    HexHighEntropyString: "High-Entropy Hex"
+
+# Allowlist - patterns/content that should NOT be flagged
+allowlist:
+  # File paths to exclude from scanning (glob patterns relative to workspace)
+  excluded_paths:
+    - "test_*"
+    - "*_test.py"
+    - "*_test.js"
+    - "*.example"
+    - "*.sample"
+    - ".env.example"
+    - ".env.sample"
+
+  # Specific strings that are known false positives
+  false_positive_strings:
+    - "example@example.com"
+    - "test@test.com"
+    - "password123"  # Common test password
+    - "AKIAIOSFODNN7EXAMPLE"  # AWS documentation example
+    - "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  # AWS documentation example
+
+  # Regex patterns for false positives
+  false_positive_patterns:
+    - '(?i)example[_-]?(?:api[_-]?key|token|secret)'
+    - '(?i)test[_-]?(?:api[_-]?key|token|secret)'
+    - '(?i)dummy[_-]?(?:api[_-]?key|token|secret)'
+    - '(?i)placeholder[_-]?(?:api[_-]?key|token|secret)'

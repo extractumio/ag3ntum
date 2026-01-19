@@ -8,6 +8,7 @@ Implements robustness features:
 - Proper error handling with logging
 - Event sequence validation
 - Timeout on database operations
+- Sensitive data scanning before persistence
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from ..db.database import AsyncSessionLocal
 from ..services.session_service import session_service
 from ..db.models import Event
+from ..security import scan_and_redact, is_scanner_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +204,19 @@ async def _persist_event(
             "error": "Failed to serialize payload",
             "original_type": event_type,
         })
+
+    # Scan serialized payload for sensitive data before persisting
+    if is_scanner_enabled():
+        try:
+            scan_result = scan_and_redact(data_json)
+            if scan_result.has_secrets:
+                data_json = scan_result.redacted_text
+                logger.warning(
+                    f"Redacted {scan_result.secret_count} secrets from {event_type} "
+                    f"event in session {session_id}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to scan event payload: {e}")
 
     async with AsyncSessionLocal() as db:
         db_event = Event(

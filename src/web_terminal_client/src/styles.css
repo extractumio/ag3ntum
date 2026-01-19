@@ -871,7 +871,7 @@ body,
 .session-new-button {
   background: transparent;
   border: 1px solid var(--color-border);
-  color: var(--color-text-muted);
+  color: var(--color-accent-primary);
   font-family: inherit;
   font-size: var(--font-sm);
   font-weight: bold;
@@ -1571,7 +1571,7 @@ body,
   background: var(--color-bg-code);
   padding: var(--spacing-sm) var(--spacing-lg);
   color: var(--color-accent-tertiary);
-  font-size: var(--font-md);
+  font-size: var(--font-sm);
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -4485,6 +4485,30 @@ resume-context {
   letter-spacing: 0.3px;
 }
 
+/* Read-only indicator - gray dot next to file icon */
+.file-icon-with-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.readonly-indicator {
+  color: var(--color-text-muted);
+  font-size: 6px;
+  line-height: 1;
+  opacity: 0.7;
+  cursor: help;
+}
+
+/* Read-only file/folder styling - 30% transparency */
+.file-tree-row.file-readonly {
+  opacity: 0.7;
+}
+
+.file-tree-row.file-readonly:hover {
+  opacity: 0.85;
+}
+
 /* File Delete Modal */
 .file-delete-overlay {
   position: fixed;
@@ -5548,3 +5572,139 @@ resume-context {
   --color-focus-ring: rgba(8, 145, 178, 0.2);
 }
 */
+
+/* =============================================================================
+ * SECURITY ALERT TOAST
+ * Red alert popup requiring manual dismissal. Used to notify users when
+ * sensitive data (API keys, tokens, passwords) was detected and redacted.
+ * ============================================================================= */
+
+.security-alert-toast {
+  position: fixed;
+  top: var(--spacing-3xl);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-xl) var(--spacing-2xl);
+  background: var(--color-bg-highest);
+  border: 2px solid var(--color-error);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg), 0 0 20px rgba(220, 38, 38, 0.3);
+  z-index: var(--z-tooltip);
+  animation: security-alert-pulse 0.5s ease-out;
+  max-width: 480px;
+  min-width: 360px;
+}
+
+@keyframes security-alert-pulse {
+  0% {
+    transform: translateX(-50%) scale(0.95);
+    opacity: 0;
+  }
+  50% {
+    transform: translateX(-50%) scale(1.02);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+    opacity: 1;
+  }
+}
+
+.security-alert-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.security-alert-icon {
+  font-size: var(--font-2xl);
+  color: var(--color-error);
+  flex-shrink: 0;
+}
+
+.security-alert-title {
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--color-error);
+  margin: 0;
+}
+
+.security-alert-message {
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  line-height: 1.5;
+}
+
+.security-alert-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: rgba(220, 38, 38, 0.05);
+  border-radius: var(--radius-md);
+  font-size: var(--font-sm);
+}
+
+.security-alert-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.security-alert-detail-label {
+  color: var(--color-text-muted);
+}
+
+.security-alert-detail-value {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.security-alert-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+}
+
+.security-alert-type-badge {
+  display: inline-block;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  font-weight: 500;
+}
+
+.security-alert-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.security-alert-dismiss {
+  padding: var(--spacing-sm) var(--spacing-xl);
+  background: var(--color-error);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.security-alert-dismiss:hover {
+  background: #b91c1c;
+}
+
+.security-alert-dismiss:focus {
+  outline: 2px solid var(--color-error);
+  outline-offset: 2px;
+}

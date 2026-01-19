@@ -2,13 +2,15 @@
 Combined Ag3ntum tools MCP server.
 
 Creates a single MCP server named 'ag3ntum' containing ALL Ag3ntum tools.
-This ensures consistent tool naming: mcp__ag3ntum__Read, mcp__ag3ntum__Write, 
+This ensures consistent tool naming: mcp__ag3ntum__Read, mcp__ag3ntum__Write,
 mcp__ag3ntum__Bash, etc.
 """
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
 from claude_agent_sdk import create_sdk_mcp_server
 
 from .ag3ntum_read import create_read_tool
@@ -20,10 +22,79 @@ from .ag3ntum_glob import create_glob_tool
 from .ag3ntum_grep import create_grep_tool
 from .ag3ntum_ls import create_ls_tool
 from .ag3ntum_webfetch import create_webfetch_tool
-from .ag3ntum_bash import create_bash_tool
+from .ag3ntum_bash import (
+    create_bash_tool,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_KILL_AFTER_SECONDS,
+    DEFAULT_PREVIEW_MODE,
+    DEFAULT_PREVIEW_LINES,
+    MAX_PREVIEW_LINES,
+    OUTPUT_DIR,
+)
 from .ag3ntum_ask import create_ask_user_question_tool
 
 logger = logging.getLogger(__name__)
+
+# Default config path relative to this file's location
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "security" / "tools-security.yaml"
+
+
+@dataclass
+class BashToolConfig:
+    """Configuration for Bash tool loaded from tools-security.yaml."""
+
+    timeout: int = DEFAULT_TIMEOUT_SECONDS  # 300 seconds (5 minutes)
+    kill_after: int = DEFAULT_KILL_AFTER_SECONDS  # 10 seconds grace period
+    preview_mode: str = DEFAULT_PREVIEW_MODE  # "tail"
+    preview_lines: int = DEFAULT_PREVIEW_LINES  # 20
+    max_preview_lines: int = MAX_PREVIEW_LINES  # 100
+    output_dir: str = OUTPUT_DIR  # ".tmp/cmd"
+
+
+def load_bash_config(config_path: Path | None = None) -> BashToolConfig:
+    """
+    Load Bash tool configuration from tools-security.yaml.
+
+    Args:
+        config_path: Path to tools-security.yaml. If None, uses default.
+
+    Returns:
+        BashToolConfig with values from YAML or defaults.
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+
+    if not path.exists():
+        logger.warning(f"Bash config file not found: {path}, using defaults")
+        return BashToolConfig()
+
+    try:
+        with open(path) as f:
+            yaml_data = yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.error(f"Failed to load bash config from {path}: {e}")
+        return BashToolConfig()
+
+    # Navigate to tools.bash section
+    bash_config = yaml_data.get("tools", {}).get("bash", {})
+
+    if not bash_config:
+        logger.info("No bash config in YAML, using defaults")
+        return BashToolConfig()
+
+    config = BashToolConfig(
+        timeout=bash_config.get("timeout", DEFAULT_TIMEOUT_SECONDS),
+        kill_after=bash_config.get("kill_after", DEFAULT_KILL_AFTER_SECONDS),
+        preview_mode=bash_config.get("preview_mode", DEFAULT_PREVIEW_MODE),
+        preview_lines=bash_config.get("preview_lines", DEFAULT_PREVIEW_LINES),
+        max_preview_lines=bash_config.get("max_preview_lines", MAX_PREVIEW_LINES),
+        output_dir=bash_config.get("output_dir", OUTPUT_DIR),
+    )
+
+    logger.info(
+        f"Loaded Bash config from {path}: timeout={config.timeout}s, "
+        f"kill_after={config.kill_after}s, preview_mode={config.preview_mode}"
+    )
+    return config
 
 
 def create_ag3ntum_tools_mcp_server(
@@ -71,14 +142,23 @@ def create_ag3ntum_tools_mcp_server(
         if workspace_path is None:
             logger.warning("Cannot create Bash tool: workspace_path is required")
         else:
+            # Load bash configuration from tools-security.yaml
+            bash_config = load_bash_config()
             bash_tool = create_bash_tool(
                 workspace_path=workspace_path,
-                timeout_seconds=300,
-                default_preview_lines=30,
+                timeout_seconds=bash_config.timeout,
+                kill_after_seconds=bash_config.kill_after,
+                default_preview_mode=bash_config.preview_mode,  # type: ignore[arg-type]
+                default_preview_lines=bash_config.preview_lines,
+                max_preview_lines=bash_config.max_preview_lines,
+                output_dir=bash_config.output_dir,
                 sandbox_executor=sandbox_executor,
             )
             tools.append(bash_tool)
-            logger.debug("Added Bash tool to unified MCP server")
+            logger.debug(
+                f"Added Bash tool to unified MCP server (timeout={bash_config.timeout}s, "
+                f"kill_after={bash_config.kill_after}s)"
+            )
     
     # Add all file tools bound to this session
     # Note: WebFetch doesn't need session_id as it doesn't access filesystem

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { login as apiLogin, logout as apiLogout, getCurrentUser } from './api';
+import { login as apiLogin, logout as apiLogout, getCurrentUser, invalidateAllCaches } from './api';
 import { loadConfig } from './config';
 
 interface User {
@@ -85,6 +85,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await apiLogout(apiBaseUrl, token);
       }
     } finally {
+      // Clear all API caches on logout
+      invalidateAllCaches();
       setUser(null);
       setToken(null);
       localStorage.removeItem('auth_token');

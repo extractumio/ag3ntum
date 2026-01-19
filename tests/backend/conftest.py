@@ -451,13 +451,90 @@ def second_auth_headers(client, second_test_user) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest_asyncio.fixture
+async def test_admin_user(test_session_factory) -> dict:
+    """
+    Create a test admin user.
+
+    Returns credentials dict with admin role.
+    """
+    import secrets
+    import uuid
+
+    try:
+        import bcrypt
+        has_bcrypt = True
+    except ImportError:
+        has_bcrypt = False
+
+    # Generate unique email for each test
+    test_id = str(uuid.uuid4())[:8]
+    username = f"testadmin_{test_id}"
+    email = f"admin_{test_id}@example.com"
+    password = "adminpass123"
+
+    # Hash password
+    if has_bcrypt:
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    else:
+        import hashlib
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+    # Generate per-user JWT secret
+    jwt_secret = secrets.token_urlsafe(32)
+
+    # Create admin user directly in database
+    from src.db.models import User
+    user = User(
+        id=str(uuid.uuid4()),
+        username=username,
+        email=email,
+        password_hash=password_hash,
+        role="admin",  # Admin role
+        jwt_secret=jwt_secret,
+        linux_uid=None,
+        is_active=True,
+    )
+
+    async with test_session_factory() as session:
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        return {
+            "id": user.id,
+            "username": username,
+            "email": email,
+            "password": password,
+            "role": "admin",
+            "jwt_secret": user.jwt_secret,
+        }
+
+
+@pytest.fixture
+def admin_auth_headers(client, test_admin_user) -> dict:
+    """Get authentication headers for the admin test user."""
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": test_admin_user["email"], "password": test_admin_user["password"]},
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Admin auth failed: {response.status_code} - {response.text}")
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 # Cleanup fixture to run after all tests in the module
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_artifacts():
     """
     Clean up any leftover test artifacts after all tests complete.
-    
+
     This is a safety net in case individual cleanups fail.
+    Cleans up:
+    - Temp session directories
+    - Test user directories in /users/
+    - Test Linux users
     """
     yield
     # After all tests, clean up any temp directories that might remain
@@ -468,3 +545,51 @@ def cleanup_test_artifacts():
                 shutil.rmtree(item, ignore_errors=True)
             except Exception:
                 pass
+
+    # Clean up test user directories in /users/
+    # This handles users created by tests that use the real UserService
+    users_dir = Path("/users")
+    if users_dir.exists():
+        test_patterns = ["testuser_", "testuser2_", "e2e_user_"]
+        for pattern in test_patterns:
+            for user_dir in users_dir.glob(f"{pattern}*"):
+                if user_dir.is_dir():
+                    try:
+                        shutil.rmtree(user_dir, ignore_errors=True)
+                        print(f"Cleaned up test user directory: {user_dir.name}")
+                    except Exception:
+                        # Try with subprocess for permission issues
+                        import subprocess
+                        try:
+                            subprocess.run(
+                                ["sudo", "rm", "-rf", str(user_dir)],
+                                check=False,
+                                capture_output=True,
+                            )
+                            print(f"Cleaned up test user directory (sudo): {user_dir.name}")
+                        except Exception:
+                            pass
+
+        # Also try to delete corresponding Linux users
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["getent", "passwd"],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.splitlines():
+                username = line.split(":")[0]
+                for pattern in test_patterns:
+                    if username.startswith(pattern):
+                        try:
+                            subprocess.run(
+                                ["sudo", "userdel", username],
+                                check=False,
+                                capture_output=True,
+                            )
+                            print(f"Cleaned up Linux user: {username}")
+                        except Exception:
+                            pass
+        except Exception:
+            pass  # getent might not be available

@@ -519,3 +519,311 @@ class TestExecuteSandboxedCommand:
             call_kwargs = mock_exec.call_args.kwargs
             assert "preexec_fn" in call_kwargs
             assert call_kwargs["preexec_fn"] is not None
+
+
+class TestOptionalMounts:
+    """Test optional mount handling (skip missing mounts when optional=True)."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> Path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        return workspace
+
+    def test_optional_mount_skipped_when_missing(self, workspace: Path) -> None:
+        """Optional mount that doesn't exist is silently skipped."""
+        config = SandboxConfig(
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+                "persistent": SandboxMount(
+                    source="/nonexistent/persistent/path",
+                    target="/workspace/external/persistent",
+                    mode="rw",
+                    optional=True,
+                ),
+            },
+        )
+        executor = SandboxExecutor(config)
+
+        # Should NOT raise - optional mount should be skipped
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+
+        # Verify bwrap command was built successfully
+        assert cmd[0] == "bwrap"
+        assert "echo" in cmd
+        assert "hello" in cmd
+
+        # Verify the optional mount is NOT in the command
+        cmd_str = " ".join(cmd)
+        assert "/nonexistent/persistent/path" not in cmd_str
+
+    def test_required_mount_still_raises_when_missing(self, workspace: Path) -> None:
+        """Non-optional (required) mount that doesn't exist still raises error."""
+        config = SandboxConfig(
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+                "required_mount": SandboxMount(
+                    source="/nonexistent/required/path",
+                    target="/workspace/required",
+                    mode="ro",
+                    optional=False,  # Explicitly required
+                ),
+            },
+        )
+        executor = SandboxExecutor(config)
+
+        # SHOULD raise for required mount
+        with pytest.raises(SandboxMountError, match="does not exist"):
+            executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+
+    def test_optional_mount_included_when_exists(self, workspace: Path, tmp_path: Path) -> None:
+        """Optional mount that exists IS included in the command."""
+        persistent = tmp_path / "persistent"
+        persistent.mkdir()
+
+        config = SandboxConfig(
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+                "persistent": SandboxMount(
+                    source=str(persistent),
+                    target="/workspace/external/persistent",
+                    mode="rw",
+                    optional=True,
+                ),
+            },
+        )
+        executor = SandboxExecutor(config)
+
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+        cmd_str = " ".join(cmd)
+
+        # When the path exists, it SHOULD be included
+        assert str(persistent) in cmd_str
+        assert "/workspace/external/persistent" in cmd_str
+
+    def test_validate_mount_sources_excludes_optional_missing(
+        self, workspace: Path, tmp_path: Path
+    ) -> None:
+        """validate_mount_sources excludes optional mounts from missing list."""
+        real_path = tmp_path / "real"
+        real_path.mkdir()
+
+        config = SandboxConfig(
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+            dynamic_mounts=[
+                SandboxMount(
+                    source="/nonexistent/optional",
+                    target="/optional",
+                    mode="ro",
+                    optional=True,
+                ),
+                SandboxMount(
+                    source="/nonexistent/required",
+                    target="/required",
+                    mode="ro",
+                    optional=False,
+                ),
+            ],
+        )
+        executor = SandboxExecutor(config)
+
+        missing = executor.validate_mount_sources()
+
+        # Optional mount should NOT be in missing list
+        assert "/nonexistent/optional" not in missing
+        # Required mount SHOULD be in missing list
+        assert "/nonexistent/required" in missing
+
+
+class TestWorkspaceAndMountAccess:
+    """Test file access validation for workspace, RO/RW mounts, and persistent storage."""
+
+    @pytest.fixture
+    def mount_structure(self, tmp_path: Path) -> dict[str, Path]:
+        """Create realistic mount structure for testing."""
+        # Main workspace
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "project.py").write_text("# Main project file")
+        (workspace / "subdir").mkdir()
+        (workspace / "subdir" / "nested.txt").write_text("nested content")
+
+        # External mounts structure
+        external = workspace / "external"
+        external.mkdir()
+
+        # Read-only mount
+        ro_base = tmp_path / "mounts" / "ro"
+        ro_mount = ro_base / "docs"
+        ro_mount.mkdir(parents=True)
+        (ro_mount / "readme.md").write_text("# Documentation")
+        (ro_mount / "subdir").mkdir()
+        (ro_mount / "subdir" / "guide.txt").write_text("guide content")
+
+        # Symlink for ro mount inside workspace
+        (external / "ro").mkdir()
+        (external / "ro" / "docs").symlink_to(ro_mount)
+
+        # Read-write mount
+        rw_base = tmp_path / "mounts" / "rw"
+        rw_mount = rw_base / "projects"
+        rw_mount.mkdir(parents=True)
+        (rw_mount / "editable.py").write_text("# Editable file")
+
+        # Symlink for rw mount inside workspace
+        (external / "rw").mkdir()
+        (external / "rw" / "projects").symlink_to(rw_mount)
+
+        # Persistent storage
+        persistent = tmp_path / "users" / "testuser" / "ag3ntum" / "persistent"
+        persistent.mkdir(parents=True)
+        (persistent / "cache.json").write_text('{"cached": true}')
+
+        # Symlink for persistent inside workspace
+        (external / "persistent").symlink_to(persistent)
+
+        return {
+            "workspace": workspace,
+            "ro_base": ro_base,
+            "rw_base": rw_base,
+            "persistent": persistent,
+            "external": external,
+            "root": tmp_path,
+        }
+
+    @pytest.fixture
+    def validator(self, mount_structure: dict[str, Path]):
+        """Create path validator with mount configuration."""
+        from src.core.path_validator import Ag3ntumPathValidator, PathValidatorConfig
+
+        config = PathValidatorConfig(
+            workspace_path=mount_structure["workspace"],
+            external_ro_base=mount_structure["ro_base"],
+            external_rw_base=mount_structure["rw_base"],
+            persistent_path=mount_structure["persistent"],
+        )
+        return Ag3ntumPathValidator(config)
+
+    def test_read_workspace_file_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read files in main workspace."""
+        result = validator.validate_path("/workspace/project.py", "read")
+        assert result.normalized.exists()
+        assert result.is_readonly is False  # Workspace is writable
+
+    def test_write_workspace_file_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can write files in main workspace."""
+        result = validator.validate_path("/workspace/new_file.py", "write")
+        assert result.is_readonly is False
+
+    def test_read_nested_workspace_file_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read files in nested workspace directories."""
+        result = validator.validate_path("/workspace/subdir/nested.txt", "read")
+        assert result.normalized.exists()
+
+    def test_read_ro_mount_root_file_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read files at root of RO mount."""
+        result = validator.validate_path(
+            "/workspace/external/ro/docs/readme.md", "read"
+        )
+        assert result.normalized.exists()
+        assert result.is_readonly is True
+
+    def test_read_ro_mount_nested_file_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read files in nested directories of RO mount."""
+        result = validator.validate_path(
+            "/workspace/external/ro/docs/subdir/guide.txt", "read"
+        )
+        assert result.normalized.exists()
+        assert result.is_readonly is True
+
+    def test_write_ro_mount_blocked(self, validator) -> None:
+        """Agent cannot write to RO mount."""
+        from src.core.path_validator import PathValidationError
+
+        with pytest.raises(PathValidationError) as exc_info:
+            validator.validate_path(
+                "/workspace/external/ro/docs/new_file.txt", "write"
+            )
+        assert "read-only" in str(exc_info.value).lower()
+
+    def test_read_rw_mount_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read files in RW mount."""
+        result = validator.validate_path(
+            "/workspace/external/rw/projects/editable.py", "read"
+        )
+        assert result.normalized.exists()
+        assert result.is_readonly is False
+
+    def test_write_rw_mount_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can write files in RW mount."""
+        result = validator.validate_path(
+            "/workspace/external/rw/projects/new_file.py", "write"
+        )
+        assert result.is_readonly is False
+
+    def test_read_persistent_storage_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can read from persistent storage."""
+        result = validator.validate_path(
+            "/workspace/external/persistent/cache.json", "read"
+        )
+        assert result.normalized.exists()
+        assert result.is_readonly is False
+
+    def test_write_persistent_storage_allowed(
+        self, validator, mount_structure: dict[str, Path]
+    ) -> None:
+        """Agent can write to persistent storage."""
+        result = validator.validate_path(
+            "/workspace/external/persistent/new_cache.json", "write"
+        )
+        assert result.is_readonly is False
+
+    def test_path_traversal_outside_workspace_blocked(self, validator) -> None:
+        """Path traversal outside workspace is blocked."""
+        from src.core.path_validator import PathValidationError
+
+        with pytest.raises(PathValidationError):
+            validator.validate_path("/workspace/../etc/passwd", "read")
+
+    def test_path_traversal_inside_ro_mount_blocked(self, validator) -> None:
+        """Path traversal from RO mount to escape is blocked."""
+        from src.core.path_validator import PathValidationError
+
+        with pytest.raises(PathValidationError):
+            validator.validate_path(
+                "/workspace/external/ro/docs/../../../etc/passwd", "read"
+            )

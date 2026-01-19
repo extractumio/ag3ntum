@@ -1,0 +1,75 @@
+{# Module: Mounts - External storage and persistent directories #}
+{% if external_mounts and (external_mounts.ro or external_mounts.rw or external_mounts.persistent or external_mounts.user_ro or external_mounts.user_rw) %}
+
+# External Storage
+
+The following external folders are available in your workspace:
+
+{% if external_mounts.ro %}
+## Read-Only Mounts (`./external/ro/`)
+
+These folders are mounted read-only. You can read files but **cannot create, modify, or delete** them.
+
+{% for mount in external_mounts.ro %}
+- `./external/ro/{{ mount.name }}/` {% if mount.description %}- {{ mount.description }}{% endif %}
+
+{% endfor %}
+{% endif %}
+
+{% if external_mounts.rw %}
+## Read-Write Mounts (`./external/rw/`)
+
+These folders allow both reading and writing. Files you create or modify here will be visible to the host system.
+
+{% for mount in external_mounts.rw %}
+- `./external/rw/{{ mount.name }}/` {% if mount.description %}- {{ mount.description }}{% endif %}
+
+{% endfor %}
+{% endif %}
+
+{% if external_mounts.persistent %}
+## Persistent Storage (`./external/persistent/`)
+
+This folder persists across sessions. Files you save here will be available in future sessions.
+
+**IMPORTANT:** When the user asks to save something "permanently", "persistently", "across sessions", or "for later use", **always save to `./external/persistent/`**.
+
+**Use for:**
+- Files the user explicitly wants to keep permanently
+- Cached data you want to reuse between sessions
+- Output files to share across multiple sessions
+- Configuration or state that should survive session cleanup
+
+{% endif %}
+
+{% if external_mounts.user_ro %}
+## User-Specific Read-Only Mounts (`./external/user-ro/`)
+
+These folders are mounted specifically for your user account, read-only:
+
+{% for mount in external_mounts.user_ro %}
+- `./external/user-ro/{{ mount.name }}/` {% if mount.description %}- {{ mount.description }}{% endif %}
+
+{% endfor %}
+{% endif %}
+
+{% if external_mounts.user_rw %}
+## User-Specific Read-Write Mounts (`./external/user-rw/`)
+
+These folders are mounted specifically for your user account, read-write:
+
+{% for mount in external_mounts.user_rw %}
+- `./external/user-rw/{{ mount.name }}/` {% if mount.description %}- {{ mount.description }}{% endif %}
+
+{% endfor %}
+{% endif %}
+
+## Important Notes
+
+1. **Read-only access**: You cannot write to `./external/ro/` or `./external/user-ro/` paths. Attempts will fail with "read-only external mount" error.
+2. **Relative paths**: Access mounts using relative paths like `./external/ro/downloads/file.txt`.
+3. **File changes**: Changes to writable mounts and `./external/persistent/` are immediately visible to the host system.
+
+{% endif %}
+
+IMPORTANT: When user provides fully-qualified path to a LOCAL file or folder, check if it's available via `mcp__agentum__LS` tool. 

@@ -52,6 +52,69 @@ async def get_current_user_id(
     return user_id
 
 
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dependency that extracts, validates JWT token and returns the full User object.
+
+    Returns the User object from the database.
+
+    Raises:
+        HTTPException: 401 if token is invalid/expired, 403 if user environment misconfigured.
+    """
+    token = credentials.credentials
+
+    try:
+        user_id = await auth_service.validate_token(token, db)
+    except UserEnvironmentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await auth_service.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+
+
+async def require_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dependency that requires admin role.
+
+    Returns the User object if user is an admin.
+
+    Raises:
+        HTTPException: 401 if not authenticated, 403 if not admin.
+    """
+    user = await get_current_user(credentials, db)
+
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+    return user
+
+
 async def get_current_user_id_from_query_or_header(
     token: Optional[str] = Query(None, description="JWT token for authentication"),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme_optional),

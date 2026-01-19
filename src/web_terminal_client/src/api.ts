@@ -335,3 +335,52 @@ export async function getSkills(
 ): Promise<SkillsListResponse> {
   return apiRequest<SkillsListResponse>(baseUrl, '/api/v1/skills', {}, token);
 }
+
+// =============================================================================
+// Cached API Functions
+// =============================================================================
+
+import { apiCache } from './apiCache';
+
+/**
+ * Get sessions with caching (TTL: 1 minute, stale-while-revalidate).
+ * Use invalidateSessionsCache() when you know sessions have changed.
+ */
+export async function listSessionsCached(
+  baseUrl: string,
+  token: string
+): Promise<SessionListResponse> {
+  return apiCache.get('sessions', () => listSessions(baseUrl, token));
+}
+
+/**
+ * Invalidate the sessions cache (call after creating, updating, or completing sessions).
+ */
+export function invalidateSessionsCache(): void {
+  apiCache.invalidate('sessions');
+}
+
+/**
+ * Get skills with caching (TTL: 5 minutes).
+ * Skills rarely change during a session.
+ */
+export async function getSkillsCached(
+  baseUrl: string,
+  token: string
+): Promise<SkillsListResponse> {
+  return apiCache.get('skills', () => getSkills(baseUrl, token));
+}
+
+/**
+ * Invalidate the skills cache (call if skills are added/removed).
+ */
+export function invalidateSkillsCache(): void {
+  apiCache.invalidate('skills');
+}
+
+/**
+ * Invalidate all API caches (call on logout or user change).
+ */
+export function invalidateAllCaches(): void {
+  apiCache.invalidateAll();
+}

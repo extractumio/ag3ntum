@@ -4,32 +4,43 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
-# Arrays for mount options
+# Arrays for mount options (format: "path:name")
 MOUNTS_RW=()
 MOUNTS_RO=()
+MOUNTS_USER_RW=()
+MOUNTS_USER_RO=()
+
+# Track used mount names to detect duplicates (space-separated string for Bash 3 compat)
+USED_MOUNT_NAMES=""
 
 # Configuration
 PROJECT_NAME="project"  # docker-compose project name
 IMAGE_PREFIX="ag3ntum"  # Image name prefix
+
+# Reserved mount names that cannot be used
+RESERVED_NAMES=("persistent" "ro" "rw" "external")
 
 function show_usage() {
   cat <<EOF
 Usage: ./deploy.sh <command> [OPTIONS]
 
 Commands:
-  build        Build and deploy the containers
-  cleanup      Stop containers and remove images (full cleanup)
-  restart      Restart containers to reload code (preserves data)
-  rebuild      Full cleanup + build (equivalent to: cleanup && build)
-  test         Run tests inside the Docker container
-  shell        Open a shell inside the API container
-  create-user  Create a new user account
+  build              Build and deploy the containers
+  cleanup            Stop containers and remove images (full cleanup)
+  restart            Restart containers to reload code (preserves data)
+  rebuild            Full cleanup + build (equivalent to: cleanup && build)
+  test               Run tests inside the Docker container
+  shell              Open a shell inside the API container
+  create-user        Create a new user account
+  cleanup-test-users Remove test users created during testing
 
 Options:
-  --mount-rw=PATH    Mount host PATH as read-write in container (can be repeated)
-  --mount-ro=PATH    Mount host PATH as read-only in container (can be repeated)
-  --no-cache         Force rebuild without Docker cache (for build/rebuild)
-  --help             Show this help message
+  --mount-rw=PATH:NAME  Mount host PATH as read-write (accessible at ./external/rw/NAME)
+  --mount-rw=PATH       Mount host PATH as read-write (name defaults to basename)
+  --mount-ro=PATH:NAME  Mount host PATH as read-only (accessible at ./external/ro/NAME)
+  --mount-ro=PATH       Mount host PATH as read-only (name defaults to basename)
+  --no-cache            Force rebuild without Docker cache (for build/rebuild)
+  --help                Show this help message
 
 Test Options (for 'test' command):
   (no args)               Run ALL tests (backend + security + E2E + UI)
@@ -39,10 +50,44 @@ Test Options (for 'test' command):
   --subset <names>        Run specific backend tests by name (comma-separated)
                           Examples: "auth", "sessions,streaming", "ask_user_question"
 
-Examples:
+External Mount Configuration:
+  Mounts can be configured via:
+  1. CLI arguments (--mount-ro, --mount-rw) - highest priority
+  2. YAML config file (config/external-mounts.yaml) - for persistent config
+
+  To use YAML config:
+    cp config/external-mounts.yaml.example config/external-mounts.yaml
+    # Edit the file with your mounts
+    ./deploy.sh build
+
+External Mount Examples (CLI):
+  # Mount Downloads folder as read-only, accessible at ./external/ro/downloads/
+  ./deploy.sh build --mount-ro=/Users/greg/Downloads:downloads
+
+  # Mount projects folder as read-write, accessible at ./external/rw/projects/
+  ./deploy.sh build --mount-rw=/home/user/projects:projects
+
+  # Multiple mounts with custom names
+  ./deploy.sh build \\
+    --mount-ro=/data/datasets:ml-data \\
+    --mount-rw=/home/user/code:workspace
+
+  # Auto-named mounts (uses basename of path)
+  ./deploy.sh build --mount-ro=/Users/greg/Downloads  # -> ./external/ro/Downloads/
+
+Mount Structure in Agent Sessions:
+  /workspace/
+  ├── external/
+  │   ├── ro/           # Read-only mounts (agent cannot write)
+  │   │   └── {name}/   # Your mounted folders
+  │   ├── rw/           # Read-write mounts (agent can modify)
+  │   │   └── {name}/   # Your mounted folders
+  │   └── persistent/   # Per-user storage (survives across sessions)
+  └── (session files)
+
+General Examples:
   ./deploy.sh build
   ./deploy.sh build --no-cache
-  ./deploy.sh build --mount-rw=/home/user/projects --mount-ro=/data/reference
   ./deploy.sh cleanup
   ./deploy.sh restart
   ./deploy.sh rebuild --no-cache
@@ -62,13 +107,154 @@ CLI Hints:
 EOF
 }
 
+# Validate and process a mount specification
+# Usage: validate_mount "path" "name" "mode"
+# Returns: validated "real_path:safe_name" or exits on error
+function validate_mount() {
+  local path="$1"
+  local name="$2"
+  local mode="$3"  # "ro" or "rw"
+
+  # Check path exists
+  if [[ ! -e "$path" ]]; then
+    echo "ERROR: Mount path does not exist: $path" >&2
+    exit 1
+  fi
+
+  # Resolve symlinks and get real path
+  local real_path
+  real_path="$(cd "$path" 2>/dev/null && pwd)" || {
+    # If cd fails, try realpath (for files)
+    real_path="$(realpath "$path" 2>/dev/null)" || {
+      echo "ERROR: Cannot resolve path: $path" >&2
+      exit 1
+    }
+  }
+
+  # Warn if original path was a symlink (security audit)
+  # Compare the user-provided path with the resolved real path
+  local user_realpath
+  user_realpath="$(realpath "$path" 2>/dev/null || echo "$path")"
+  if [[ -L "$path" ]] || [[ "$user_realpath" != "$path" && "$user_realpath" != "$real_path" ]]; then
+    echo "WARNING: Mount path is/contains symlink: $path -> $real_path" >&2
+    echo "  Using resolved path for security" >&2
+  fi
+
+  # Validate name - alphanumeric, dash, underscore only
+  if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "ERROR: Invalid mount name '$name' - only alphanumeric, dash, underscore allowed" >&2
+    exit 1
+  fi
+
+  # Check name length
+  if [[ ${#name} -gt 64 ]]; then
+    echo "ERROR: Mount name too long (max 64 chars): $name" >&2
+    exit 1
+  fi
+
+  # Check reserved names (case-insensitive, Bash 3 compat)
+  local name_lower
+  name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+  for reserved in "${RESERVED_NAMES[@]}"; do
+    local reserved_lower
+    reserved_lower=$(echo "$reserved" | tr '[:upper:]' '[:lower:]')
+    if [[ "$name_lower" == "$reserved_lower" ]]; then
+      echo "ERROR: Reserved mount name cannot be used: $name" >&2
+      exit 1
+    fi
+  done
+
+  # Check for duplicate names (using string matching for Bash 3 compat)
+  if [[ " ${USED_MOUNT_NAMES} " == *" ${name} "* ]]; then
+    echo "ERROR: Duplicate mount name: $name" >&2
+    exit 1
+  fi
+  USED_MOUNT_NAMES="${USED_MOUNT_NAMES} ${name}"
+
+  # Warn about potentially sensitive paths
+  local sensitive_patterns=(
+    "/etc"
+    "/var/log"
+    "/root"
+    "/.ssh"
+    "/private/etc"
+  )
+  for pattern in "${sensitive_patterns[@]}"; do
+    if [[ "$real_path" == *"$pattern"* ]]; then
+      echo "WARNING: Mounting potentially sensitive path: $real_path" >&2
+      break
+    fi
+  done
+
+  echo "${real_path}:${name}"
+}
+
+# Load mounts from YAML configuration file
+function load_mounts_from_yaml() {
+  local config_file="config/external-mounts.yaml"
+
+  if [[ ! -f "${config_file}" ]]; then
+    # No YAML config file - that's OK, use CLI args only
+    return 0
+  fi
+
+  echo "Loading mounts from ${config_file}..."
+
+  # Parse YAML config using Python helper script
+  local mounts_output
+  mounts_output=$(python3 scripts/parse_mounts_config.py --config "${config_file}" 2>&1) || {
+    echo "ERROR: Failed to parse ${config_file}:" >&2
+    echo "${mounts_output}" >&2
+    exit 1
+  }
+
+  # Process each mount line
+  while IFS= read -r line; do
+    if [[ -z "${line}" ]]; then
+      continue
+    fi
+
+    # Format: MOUNT_RO:path:name or MOUNT_RW:path:name
+    local mount_type="${line%%:*}"
+    local rest="${line#*:}"
+    local mount_path="${rest%%:*}"
+    local mount_name="${rest##*:}"
+
+    if [[ "${mount_type}" == "MOUNT_RO" ]]; then
+      # Validate and add global RO mount
+      local validated
+      validated="$(validate_mount "$mount_path" "$mount_name" "ro")" || exit 1
+      MOUNTS_RO+=("$validated")
+      echo "  Added global RO mount: ${mount_name} -> ${mount_path}"
+    elif [[ "${mount_type}" == "MOUNT_RW" ]]; then
+      # Validate and add global RW mount
+      local validated
+      validated="$(validate_mount "$mount_path" "$mount_name" "rw")" || exit 1
+      MOUNTS_RW+=("$validated")
+      echo "  Added global RW mount: ${mount_name} -> ${mount_path}"
+    elif [[ "${mount_type}" == "MOUNT_USER_RO" ]]; then
+      # Validate and add per-user RO mount (mounted at /mounts/user-ro/{name})
+      local validated
+      validated="$(validate_mount "$mount_path" "$mount_name" "user-ro")" || exit 1
+      MOUNTS_USER_RO+=("$validated")
+      echo "  Added per-user RO mount: ${mount_name} -> ${mount_path}"
+    elif [[ "${mount_type}" == "MOUNT_USER_RW" ]]; then
+      # Validate and add per-user RW mount (mounted at /mounts/user-rw/{name})
+      local validated
+      validated="$(validate_mount "$mount_path" "$mount_name" "user-rw")" || exit 1
+      MOUNTS_USER_RW+=("$validated")
+      echo "  Added per-user RW mount: ${mount_name} -> ${mount_path}"
+    fi
+  done <<< "${mounts_output}"
+}
+
 # Parse arguments
 ACTION=""
 NO_CACHE=""
 TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup|restart|rebuild|test|shell|create-user)
+    build|cleanup|restart|rebuild|test|shell|create-user|cleanup-test-users)
       ACTION="$1"
       shift
       # For test command, collect remaining args
@@ -85,13 +271,38 @@ while [[ $# -gt 0 ]]; do
           shift
         done
       fi
+      # For cleanup-test-users command, collect remaining args
+      if [[ "${ACTION}" == "cleanup-test-users" ]]; then
+        while [[ $# -gt 0 ]]; do
+          TEST_ARGS+=("$1")
+          shift
+        done
+      fi
       ;;
     --mount-rw=*)
-      MOUNTS_RW+=("${1#--mount-rw=}")
+      mount_spec="${1#--mount-rw=}"
+      if [[ "$mount_spec" == *:* ]]; then
+        mount_path="${mount_spec%%:*}"
+        mount_name="${mount_spec##*:}"
+      else
+        mount_path="$mount_spec"
+        mount_name="$(basename "$mount_path")"
+      fi
+      validated="$(validate_mount "$mount_path" "$mount_name" "rw")"
+      MOUNTS_RW+=("$validated")
       shift
       ;;
     --mount-ro=*)
-      MOUNTS_RO+=("${1#--mount-ro=}")
+      mount_spec="${1#--mount-ro=}"
+      if [[ "$mount_spec" == *:* ]]; then
+        mount_path="${mount_spec%%:*}"
+        mount_name="${mount_spec##*:}"
+      else
+        mount_path="$mount_spec"
+        mount_name="$(basename "$mount_path")"
+      fi
+      validated="$(validate_mount "$mount_path" "$mount_name" "ro")"
+      MOUNTS_RO+=("$validated")
       shift
       ;;
     --no-cache)
@@ -153,44 +364,150 @@ EOF
 function generate_compose_override() {
   # Generate docker-compose.override.yml with extra mounts if any were specified
   local override_file="docker-compose.override.yml"
-  
-  if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 ]]; then
-    # No mounts specified, remove override file if exists
+  local manifest_file="data/auto-generated/auto-generated-mounts.yaml"
+
+  # Ensure the auto-generated directory exists
+  mkdir -p "data/auto-generated"
+
+  if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 && ${#MOUNTS_USER_RW[@]} -eq 0 && ${#MOUNTS_USER_RO[@]} -eq 0 ]]; then
+    # No mounts specified, remove override file and create empty manifest
     rm -f "${override_file}"
+    cat > "${manifest_file}" <<EOF
+# =============================================================================
+# AUTO-GENERATED FILE - DO NOT EDIT
+# =============================================================================
+# This file is automatically generated by deploy.sh from config/external-mounts.yaml
+# Any manual changes will be overwritten on the next deployment.
+#
+# To configure mounts, edit: config/external-mounts.yaml
+# Then run: ./deploy.sh build
+#
+# Purpose: This manifest maps Docker container paths to host filesystem paths,
+# enabling symlink resolution when running outside Docker (development mode).
+# =============================================================================
+mounts:
+  ro: []
+  rw: []
+EOF
     return
   fi
 
+  # Generate docker-compose override for volume mounts
   cat > "${override_file}" <<EOF
 # Auto-generated by deploy.sh - do not edit manually
+# External mounts are available in agent sessions at:
+#   Read-only:  /workspace/external/ro/{name}/
+#   Read-write: /workspace/external/rw/{name}/
+#   Persistent: /workspace/external/persistent/
 services:
   ag3ntum-api:
     volumes:
 EOF
 
-  # Add read-write mounts
-  for mount in "${MOUNTS_RW[@]+"${MOUNTS_RW[@]}"}"; do
-    if [[ -n "${mount}" ]]; then
-      # Normalize path for cross-platform compatibility
-      local abs_path
-      abs_path="$(cd "${mount}" 2>/dev/null && pwd)" || abs_path="${mount}"
-      local basename
-      basename="$(basename "${abs_path}")"
-      echo "      - ${abs_path}:/mounts/${basename}:rw" >> "${override_file}"
-    fi
-  done
+  # Start manifest file - write header only
+  cat > "${manifest_file}" <<EOF
+# =============================================================================
+# AUTO-GENERATED FILE - DO NOT EDIT
+# =============================================================================
+# This file is automatically generated by deploy.sh from config/external-mounts.yaml
+# Any manual changes will be overwritten on the next deployment.
+#
+# To configure mounts, edit: config/external-mounts.yaml
+# Then run: ./deploy.sh build
+#
+# Purpose: This manifest maps Docker container paths to host filesystem paths,
+# enabling symlink resolution when running outside Docker (development mode).
+# These mounts are available in agent sessions at /workspace/external/
+# =============================================================================
+mounts:
+EOF
 
-  # Add read-only mounts
-  for mount in "${MOUNTS_RO[@]+"${MOUNTS_RO[@]}"}"; do
-    if [[ -n "${mount}" ]]; then
-      local abs_path
-      abs_path="$(cd "${mount}" 2>/dev/null && pwd)" || abs_path="${mount}"
-      local basename
-      basename="$(basename "${abs_path}")"
-      echo "      - ${abs_path}:/mounts/${basename}:ro" >> "${override_file}"
-    fi
-  done
+  # Write RO section
+  if [[ ${#MOUNTS_RO[@]} -gt 0 ]]; then
+    echo "  ro:" >> "${manifest_file}"
+    for mount in "${MOUNTS_RO[@]}"; do
+      local abs_path="${mount%%:*}"
+      local name="${mount##*:}"
+      echo "      - ${abs_path}:/mounts/ro/${name}:ro" >> "${override_file}"
+      echo "    - name: \"${name}\"" >> "${manifest_file}"
+      echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/ro/${name}\"" >> "${manifest_file}"
+      echo "      workspace_path: \"./external/ro/${name}\"" >> "${manifest_file}"
+    done
+  else
+    echo "  ro: []" >> "${manifest_file}"
+  fi
 
-  echo "Generated ${override_file} with custom mounts."
+  # Write RW section
+  if [[ ${#MOUNTS_RW[@]} -gt 0 ]]; then
+    echo "  rw:" >> "${manifest_file}"
+    for mount in "${MOUNTS_RW[@]}"; do
+      local abs_path="${mount%%:*}"
+      local name="${mount##*:}"
+      echo "      - ${abs_path}:/mounts/rw/${name}:rw" >> "${override_file}"
+      echo "    - name: \"${name}\"" >> "${manifest_file}"
+      echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/rw/${name}\"" >> "${manifest_file}"
+      echo "      workspace_path: \"./external/rw/${name}\"" >> "${manifest_file}"
+    done
+  else
+    echo "  rw: []" >> "${manifest_file}"
+  fi
+
+  # Write per-user RO section (mounted at /mounts/user-ro/{name})
+  if [[ ${#MOUNTS_USER_RO[@]} -gt 0 ]]; then
+    echo "  user-ro:" >> "${manifest_file}"
+    for mount in "${MOUNTS_USER_RO[@]}"; do
+      local abs_path="${mount%%:*}"
+      local name="${mount##*:}"
+      echo "      - ${abs_path}:/mounts/user-ro/${name}:ro" >> "${override_file}"
+      echo "    - name: \"${name}\"" >> "${manifest_file}"
+      echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/user-ro/${name}\"" >> "${manifest_file}"
+      echo "      workspace_path: \"./external/user-ro/${name}\"" >> "${manifest_file}"
+    done
+  else
+    echo "  user-ro: []" >> "${manifest_file}"
+  fi
+
+  # Write per-user RW section (mounted at /mounts/user-rw/{name})
+  if [[ ${#MOUNTS_USER_RW[@]} -gt 0 ]]; then
+    echo "  user-rw:" >> "${manifest_file}"
+    for mount in "${MOUNTS_USER_RW[@]}"; do
+      local abs_path="${mount%%:*}"
+      local name="${mount##*:}"
+      echo "      - ${abs_path}:/mounts/user-rw/${name}:rw" >> "${override_file}"
+      echo "    - name: \"${name}\"" >> "${manifest_file}"
+      echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/user-rw/${name}\"" >> "${manifest_file}"
+      echo "      workspace_path: \"./external/user-rw/${name}\"" >> "${manifest_file}"
+    done
+  else
+    echo "  user-rw: []" >> "${manifest_file}"
+  fi
+
+  echo ""
+  echo "=== External Mounts Configured ==="
+  echo "Generated ${override_file}"
+  echo "Generated ${manifest_file}"
+  echo ""
+  if [[ ${#MOUNTS_RO[@]} -gt 0 ]]; then
+    echo "Read-only mounts (agent cannot modify):"
+    for mount in "${MOUNTS_RO[@]}"; do
+      local name="${mount##*:}"
+      echo "  ./external/ro/${name}/"
+    done
+  fi
+  if [[ ${#MOUNTS_RW[@]} -gt 0 ]]; then
+    echo "Read-write mounts (agent can modify):"
+    for mount in "${MOUNTS_RW[@]}"; do
+      local name="${mount##*:}"
+      echo "  ./external/rw/${name}/"
+    done
+  fi
+  echo "Persistent storage (always available):"
+  echo "  ./external/persistent/"
+  echo ""
 }
 
 function check_services() {
@@ -680,6 +997,28 @@ if [[ "${ACTION}" == "create-user" ]]; then
   exit 0
 fi
 
+# Handle cleanup-test-users action
+if [[ "${ACTION}" == "cleanup-test-users" ]]; then
+  echo "=== Cleaning up test users ==="
+
+  # Check if container is running
+  if ! docker ps --format '{{.Names}}' | grep -q "^${PROJECT_NAME}-ag3ntum-api-1$"; then
+    echo "Error: Container ${PROJECT_NAME}-ag3ntum-api-1 is not running."
+    echo "Start it first with: ./deploy.sh build"
+    exit 1
+  fi
+
+  # Run cleanup script inside container
+  if [ -t 0 ]; then
+    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" \
+      python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
+  else
+    docker exec "${PROJECT_NAME}-ag3ntum-api-1" \
+      python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
+  fi
+  exit 0
+fi
+
 # Handle rebuild action (cleanup + build)
 if [[ "${ACTION}" == "rebuild" ]]; then
   do_cleanup
@@ -689,6 +1028,9 @@ fi
 
 API_PORT="$(read_config_value 'api.external_port')"
 WEB_PORT="$(read_config_value 'web.external_port')"
+
+# Load mounts from YAML config (before CLI args which can override)
+load_mounts_from_yaml
 
 render_ui_config
 generate_compose_override

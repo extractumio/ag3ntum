@@ -1,0 +1,86 @@
+# =============================================================================
+# External Mounts Configuration
+# =============================================================================
+# This file configures external folder mounts for agent sessions.
+# Copy to external-mounts.yaml and customize for your deployment.
+#
+# Mount Types:
+#   - global: Available to ALL users
+#   - per_user: Available only to specified users
+#
+# Access Modes:
+#   - ro: Read-only (agent cannot write)
+#   - rw: Read-write (agent can modify)
+#
+# Paths:
+#   - host_path: Absolute path on the host system
+#   - name: Name exposed in agent workspace (alphanumeric, dash, underscore)
+#
+# Agent sees mounts at:
+#   - Read-only:  ./external/ro/{name}/
+#   - Read-write: ./external/rw/{name}/
+#   - Persistent: ./external/persistent/ (always per-user, auto-configured)
+# =============================================================================
+
+# Global mounts - available to ALL users
+global:
+  # Read-only mounts
+  ro:
+    - name: datasets
+      host_path: /data/ml-datasets
+      description: "Shared ML training datasets"
+      optional: false  # Fail if not found
+
+    - name: reference-docs
+      host_path: /data/documentation
+      description: "Reference documentation"
+      optional: true   # Skip if not found
+
+  # Read-write mounts
+  rw:
+    - name: shared-output
+      host_path: /data/shared-output
+      description: "Shared output directory for all users"
+      optional: true
+
+# Per-user mounts - available only to specified users
+# Supports {username} placeholder in host_path
+per_user:
+  # User-specific read-only mounts
+  ro:
+    - name: user-data
+      host_path: /home/{username}/data
+      description: "User's personal data folder"
+      users: ["*"]  # Available to all users (with their own path)
+      optional: true
+
+    - name: admin-logs
+      host_path: /var/log/app
+      description: "Application logs (admin only)"
+      users: ["admin", "devops"]
+      optional: true
+
+  # User-specific read-write mounts
+  rw:
+    - name: workspace
+      host_path: /home/{username}/workspace
+      description: "User's personal workspace"
+      users: ["*"]  # All users get their own workspace
+      optional: true
+
+    - name: shared-project
+      host_path: /projects/main-repo
+      description: "Shared project repository"
+      users: ["dev1", "dev2", "lead"]
+      optional: false
+
+# =============================================================================
+# Reserved names (cannot be used):
+#   - persistent, ro, rw, external
+#
+# Security notes:
+#   - Paths are validated at deploy time
+#   - Symlinks are resolved and logged
+#   - Sensitive path patterns trigger warnings
+#   - Per-user paths use {username} placeholder
+# =============================================================================

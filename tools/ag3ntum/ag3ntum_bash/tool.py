@@ -47,6 +47,9 @@ AG3NTUM_BASH_TOOL: str = "mcp__ag3ntum__Bash"
 # Command execution timeout in seconds (5 minutes)
 DEFAULT_TIMEOUT_SECONDS: int = 300
 
+# Grace period before SIGKILL after SIGTERM (seconds)
+DEFAULT_KILL_AFTER_SECONDS: int = 10
+
 # Preview configuration
 DEFAULT_PREVIEW_MODE: Literal["head", "tail"] = "tail"
 DEFAULT_PREVIEW_LINES: int = 20
@@ -59,6 +62,7 @@ OUTPUT_DIR: str = ".tmp/cmd"
 def create_bash_tool(
     workspace_path: Path,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    kill_after_seconds: int = DEFAULT_KILL_AFTER_SECONDS,
     default_preview_mode: Literal["head", "tail"] = DEFAULT_PREVIEW_MODE,
     default_preview_lines: int = DEFAULT_PREVIEW_LINES,
     max_preview_lines: int = MAX_PREVIEW_LINES,
@@ -71,7 +75,10 @@ def create_bash_tool(
 
     Args:
         workspace_path: Absolute path to the workspace directory.
-        timeout_seconds: Maximum execution time for commands.
+        timeout_seconds: Maximum execution time for commands (enforced via
+                        Linux `timeout` command which sends SIGTERM).
+        kill_after_seconds: Grace period after SIGTERM before sending SIGKILL
+                           to forcibly terminate stuck processes.
         default_preview_mode: Default preview mode ("head" or "tail").
         default_preview_lines: Default number of preview lines.
         max_preview_lines: Maximum allowed preview lines.
@@ -88,6 +95,7 @@ def create_bash_tool(
     """
     bound_workspace = workspace_path
     bound_timeout = timeout_seconds
+    bound_kill_after = kill_after_seconds
     bound_default_preview_mode = default_preview_mode
     bound_default_preview_lines = default_preview_lines
     bound_max_preview_lines = max_preview_lines
@@ -195,13 +203,19 @@ Example:
                         ["bash", "-c", command],
                         allow_network=allow_network,
                     )
-                    exec_command = bwrap_cmd
+                    # TIMEOUT: Wrap bwrap command with Linux timeout for forcible termination
+                    # timeout --kill-after=KILL sends SIGTERM first, then SIGKILL after grace period
+                    exec_command = [
+                        "timeout",
+                        f"--kill-after={bound_kill_after}",
+                        str(bound_timeout),
+                    ] + bwrap_cmd
                     use_shell = False
                     exec_cwd = None  # bwrap sets --chdir internally
                     exec_env = {"TERM": "dumb"}  # Minimal env, bwrap clears the rest
                     logger.info(
-                        f"Ag3ntumBash: SANDBOX ENABLED - wrapping in bwrap: "
-                        f"{command[:50]}..."
+                        f"Ag3ntumBash: SANDBOX ENABLED - wrapping in timeout({bound_timeout}s, "
+                        f"kill-after={bound_kill_after}s) + bwrap: {command[:50]}..."
                     )
                 except Exception as e:
                     # SECURITY: FAIL-CLOSED - if sandbox fails, DENY the command
@@ -217,12 +231,18 @@ Example:
                     "Ag3ntumBash: SANDBOX DISABLED - executing without isolation! "
                     "This is a security risk."
                 )
-                exec_command = command
+                # TIMEOUT: Wrap command with Linux timeout for forcible termination
+                # timeout --kill-after=KILL sends SIGTERM first, then SIGKILL after grace period
+                exec_command = f"timeout --kill-after={bound_kill_after} {bound_timeout} bash -c {shlex.quote(command)}"
                 use_shell = True
                 exec_cwd = str(bound_workspace)
                 exec_env = {**os.environ, "TERM": "dumb"}
 
             # Execute command with timeout
+            # Note: Linux `timeout` handles the primary timeout via SIGTERM/SIGKILL
+            # asyncio timeout is a fallback safety net (timeout + kill_after + 30s buffer)
+            asyncio_timeout = bound_timeout + bound_kill_after + 30
+
             if use_shell:
                 process = await asyncio.create_subprocess_shell(
                     exec_command,
@@ -243,16 +263,40 @@ Example:
             try:
                 stdout, _ = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=bound_timeout
+                    timeout=asyncio_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+                logger.error(
+                    f"Ag3ntumBash: ASYNCIO TIMEOUT (fallback) after {asyncio_timeout}s - "
+                    f"Linux timeout failed to terminate the process"
+                )
                 return _error_response(
-                    f"Command timed out after {bound_timeout} seconds"
+                    f"Command timed out after {bound_timeout} seconds "
+                    f"(forcibly killed after {bound_kill_after}s grace period)"
                 )
 
             exit_code = process.returncode or 0
+
+            # Check for Linux timeout exit codes
+            # 124 = SIGTERM sent (command timed out)
+            # 137 = SIGKILL sent (128 + 9, process killed after grace period)
+            if exit_code == 124:
+                logger.warning(
+                    f"Ag3ntumBash: Command terminated by timeout after {bound_timeout}s"
+                )
+                return _error_response(
+                    f"Command timed out after {bound_timeout} seconds (SIGTERM sent)"
+                )
+            elif exit_code == 137:
+                logger.warning(
+                    f"Ag3ntumBash: Command force-killed after {bound_timeout}+{bound_kill_after}s"
+                )
+                return _error_response(
+                    f"Command timed out and was force-killed after {bound_timeout}s + "
+                    f"{bound_kill_after}s grace period (SIGKILL sent)"
+                )
 
             # Write command output to file
             output_file.write_bytes(stdout)
@@ -334,6 +378,7 @@ def _error_response(message: str) -> dict[str, Any]:
 def create_ag3ntum_bash_mcp_server(
     workspace_path: Path,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    kill_after_seconds: int = DEFAULT_KILL_AFTER_SECONDS,
     default_preview_mode: Literal["head", "tail"] = DEFAULT_PREVIEW_MODE,
     default_preview_lines: int = DEFAULT_PREVIEW_LINES,
     max_preview_lines: int = MAX_PREVIEW_LINES,
@@ -348,7 +393,10 @@ def create_ag3ntum_bash_mcp_server(
 
     Args:
         workspace_path: Absolute path to workspace directory.
-        timeout_seconds: Maximum command execution time.
+        timeout_seconds: Maximum command execution time (enforced via Linux
+                        `timeout` command which sends SIGTERM).
+        kill_after_seconds: Grace period after SIGTERM before sending SIGKILL
+                           to forcibly terminate stuck processes.
         default_preview_mode: Default preview mode ("head" or "tail").
         default_preview_lines: Default number of preview lines.
         max_preview_lines: Maximum allowed preview lines.
@@ -366,6 +414,7 @@ def create_ag3ntum_bash_mcp_server(
     bash_tool = create_bash_tool(
         workspace_path=workspace_path,
         timeout_seconds=timeout_seconds,
+        kill_after_seconds=kill_after_seconds,
         default_preview_mode=default_preview_mode,
         default_preview_lines=default_preview_lines,
         max_preview_lines=max_preview_lines,

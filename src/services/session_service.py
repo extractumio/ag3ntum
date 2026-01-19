@@ -200,6 +200,12 @@ class SessionService:
             )
             file_session_created = True
 
+            # Extract username from sessions_dir (/users/{username}/sessions)
+            username = sessions_dir.parent.name
+
+            # Set up external mount symlinks (for File Browser UI and agent tools)
+            session_manager.setup_external_mounts(session_id, username)
+
             # Create database record
             db_session = Session(
                 id=session_id,

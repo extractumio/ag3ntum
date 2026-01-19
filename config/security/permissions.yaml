@@ -201,6 +201,80 @@ sandbox:
       source: "/users"
       target: "/users"
       mode: ro
+
+    # =========================================================================
+    # EXTERNAL MOUNTS - User-mounted folders from host system
+    # =========================================================================
+    # These are configured via deploy.sh --mount-ro and --mount-rw options.
+    # Host folders are mounted to /mounts/ro/* and /mounts/rw/* in Docker,
+    # then bind-mounted into the sandbox at /workspace/external/*.
+    #
+    # Agent accesses them as:
+    #   ./external/ro/{name}/    - Read-only external mounts
+    #   ./external/rw/{name}/    - Read-write external mounts
+    #   ./external/persistent/   - Per-user persistent storage
+
+    # Read-only external mounts from host
+    # Optional: may not exist if no --mount-ro options were used
+    #
+    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/ro).
+    # The workspace has symlinks: ./external/ro/{name} -> /mounts/ro/{name}
+    # These symlinks must resolve correctly inside bwrap, so /mounts/ro must exist.
+    external_ro:
+      source: "/mounts/ro"
+      target: "/mounts/ro"
+      mode: ro
+      optional: true
+
+    # Read-write external mounts from host
+    # Optional: may not exist if no --mount-rw options were used
+    #
+    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/rw).
+    # The workspace has symlinks: ./external/rw/{name} -> /mounts/rw/{name}
+    external_rw:
+      source: "/mounts/rw"
+      target: "/mounts/rw"
+      mode: rw
+      optional: true
+
+    # Per-user persistent storage
+    # This directory survives across sessions and is unique to each user.
+    # Created during user registration and verified during session setup.
+    #
+    # IMPORTANT: We mount this as an OVERLAY on the /users path (same source/target).
+    # This is necessary because bwrap cannot mount to a path INSIDE another mount
+    # when both are Docker bind mounts. The workspace has a symlink
+    # ./external/persistent -> /users/{username}/ag3ntum/persistent
+    # which resolves through the /users mount. The overlay makes it writable.
+    persistent_storage:
+      source: "/users/{username}/ag3ntum/persistent"
+      target: "/users/{username}/ag3ntum/persistent"
+      mode: rw
+
+    # =========================================================================
+    # GIT REPOSITORY SUPPORT - SSH and Git configuration
+    # =========================================================================
+    # These mounts enable git operations with SSH authentication (private repos)
+    # and user-specific git configuration (author name, email, etc.)
+
+    # User's SSH directory for git SSH authentication
+    # Contains: id_rsa, id_ed25519, known_hosts, config
+    # Optional: only mounted if user has configured SSH keys at /users/{username}/.ssh/
+    user_ssh:
+      source: "/users/{username}/.ssh"
+      target: "/root/.ssh"
+      mode: ro
+      optional: true
+
+    # User's git configuration file
+    # Contains: user.name, user.email, aliases, etc.
+    # Optional: only mounted if user has a .gitconfig at /users/{username}/.gitconfig
+    user_gitconfig:
+      source: "/users/{username}/.gitconfig"
+      target: "/root/.gitconfig"
+      mode: ro
+      optional: true
+
   dynamic_mounts: []
   network:
     enabled: true
@@ -214,10 +288,15 @@ sandbox:
     clear_env: true
   writable_paths:
     - "/workspace"
+    - "/mounts/rw"                  # Global read-write external mounts (symlink target)
+    - "/mounts/user-rw"             # Per-user read-write external mounts (symlink target)
+    - "/users/{username}/ag3ntum/persistent" # Per-user persistent storage (overlay mount)
   readonly_paths:
-    - "/venv"        # User's Python venv (read-only)
-    - "/skills"      # Global skills directory
-    - "/user-skills" # User's custom skills
+    - "/venv"                       # User's Python venv (read-only)
+    - "/skills"                     # Global skills directory
+    - "/user-skills"                # User's custom skills
+    - "/mounts/ro"                  # Global read-only external mounts (symlink target)
+    - "/mounts/user-ro"             # Per-user read-only external mounts (symlink target)
     - "/usr"
     - "/lib"
     - "/bin"

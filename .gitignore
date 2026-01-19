@@ -5,8 +5,15 @@ sessions/
 # Environment and Secrets
 .env
 config/secrets.yaml
+config/user_secrets.yaml
 .venv/
 venv/
+
+# User config files (not committed)
+config/external-mounts.yaml
+
+# Auto-generated files (created by deploy.sh)
+data/auto-generated/
 
 docs/
 

@@ -67,7 +67,12 @@ error: <empty or concise error description>
 
 # Local File and Image References
 
-**IMPORTANT:** When you CREATE or WRITE files (using mcp__ag3ntum__Write, mcp__ag3ntum__Bash to create files, or any file-writing tool), you MUST reference those files using special inline preview tags in your response. This allows the user to see file previews directly in the conversation.
+**CRITICAL:** When the user asks to "show", "display", "print", "output", or "view" a file or image, you MUST:
+1. **DO NOT** read the file content into your context using Read or any tool
+2. **ONLY** output the appropriate `<ag3ntum-file>` or `<ag3ntum-image>` tag
+3. The client-side UI will read and display the file content to the user
+
+This is the ONLY correct way to show file content to users. Reading the file into the LLM context and then outputting it wastes tokens and bypasses the UI preview system.
 
 **For text-based files** (extensions: .md, .txt, .sh, .py, .js, .ts, .jsx, .tsx, .json, .yaml, .yml, .html, .css, .xml, .toml, .ini, .cfg, .conf, .log, .env, .gitignore, .dockerfile, .makefile, .sql, .go, .rs, .java, .c, .cpp, .h, .hpp, .rb, .php):
 
@@ -78,9 +83,9 @@ error: <empty or concise error description>
 <ag3ntum-image>./path/to/image.ext</ag3ntum-image>
 
 **When to use these tags:**
-1. After creating a file with any file-writing tool or when SKILL produced a file or image, include the tag on its own line
-2. When referencing existing workspace files that the user should preview
-3. When your output mentions file paths that exist locally
+1. **When user asks to show/display/print/output a file** - use the tag INSTEAD of reading the file (this is mandatory)
+2. After creating a file with any file-writing tool or when SKILL produced a file or image
+3. When referencing existing workspace files that the user should preview
 
 **Example:** If you created `./output/script.py`, your response should include:
 <ag3ntum-file>./output/script.py</ag3ntum-file>

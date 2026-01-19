@@ -161,6 +161,21 @@ function UploadIcon({ className = '' }: IconProps): JSX.Element {
   );
 }
 
+/**
+ * Lock icon to indicate read-only files/folders.
+ * Displayed as a small gray dot next to the file icon.
+ */
+function ReadOnlyIndicator({ className = '' }: IconProps): JSX.Element {
+  return (
+    <span
+      className={`readonly-indicator ${className}`}
+      title="Read-only"
+    >
+      ●
+    </span>
+  );
+}
+
 // Note: CopyIcon, CheckIcon, MarkdownIcon, TextIcon are now in FileViewer.tsx
 
 // =============================================================================
@@ -287,10 +302,19 @@ function getFileIconLabel(file: FileInfo): string | undefined {
 }
 
 function renderFileIcon(file: FileInfo): JSX.Element {
-  if (file.is_directory) {
-    return <FolderIcon />;
+  const icon = file.is_directory ? <FolderIcon /> : <FileIcon label={getFileIconLabel(file)} />;
+
+  // Show read-only indicator (gray dot) for files/folders in read-only areas
+  if (file.is_readonly) {
+    return (
+      <span className="file-icon-with-indicator">
+        {icon}
+        <ReadOnlyIndicator />
+      </span>
+    );
   }
-  return <FileIcon label={getFileIconLabel(file)} />;
+
+  return icon;
 }
 
 // Note: Markdown rendering is now handled by FileViewer component
@@ -432,7 +456,7 @@ function FileTreeNode({
   return (
     <div className="file-tree-node">
       <div
-        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}`}
+        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}${file.is_readonly ? ' file-readonly' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
@@ -578,11 +602,20 @@ export function FileExplorer({
   const dragCounter = useRef(0);
   const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Store callback props in refs to avoid re-creating callbacks when they change.
+  // This prevents unnecessary API calls when parent re-renders (e.g., during user input or streaming).
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const onModalStateChangeRef = useRef(onModalStateChange);
+  onModalStateChangeRef.current = onModalStateChange;
+  const onNavigateCompleteRef = useRef(onNavigateComplete);
+  onNavigateCompleteRef.current = onNavigateComplete;
+
   // Notify parent when modal state changes (for ESC key handling)
   useEffect(() => {
     const isModalOpen = previewFile !== null || isLoadingPreview || deleteTarget !== null;
-    onModalStateChange?.(isModalOpen);
-  }, [previewFile, isLoadingPreview, deleteTarget, onModalStateChange]);
+    onModalStateChangeRef.current?.(isModalOpen);
+  }, [previewFile, isLoadingPreview, deleteTarget]);
 
   // Handle navigation to a specific path
   useEffect(() => {
@@ -648,10 +681,10 @@ export function FileExplorer({
     }, 3000);
 
     // Notify that navigation is complete
-    onNavigateComplete?.();
+    onNavigateCompleteRef.current?.();
 
     return () => clearTimeout(timer);
-  }, [navigateTo, baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, folderContents, onNavigateComplete]);
+  }, [navigateTo, baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, folderContents]);
 
   // Load root directory
   const loadRootFiles = useCallback(async () => {
@@ -675,11 +708,11 @@ export function FileExplorer({
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load files';
       setError(message);
-      onError?.(message);
+      onErrorRef.current?.(message);
     } finally {
       setIsLoading(false);
     }
-  }, [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, onError]);
+  }, [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder]);
 
   // Load folder contents
   const loadFolderContents = useCallback(
@@ -695,7 +728,7 @@ export function FileExplorer({
         setFolderContents((prev) => ({ ...prev, [path]: listing.files }));
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to load folder';
-        onError?.(message);
+        onErrorRef.current?.(message);
       } finally {
         setLoadingFolders((prev) => {
           const next = new Set(prev);
@@ -704,8 +737,22 @@ export function FileExplorer({
         });
       }
     },
-    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, onError]
+    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder]
   );
+
+  // Refresh all: root + all expanded folders
+  const refreshAll = useCallback(async () => {
+    // Get all currently expanded folder paths
+    const expandedPaths = Object.entries(expandedFolders)
+      .filter(([, isExpanded]) => isExpanded)
+      .map(([path]) => path);
+
+    // Refresh root and all expanded folders in parallel
+    await Promise.all([
+      loadRootFiles(),
+      ...expandedPaths.map((path) => loadFolderContents(path)),
+    ]);
+  }, [expandedFolders, loadRootFiles, loadFolderContents]);
 
   // Toggle folder expansion
   const handleToggleFolder = useCallback(
@@ -839,11 +886,11 @@ export function FileExplorer({
       setDeleteTarget(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to delete file';
-      onError?.(message);
+      onErrorRef.current?.(message);
     } finally {
       setIsDeleting(false);
     }
-  }, [baseUrl, token, sessionId, deleteTarget, onError]);
+  }, [baseUrl, token, sessionId, deleteTarget]);
 
   // Cancel delete
   const handleCancelDelete = useCallback(() => {
@@ -914,7 +961,7 @@ export function FileExplorer({
 
         // Report errors if any
         if (result.errors.length > 0) {
-          onError?.(result.errors.join(', '));
+          onErrorRef.current?.(result.errors.join(', '));
           setUploadNotification({
             type: 'error',
             message: `Upload failed: ${result.errors[0]}`,
@@ -949,7 +996,7 @@ export function FileExplorer({
         }, 3000);
       } catch (err) {
         console.error('Upload failed:', err);
-        onError?.((err as Error).message);
+        onErrorRef.current?.((err as Error).message);
         setUploadNotification({
           type: 'error',
           message: `Upload failed: ${(err as Error).message}`,
@@ -963,7 +1010,7 @@ export function FileExplorer({
         setIsUploading(false);
       }
     },
-    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, onError, loadRootFiles]
+    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, loadRootFiles]
   );
 
   // Handle file input change
@@ -1104,7 +1151,7 @@ export function FileExplorer({
           <button
             type="button"
             className="file-refresh-btn"
-            onClick={loadRootFiles}
+            onClick={refreshAll}
             title="Refresh"
             disabled={isLoading}
           >

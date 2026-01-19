@@ -9,6 +9,9 @@ Full feature parity with Claude Code Write tool:
 Security: Uses Ag3ntumPathValidator to ensure all paths are within
 the session workspace. The validator translates agent-provided paths
 (like /workspace/foo.txt) to real Docker filesystem paths.
+
+Sensitive Data: Scans content for API keys, tokens, passwords before writing.
+Detected secrets are redacted with same-length placeholders to preserve formatting.
 """
 import logging
 from pathlib import Path
@@ -17,6 +20,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.core.path_validator import get_path_validator, PathValidationError
+from src.security import scan_and_redact, is_scanner_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -87,24 +91,53 @@ Examples:
         except Exception as e:
             return _error(f"Failed to create directories: {e}")
 
+        # Scan content for sensitive data before writing
+        secrets_redacted = 0
+        secret_types: list[str] = []
+        content_to_write = content
+
+        if is_scanner_enabled():
+            try:
+                scan_result = scan_and_redact(content)
+                if scan_result.has_secrets:
+                    content_to_write = scan_result.redacted_text
+                    secrets_redacted = scan_result.secret_count
+                    secret_types = list(scan_result.secret_types)
+                    logger.warning(
+                        f"Ag3ntumWrite: Redacted {secrets_redacted} secrets "
+                        f"({', '.join(secret_types)}) in {file_path}"
+                    )
+            except Exception as e:
+                logger.warning(f"Ag3ntumWrite: Failed to scan content - {e}")
+
         # Write content
         try:
             existed = path.exists()
-            path.write_text(content, encoding="utf-8")
+            path.write_text(content_to_write, encoding="utf-8")
 
             action = "Updated" if existed else "Created"
-            size = len(content.encode("utf-8"))
-            lines = len(content.splitlines())
+            size = len(content_to_write.encode("utf-8"))
+            lines = len(content_to_write.splitlines())
 
             logger.info(
                 f"Ag3ntumWrite: {action} {file_path} ({size} bytes, {lines} lines)"
             )
 
-            return _result(
+            # Build result message
+            result_msg = (
                 f"**{action} file:** `{file_path}`\n"
                 f"**Size:** {size} bytes\n"
                 f"**Lines:** {lines}"
             )
+
+            # Add security notice if secrets were redacted
+            if secrets_redacted > 0:
+                result_msg += (
+                    f"\n\n**Security Notice:** {secrets_redacted} sensitive value(s) "
+                    f"({', '.join(secret_types)}) were automatically redacted."
+                )
+
+            return _result(result_msg)
 
         except Exception as e:
             return _error(f"Failed to write file: {e}")

@@ -59,6 +59,9 @@ from .output import (
 from .schemas import get_model_context_size
 from .structured_output import normalize_error_value, parse_structured_output
 
+# Import security scanner (lazy import to avoid circular dependencies)
+# Used by EventingTracer for post-completion security scanning
+
 
 # Type aliases for backward compatibility
 # Use AnsiColors from constants as the canonical Color type
@@ -2537,6 +2540,8 @@ class EventingTracer(TracerBase):
         self._stream_active = False
         self._last_stream_full_text = ""
         self._suppress_next_message = False
+        # Track working directory for post-completion security scanning
+        self._working_dir: Optional[str] = None
 
     def emit_event(
         self,
@@ -2620,6 +2625,8 @@ class EventingTracer(TracerBase):
         skills: Optional[list[str]] = None,
         task: Optional[str] = None
     ) -> None:
+        # Store working_dir for post-completion security scanning
+        self._working_dir = working_dir
         self._tracer.on_agent_start(
             session_id=session_id,
             model=model,
@@ -2932,6 +2939,82 @@ class EventingTracer(TracerBase):
                 "cumulative_tokens": cumulative_tokens,
             },
         )
+
+        # Trigger post-completion security scan of session files
+        self._trigger_security_scan(session_id or self._session_id)
+
+    def _trigger_security_scan(self, session_id: Optional[str]) -> None:
+        """
+        Trigger async security scan of session workspace files.
+
+        Scans recently modified files for sensitive data and emits
+        security_alert event if any secrets are found.
+        """
+        if not session_id or not self._working_dir:
+            return
+
+        from pathlib import Path
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No event loop available
+
+        async def run_scan():
+            try:
+                # Import here to avoid circular dependencies
+                from ..security import (
+                    scan_session_files,
+                    is_scanner_enabled,
+                )
+
+                if not is_scanner_enabled():
+                    return
+
+                # Determine workspace path
+                # working_dir typically ends with /workspace
+                workspace_path = Path(self._working_dir)
+                if not workspace_path.name == "workspace":
+                    # Try to find workspace subdirectory
+                    possible_workspace = workspace_path / "workspace"
+                    if possible_workspace.exists():
+                        workspace_path = possible_workspace
+
+                if not workspace_path.exists():
+                    logger.debug(f"Workspace not found for security scan: {workspace_path}")
+                    return
+
+                # Run the scan
+                scan_result = await scan_session_files(
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    redact_files=True,
+                )
+
+                # Emit security alert if secrets were found
+                if scan_result.has_secrets:
+                    alert_data = scan_result.to_alert_data()
+                    self.emit_event(
+                        "security_alert",
+                        alert_data,
+                        persist_event=True,  # Persist to DB for audit trail
+                    )
+                    logger.warning(
+                        f"Security scan completed for session {session_id}: "
+                        f"Found {scan_result.total_secrets} secrets in "
+                        f"{scan_result.files_with_secrets} files"
+                    )
+                else:
+                    logger.debug(
+                        f"Security scan completed for session {session_id}: "
+                        f"No secrets found in {scan_result.files_scanned} files"
+                    )
+
+            except Exception as e:
+                logger.error(f"Security scan failed for session {session_id}: {e}")
+
+        # Schedule the scan to run in the event loop
+        loop.create_task(run_scan())
 
     def on_output_display(
         self,

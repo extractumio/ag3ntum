@@ -31,6 +31,10 @@ class SandboxMount(BaseModel):
     source: str = Field(description="Host path to mount")
     target: str = Field(description="Path inside sandbox")
     mode: str = Field(default="ro", description="Mount mode: ro or rw")
+    optional: bool = Field(
+        default=False,
+        description="If True, skip mount if source doesn't exist (don't fail)"
+    )
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -45,6 +49,7 @@ class SandboxMount(BaseModel):
             source=_resolve_placeholders(self.source, placeholders),
             target=_resolve_placeholders(self.target, placeholders),
             mode=self.mode,
+            optional=self.optional,
         )
 
 
@@ -274,18 +279,28 @@ class SandboxExecutor:
             # Native mode: Use isolated proc (if this ever works outside Docker)
             cmd.extend(["--proc", "/proc", "--dev", "/dev"])
 
-        # Mount static and session mounts (FAIL-CLOSED: all sources must exist)
+        # Mount static and session mounts
+        # FAIL-CLOSED for required mounts, skip optional mounts if source doesn't exist
         for name, mount in list(config.static_mounts.items()) + list(config.session_mounts.items()):
-            if not Path(mount.source).exists():
+            source_path = Path(mount.source)
+            if not source_path.exists():
+                if mount.optional:
+                    logger.debug(f"BWRAP: Skipping optional mount '{name}': {mount.source} (not found)")
+                    continue
                 raise SandboxMountError(
                     f"SECURITY: Mount source does not exist for '{name}': {mount.source}. "
                     "Refusing to execute command without proper sandbox isolation."
                 )
             cmd.extend(_mount_args(mount))
 
-        # Mount dynamic mounts (FAIL-CLOSED: all sources must exist)
+        # Mount dynamic mounts
+        # FAIL-CLOSED for required mounts, skip optional mounts if source doesn't exist
         for mount in config.dynamic_mounts:
-            if not Path(mount.source).exists():
+            source_path = Path(mount.source)
+            if not source_path.exists():
+                if mount.optional:
+                    logger.debug(f"BWRAP: Skipping optional dynamic mount: {mount.source} (not found)")
+                    continue
                 raise SandboxMountError(
                     f"SECURITY: Dynamic mount source does not exist: {mount.source}. "
                     "Refusing to execute command without proper sandbox isolation."
@@ -335,12 +350,15 @@ class SandboxExecutor:
         return shlex.join(wrapped)
 
     def validate_mount_sources(self) -> list[str]:
-        """Return a list of missing mount sources for diagnostics."""
+        """Return a list of missing required mount sources for diagnostics.
+
+        Optional mounts are not included in the missing list.
+        """
         missing = []
         mounts = list(self._config.static_mounts.values()) + list(self._config.session_mounts.values())
         mounts += list(self._config.dynamic_mounts)
         for mount in mounts:
-            if not Path(mount.source).exists():
+            if not Path(mount.source).exists() and not mount.optional:
                 missing.append(mount.source)
         return missing
 

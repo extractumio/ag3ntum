@@ -9,6 +9,9 @@ Full feature parity with Claude Code Read tool:
 Security: Uses Ag3ntumPathValidator to ensure all paths are within
 the session workspace. The validator translates agent-provided paths
 (like /workspace/foo.txt) to real Docker filesystem paths.
+
+Sensitive Data: Scans content for API keys, tokens, passwords when reading.
+Detected secrets are redacted with same-length placeholders to preserve formatting.
 """
 import logging
 from pathlib import Path
@@ -17,6 +20,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.core.path_validator import get_path_validator, PathValidationError
+from src.security import scan_and_redact, is_scanner_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,25 @@ Examples:
         # Read content
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
+
+            # Scan content for sensitive data
+            secrets_redacted = 0
+            secret_types: list[str] = []
+
+            if is_scanner_enabled():
+                try:
+                    scan_result = scan_and_redact(content)
+                    if scan_result.has_secrets:
+                        content = scan_result.redacted_text
+                        secrets_redacted = scan_result.secret_count
+                        secret_types = list(scan_result.secret_types)
+                        logger.warning(
+                            f"Ag3ntumRead: Redacted {secrets_redacted} secrets "
+                            f"({', '.join(secret_types)}) when reading {file_path}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Ag3ntumRead: Failed to scan content - {e}")
+
             lines = content.splitlines()
             total_lines = len(lines)
 
@@ -120,6 +143,13 @@ Examples:
             # Add truncation notice
             if limit and end_idx < total_lines:
                 output += f"\n\n... ({total_lines - end_idx} more lines)"
+
+            # Add security notice if secrets were redacted
+            if secrets_redacted > 0:
+                output += (
+                    f"\n\n**Security Notice:** {secrets_redacted} sensitive value(s) "
+                    f"({', '.join(secret_types)}) were redacted from display."
+                )
 
             logger.info(
                 f"Ag3ntumRead: Read {len(selected_lines)} lines from {file_path}"

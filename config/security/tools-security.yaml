@@ -62,8 +62,12 @@ network:
 # Tool-specific settings
 tools:
   bash:
-    # Command execution timeout (seconds)
-    timeout: 300
+    # Command execution timeout (seconds) - enforced via Linux `timeout` command
+    # Commands running longer than this will receive SIGTERM
+    timeout: 300  # 5 minutes
+    # Grace period before SIGKILL (seconds) - uses `timeout --kill-after`
+    # After SIGTERM, waits this long before sending SIGKILL to force termination
+    kill_after: 10
     # Output preview mode: "tail" or "head"
     preview_mode: "tail"
     # Number of lines to preview
