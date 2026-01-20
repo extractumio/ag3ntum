@@ -317,6 +317,10 @@ class SandboxExecutor:
         cmd.extend(["--setenv", "HOME", config.environment.home])
         cmd.extend(["--setenv", "PATH", config.environment.path])
 
+        # Set execution context for path resolution
+        # This allows SandboxPathResolver to detect it's running inside bubblewrap
+        cmd.extend(["--setenv", "AG3NTUM_CONTEXT", "sandbox"])
+
         # Apply custom environment variables from sandboxed_envs
         # These are user-specific secrets that should be available in the sandbox
         if config.environment.custom_env:

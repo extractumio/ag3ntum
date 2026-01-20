@@ -189,8 +189,11 @@ class GoogleProvider(ImageProvider):
                 if part.text is not None:
                     text_parts.append(part.text)
                 elif part.inline_data is not None and result["image"] is None:
-                    result["image"] = part.as_image()
-                    result["success"] = True
+                    # Convert Google genai Image to PIL Image
+                    genai_image = part.as_image()
+                    if genai_image and genai_image.image_bytes:
+                        result["image"] = PILImage.open(io.BytesIO(genai_image.image_bytes))
+                        result["success"] = True
 
             if text_parts:
                 result["text"] = "\n".join(text_parts)
@@ -254,8 +257,11 @@ class GoogleProvider(ImageProvider):
                 if part.text is not None:
                     text_parts.append(part.text)
                 elif part.inline_data is not None and result["image"] is None:
-                    result["image"] = part.as_image()
-                    result["success"] = True
+                    # Convert Google genai Image to PIL Image
+                    genai_image = part.as_image()
+                    if genai_image and genai_image.image_bytes:
+                        result["image"] = PILImage.open(io.BytesIO(genai_image.image_bytes))
+                        result["success"] = True
 
             if text_parts:
                 result["text"] = "\n".join(text_parts)
@@ -459,6 +465,7 @@ def generate_image(
         try:
             result["image_path"] = _save_image(result["image"], output_path)
         except Exception as e:
+            result["success"] = False
             result["error"] = f"Failed to save image: {str(e)}"
 
     return result
@@ -530,6 +537,7 @@ def edit_image(
         try:
             result["image_path"] = _save_image(result["image"], output_path)
         except Exception as e:
+            result["success"] = False
             result["error"] = f"Failed to save image: {str(e)}"
 
     return result

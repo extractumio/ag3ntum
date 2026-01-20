@@ -2816,7 +2816,7 @@ function StatusFooter({
   statusLabel,
   statusClass,
   stats,
-  connected,
+  connectionState,
   startTime,
 }: {
   isRunning: boolean;
@@ -2829,16 +2829,24 @@ function StatusFooter({
     cost: number;
     durationMs: number;
   };
-  connected: boolean;
+  connectionState: 'connected' | 'reconnecting' | 'polling' | 'degraded' | 'disconnected';
   startTime: string | null;
 }): JSX.Element {
   const elapsedTime = useElapsedTime(startTime, isRunning);
 
+  const connectionDisplay = {
+    connected: { icon: '●', label: 'Connected', className: 'connected' },
+    reconnecting: { icon: '●', label: 'Reconnecting...', className: 'reconnecting' },
+    polling: { icon: '●', label: 'Connected (polling)', className: 'polling' },
+    degraded: { icon: '●', label: 'Connection issues...', className: 'degraded' },
+    disconnected: { icon: '●', label: 'Disconnected', className: 'disconnected' },
+  }[connectionState];
+
   return (
     <div className="terminal-status">
       <div className="status-left">
-        <span className={`status-connection ${connected ? 'connected' : 'disconnected'}`}>
-          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+        <span className={`status-connection ${connectionDisplay.className}`}>
+          {connectionDisplay.icon} {connectionDisplay.label}
         </span>
         <span className="status-divider">│</span>
         <span className={`status-state ${statusClass}`}>
@@ -3280,7 +3288,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         },
         (attempt) => {
           setReconnecting(true);
-          setError(`Connection lost. Reconnecting (attempt ${attempt})...`);
+          // Don't show error message - the status indicator shows reconnecting state
+          // Only show error after many failed attempts (handled by connection state change)
+          if (attempt > 3) {
+            setError(`Reconnecting (attempt ${attempt})...`);
+          }
         },
         lastSequence ?? null,
         // Heartbeat callback - can detect session completion from heartbeat
@@ -3299,9 +3311,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             setReconnecting(false);
             setError(null);
           } else if (state === 'polling') {
-            setError('Connection degraded - using polling mode. Will retry SSE automatically.');
+            // Polling mode still works - just a different transport
+            setError(null);
           } else if (state === 'degraded') {
-            setError('Connection issues - retrying...');
+            // Only show error text for truly degraded state
+            setError('Connection unstable');
+          } else if (state === 'reconnecting') {
+            // Clear error - status indicator shows reconnecting state
+            setError(null);
           }
         }
       );
@@ -5203,7 +5220,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           statusLabel={statusLabel}
           statusClass={statusClass}
           stats={stats}
-          connected={Boolean(token) && !reconnecting && connectionState === 'connected'}
+          connectionState={!token ? 'disconnected' : connectionState}
           startTime={runningStartTime}
         />
           </div>

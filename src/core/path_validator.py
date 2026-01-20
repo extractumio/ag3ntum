@@ -4,7 +4,25 @@ Unified path validation for all Ag3ntum tools.
 Single source of truth for path normalization, validation, and logging.
 All Ag3ntum file tools use this validator before performing operations.
 
-CRITICAL ARCHITECTURE NOTE:
+ARCHITECTURE:
+=============
+
+This module works in conjunction with sandbox_path_resolver.py to provide
+a complete path handling solution:
+
+1. SandboxPathResolver (sandbox_path_resolver.py):
+   - Defines canonical path format (sandbox paths)
+   - Provides bidirectional translation (sandbox ↔ Docker)
+   - Context-aware resolution
+
+2. Ag3ntumPathValidator (this module):
+   - Security validation (blocklist, allowlist, boundaries)
+   - Read-only path enforcement
+   - Access logging
+
+EXECUTION CONTEXT:
+==================
+
 This validator runs in the main Python process, which sees the REAL Docker
 filesystem paths (e.g., /users/greg/sessions/xxx/workspace), NOT bwrap mount
 paths (/workspace). The agent thinks it's working with /workspace, but we
@@ -13,6 +31,17 @@ must translate to real paths for Python file operations.
 Bwrap paths (/workspace) are only visible inside subprocesses launched via
 Ag3ntumBash. All other Ag3ntum tools (Ag3ntumRead, Ag3ntumWrite, etc.) run
 in the main process and need this validator for security.
+
+PATH TRANSLATION:
+=================
+
+Agent provides: /workspace/file.txt (sandbox path)
+Validator returns: /users/greg/sessions/xxx/workspace/file.txt (Docker path)
+
+For external mounts:
+- /workspace/external/persistent/* → /users/{user}/ag3ntum/persistent/*
+- /workspace/external/ro/* → /mounts/ro/*
+- /workspace/external/rw/* → /mounts/rw/*
 """
 import fnmatch
 import logging
@@ -20,9 +49,20 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+# Import sandbox path resolver for integrated path handling
+from src.core.sandbox_path_resolver import (
+    SandboxPathResolver,
+    SandboxPathContext,
+    configure_sandbox_path_resolver,
+    cleanup_sandbox_path_resolver,
+    get_sandbox_path_resolver,
+    has_sandbox_path_resolver,
+    PathResolutionError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -893,6 +933,7 @@ def get_path_validator(session_id: str) -> Ag3ntumPathValidator:
 def configure_path_validator(
     session_id: str,
     workspace_path: Path,
+    username: str | None = None,
     skills_path: Path | None = None,
     global_skills_path: Path | None = None,
     user_skills_path: Path | None = None,
@@ -907,9 +948,13 @@ def configure_path_validator(
     """
     Configure and return path validator for a session.
 
+    This function also configures the SandboxPathResolver for the session,
+    ensuring both components are available for path handling.
+
     Args:
         session_id: The session ID
         workspace_path: REAL Docker filesystem path to session workspace
+        username: Username for this session (extracted from path if not provided)
         skills_path: Deprecated, use global_skills_path/user_skills_path
         global_skills_path: Path to global skills directory (read-only)
         user_skills_path: Path to user skills directory (read-only)
@@ -924,6 +969,20 @@ def configure_path_validator(
     Returns:
         The configured Ag3ntumPathValidator
     """
+    # Extract username from workspace path if not provided
+    # Path format: /users/{username}/sessions/{session_id}/workspace
+    if username is None:
+        workspace_str = str(workspace_path)
+        if workspace_str.startswith("/users/"):
+            parts = workspace_str.split("/")
+            if len(parts) >= 3:
+                username = parts[2]
+        if username is None:
+            logger.warning(
+                f"Could not extract username from workspace path: {workspace_path}. "
+                "SandboxPathResolver will not be configured."
+            )
+
     config = PathValidatorConfig(
         workspace_path=workspace_path,
         skills_path=skills_path,
@@ -944,13 +1003,26 @@ def configure_path_validator(
     validator = Ag3ntumPathValidator(config)
     _session_validators[session_id] = validator
 
+    # Also configure SandboxPathResolver for this session
+    if username:
+        try:
+            configure_sandbox_path_resolver(
+                session_id=session_id,
+                username=username,
+                workspace_docker=str(workspace_path),
+                user_mounts_ro={k: str(v) for k, v in (user_mounts_ro or {}).items()},
+                user_mounts_rw={k: str(v) for k, v in (user_mounts_rw or {}).items()},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to configure SandboxPathResolver: {e}")
+
     # Log user mount info if any configured
     user_ro_count = len(user_mounts_ro) if user_mounts_ro else 0
     user_rw_count = len(user_mounts_rw) if user_mounts_rw else 0
 
     logger.info(
         f"PATH_VALIDATOR: Configured for session {session_id} "
-        f"with workspace={workspace_path}, "
+        f"with workspace={workspace_path}, username={username}, "
         f"external_ro={external_ro_base}, external_rw={external_rw_base}, "
         f"persistent={persistent_path}, "
         f"user_mounts_ro={user_ro_count}, user_mounts_rw={user_rw_count}"
@@ -962,12 +1034,17 @@ def cleanup_path_validator(session_id: str) -> None:
     """
     Remove path validator when session ends.
 
+    This also cleans up the associated SandboxPathResolver.
+
     Args:
         session_id: The session ID to clean up
     """
     if session_id in _session_validators:
         del _session_validators[session_id]
         logger.info(f"PATH_VALIDATOR: Cleaned up validator for session {session_id}")
+
+    # Also cleanup SandboxPathResolver
+    cleanup_sandbox_path_resolver(session_id)
 
 
 def has_path_validator(session_id: str) -> bool:
@@ -981,3 +1058,105 @@ def has_path_validator(session_id: str) -> bool:
         True if validator is configured, False otherwise
     """
     return session_id in _session_validators
+
+
+# =============================================================================
+# Sandbox Path Resolution Utilities
+# =============================================================================
+
+def get_resolver_for_session(session_id: str) -> Optional[SandboxPathResolver]:
+    """
+    Get the SandboxPathResolver for a session if available.
+
+    Args:
+        session_id: The session ID
+
+    Returns:
+        SandboxPathResolver if configured, None otherwise
+    """
+    if has_sandbox_path_resolver(session_id):
+        return get_sandbox_path_resolver(session_id)
+    return None
+
+
+def sandbox_to_docker_path(session_id: str, sandbox_path: str) -> str:
+    """
+    Convert a sandbox path to Docker path for a session.
+
+    This is a convenience function for converting agent-provided paths
+    (in sandbox format) to Docker filesystem paths.
+
+    Args:
+        session_id: The session ID
+        sandbox_path: Path in sandbox format (e.g., /workspace/file.txt)
+
+    Returns:
+        Docker filesystem path
+
+    Raises:
+        RuntimeError: If resolver not configured for session
+        PathResolutionError: If path cannot be resolved
+    """
+    resolver = get_sandbox_path_resolver(session_id)
+    return resolver.sandbox_to_docker(sandbox_path)
+
+
+def docker_to_sandbox_path(session_id: str, docker_path: str) -> str:
+    """
+    Convert a Docker path to sandbox path for a session.
+
+    This is useful for translating error messages or paths from Docker
+    processes back to the canonical sandbox format.
+
+    Args:
+        session_id: The session ID
+        docker_path: Path in Docker format
+
+    Returns:
+        Sandbox path
+
+    Raises:
+        RuntimeError: If resolver not configured for session
+        PathResolutionError: If path cannot be resolved
+    """
+    resolver = get_sandbox_path_resolver(session_id)
+    return resolver.docker_to_sandbox(docker_path)
+
+
+def translate_error_message(session_id: str, error_message: str) -> str:
+    """
+    Translate Docker paths in an error message to sandbox paths.
+
+    This makes error messages more user-friendly by showing paths
+    in the format the agent understands.
+
+    Args:
+        session_id: The session ID
+        error_message: Error message that may contain Docker paths
+
+    Returns:
+        Error message with Docker paths replaced by sandbox paths
+    """
+    resolver = get_resolver_for_session(session_id)
+    if resolver:
+        return resolver.translate_error_paths(error_message)
+    return error_message
+
+
+def normalize_sandbox_path(session_id: str, path: str) -> str:
+    """
+    Normalize any path to canonical sandbox format.
+
+    Args:
+        session_id: The session ID
+        path: Input path (can be relative or absolute)
+
+    Returns:
+        Canonical sandbox path (e.g., /workspace/file.txt)
+
+    Raises:
+        RuntimeError: If resolver not configured for session
+        PathResolutionError: If path is invalid
+    """
+    resolver = get_sandbox_path_resolver(session_id)
+    return resolver.normalize(path)
