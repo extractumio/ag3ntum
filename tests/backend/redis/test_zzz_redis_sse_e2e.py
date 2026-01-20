@@ -1,97 +1,75 @@
 """
-E2E tests for SSE streaming with Redis + overlap buffer.
+E2E tests for SSE streaming with Redis Streams.
 
 Tests cover:
 - SSE subscription and event streaming
-- 10-event overlap buffer
+- Late subscriber scenarios (no overlap buffer needed with Streams!)
 - Deduplication by sequence number
-- Late subscriber replay
-- Race condition handling (Redis pub before DB persist)
 - Terminal event handling
+- Heartbeat mechanism
+- Concurrent subscribers
+- Reconnection scenarios
+
+Key changes from Pub/Sub architecture:
+- No overlap buffer needed - Streams persist events
+- Late subscribers always see all events from the beginning
+- Deduplication is simpler (just skip already-seen sequences)
+- No race conditions between publish and subscribe
 """
 import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
-from src.services import event_service
 from src.services.redis_event_hub import RedisEventHub, EventSinkQueue
 from src.core.tracer import EventingTracer, NullTracer
 
 
 @pytest.mark.redis
-class TestSSEOverlapBuffer:
-    """Tests for SSE overlap buffer strategy."""
+class TestSSEStreaming:
+    """Basic SSE streaming tests with Redis Streams."""
 
     @pytest.mark.asyncio
-    async def test_overlap_buffer_catches_late_events(
-        self,
-        redis_event_hub: RedisEventHub,
-        test_session_id: str,
-        mock_event_sink: AsyncMock
-    ) -> None:
-        """Overlap buffer catches events published to Redis but not yet in DB."""
-
-        # Simulate SSE replay logic with overlap buffer
-        events_from_db = []  # Empty - simulates DB hasn't persisted yet
-        last_sequence = 10
-        overlap_buffer_size = 10
-        replay_start_sequence = max(0, last_sequence - overlap_buffer_size)
-
-        # This would be: event_service.list_events(after_sequence=replay_start_sequence)
-        # For this test, we'll simulate it being empty (events not in DB yet)
-
-        # Subscribe to Redis (will catch events going forward)
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
-        # Publish events to Redis (simulating they haven't hit DB yet)
-        for seq in range(11, 16):  # Events 11-15
-            event = {
-                "type": "test_event",
-                "data": {"index": seq},
-                "sequence": seq,
-                "session_id": test_session_id,
-            }
-            await redis_event_hub.publish(test_session_id, event)
-
-        await asyncio.sleep(0.5)  # Let events be received
-
-        # SSE should receive events 11-15 from Redis
-        received_events = []
-        while not queue.empty():
-            try:
-                event = queue.get_nowait()
-                received_events.append(event)
-            except asyncio.QueueEmpty:
-                break
-
-        assert len(received_events) == 5
-        for i, event in enumerate(received_events):
-            assert event["sequence"] == 11 + i
-
-        # This demonstrates overlap buffer would catch these events
-        # even if DB replay returns empty
-
-        # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
-
-    @pytest.mark.asyncio
-    async def test_deduplication_prevents_duplicates(
+    async def test_sse_receives_events_in_order(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """Deduplication by sequence number prevents duplicates."""
+        """SSE subscription receives events in correct order."""
+        # Publish events
+        for i in range(10):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
 
-        # Simulate SSE deduplication logic
-        seen_sequences = set()
-        deduplicated_events = []
+        # Subscribe and receive
+        received_events = []
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
+                received_events.append(event)
+                if len(received_events) >= 10:
+                    break
 
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
+        # Verify order
+        assert len(received_events) == 10
+        for i, event in enumerate(received_events):
+            assert event["data"]["index"] == i
+            assert event["sequence"] == i + 1
 
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_sse_deduplication_by_sequence(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str
+    ) -> None:
+        """SSE clients can deduplicate by sequence number."""
         # Publish 5 events
         for seq in range(1, 6):
             event = {
@@ -102,112 +80,107 @@ class TestSSEOverlapBuffer:
             }
             await redis_event_hub.publish(test_session_id, event)
 
-        await asyncio.sleep(0.5)  # Let events be received
+        # Simulate SSE client with deduplication logic
+        seen_sequences = set()
+        deduplicated_events = []
 
-        # Simulate SSE deduplication logic
-        while not queue.empty():
-            try:
-                event = queue.get_nowait()
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
                 seq = event["sequence"]
 
-                # Deduplication logic (from sessions.py)
+                # SSE deduplication logic
                 if seq in seen_sequences:
                     continue  # Skip duplicate
 
                 seen_sequences.add(seq)
                 deduplicated_events.append(event)
-            except asyncio.QueueEmpty:
-                break
+
+                if len(deduplicated_events) >= 5:
+                    break
 
         # Should have 5 unique events
         assert len(deduplicated_events) == 5
-        assert len(seen_sequences) == 5
-
-        # No duplicates
         sequences = [e["sequence"] for e in deduplicated_events]
-        assert len(sequences) == len(set(sequences))
+        assert len(sequences) == len(set(sequences))  # No duplicates
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
+
+
+@pytest.mark.redis
+class TestSSELateSubscriber:
+    """Tests for late subscriber scenarios - no overlap buffer needed with Streams!"""
 
     @pytest.mark.asyncio
-    async def test_overlap_with_deduplication(
+    async def test_late_subscriber_sees_all_events(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """Overlap buffer + deduplication handles replay correctly."""
-
-        # Simulate SSE logic: replay from DB + live from Redis
-        last_sequence = 10
-        original_last_sequence = last_sequence
-        replay_start_sequence = max(0, last_sequence - 10)  # Overlap buffer
-
-        # Simulate DB replay (events 1-10)
-        db_events = [
-            {
-                "type": "test_event",
-                "data": {"source": "db", "index": i},
-                "sequence": i,
-                "session_id": test_session_id,
-            }
-            for i in range(replay_start_sequence + 1, last_sequence + 1)
-        ]
-
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-
-        # Give extra time for Redis listener to fully connect
-        # Redis Pub/Sub only delivers to active subscribers
-        await asyncio.sleep(1.5)
-
-        # Publish events 11-15 to Redis (new events after last_sequence)
-        # Note: We can't reliably test overlap with events 8-10 due to Redis Pub/Sub timing
-        # The overlap buffer is tested with DB replay in production use
-        for seq in range(11, 16):
+        """Late subscriber sees ALL events - key advantage over Pub/Sub."""
+        # Publish events BEFORE subscribing
+        for i in range(10):
             event = {
                 "type": "test_event",
-                "data": {"source": "redis", "index": seq},
-                "sequence": seq,
+                "data": {"index": i},
+                "sequence": i + 1,
                 "session_id": test_session_id,
             }
             await redis_event_hub.publish(test_session_id, event)
 
-        await asyncio.sleep(1.0)  # Let all events be received and queued
+        # Subscribe AFTER publishing (late subscriber)
+        received_events = []
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
+                received_events.append(event)
+                if len(received_events) >= 10:
+                    break
 
-        # Simulate SSE deduplication logic
-        seen_sequences = set()
-        final_events = []
-
-        # Process DB replay (with overlap window check)
-        for event in db_events:
-            seq = event["sequence"]
-            if seq in seen_sequences or seq <= original_last_sequence:
-                continue
-            seen_sequences.add(seq)
-            final_events.append(event)
-
-        # Process Redis events (with deduplication)
-        while not queue.empty():
-            try:
-                event = queue.get_nowait()
-                seq = event["sequence"]
-                if seq in seen_sequences or seq <= last_sequence:
-                    continue
-                seen_sequences.add(seq)
-                final_events.append(event)
-                last_sequence = seq
-            except asyncio.QueueEmpty:
-                break
-
-        # Should have received events 11-15 (new events after last_sequence=10)
-        # DB events 1-10 are skipped (all <= original_last_sequence)
-        assert len(final_events) == 5  # 11, 12, 13, 14, 15
-        sequences = [e["sequence"] for e in final_events]
-        assert sequences == list(range(11, 16))
+        # Should have ALL 10 events (unlike Pub/Sub which would miss them all!)
+        assert len(received_events) == 10
+        for i, event in enumerate(received_events):
+            assert event["data"]["index"] == i
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_subscribe_from_checkpoint(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str
+    ) -> None:
+        """SSE can resume from a checkpoint (last seen sequence)."""
+        # Publish 20 events
+        for i in range(20):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
+
+        # Simulate reconnection: resume from sequence 10
+        last_seen_sequence = 10
+        received_events = []
+
+        async for event in redis_event_hub.subscribe(
+            test_session_id,
+            from_sequence=last_seen_sequence
+        ):
+            if event.get("type") == "test_event":
+                received_events.append(event)
+                if len(received_events) >= 10:
+                    break
+
+        # Should have events 11-20 only
+        assert len(received_events) == 10
+        for event in received_events:
+            assert event["sequence"] > last_seen_sequence
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
 
 
 @pytest.mark.redis
@@ -215,19 +188,16 @@ class TestSSETerminalEvents:
     """Tests for terminal event handling in SSE."""
 
     @pytest.mark.asyncio
-    async def test_terminal_event_closes_stream(
+    async def test_terminal_events_end_stream(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """Terminal events (agent_complete, error, cancelled) should close SSE."""
+        """Terminal events (agent_complete, error, cancelled) should end SSE stream."""
+        terminal_types = ["agent_complete", "error", "cancelled"]
 
-        terminal_events = ["agent_complete", "error", "cancelled"]
-
-        for terminal_type in terminal_events:
-            # Subscribe
-            queue = await redis_event_hub.subscribe(test_session_id + f"_{terminal_type}")
-            await asyncio.sleep(0.1)  # Let listener start
+        for terminal_type in terminal_types:
+            session_id = f"{test_session_id}_{terminal_type}"
 
             # Publish some events, then terminal event
             for i in range(3):
@@ -235,32 +205,31 @@ class TestSSETerminalEvents:
                     "type": "test_event",
                     "data": {"index": i},
                     "sequence": i + 1,
-                    "session_id": test_session_id + f"_{terminal_type}",
+                    "session_id": session_id,
                 }
-                await redis_event_hub.publish(test_session_id + f"_{terminal_type}", event)
+                await redis_event_hub.publish(session_id, event)
 
             # Publish terminal event
             terminal_event = {
                 "type": terminal_type,
                 "data": {"message": "session ended"},
                 "sequence": 4,
-                "session_id": test_session_id + f"_{terminal_type}",
+                "session_id": session_id,
             }
-            await redis_event_hub.publish(test_session_id + f"_{terminal_type}", terminal_event)
+            await redis_event_hub.publish(session_id, terminal_event)
 
-            await asyncio.sleep(0.5)  # Let events be received
-
-            # Simulate SSE logic: break on terminal event
+            # Simulate SSE client logic
             received_events = []
             should_close = False
-            while not queue.empty():
-                try:
-                    event = queue.get_nowait()
-                    received_events.append(event)
-                    if event["type"] in ("agent_complete", "error", "cancelled"):
-                        should_close = True
-                        break
-                except asyncio.QueueEmpty:
+
+            async for event in redis_event_hub.subscribe(session_id):
+                received_events.append(event)
+
+                if event["type"] in ("agent_complete", "error", "cancelled"):
+                    should_close = True
+                    break
+
+                if len(received_events) > 10:  # Safety limit
                     break
 
             # Should have received 3 events + terminal event
@@ -269,58 +238,114 @@ class TestSSETerminalEvents:
             assert should_close is True
 
             # Cleanup
-            await redis_event_hub.unsubscribe(test_session_id + f"_{terminal_type}", queue)
+            await redis_event_hub.delete_stream(session_id)
+
+    @pytest.mark.asyncio
+    async def test_terminal_event_always_delivered(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str
+    ) -> None:
+        """Terminal events must be delivered even if sequence was seen before."""
+        # This tests the SSE logic that NEVER skips terminal events
+
+        # Publish events with duplicate sequence (edge case)
+        events_to_publish = [
+            {"type": "test_event", "data": {"msg": "first"}, "sequence": 1},
+            {"type": "test_event", "data": {"msg": "second"}, "sequence": 2},
+            {"type": "agent_complete", "data": {"msg": "done"}, "sequence": 2},  # Same seq!
+        ]
+
+        for event in events_to_publish:
+            event["session_id"] = test_session_id
+            await redis_event_hub.publish(test_session_id, event)
+
+        # SSE logic: skip duplicates BUT never skip terminal events
+        seen_sequences = set()
+        received_events = []
+
+        async for event in redis_event_hub.subscribe(test_session_id):
+            seq = event.get("sequence", 0)
+            event_type = event.get("type")
+            is_terminal = event_type in ("agent_complete", "error", "cancelled")
+
+            # Deduplication logic (from sessions.py)
+            if not is_terminal and seq in seen_sequences:
+                continue
+
+            seen_sequences.add(seq)
+            received_events.append(event)
+
+            if is_terminal:
+                break
+
+            if len(received_events) > 10:  # Safety
+                break
+
+        # Should have received all 3 events (terminal not skipped despite duplicate seq)
+        assert len(received_events) == 3
+        assert received_events[-1]["type"] == "agent_complete"
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
 
 
 @pytest.mark.redis
-class TestSSELateSubscriber:
-    """Tests for late subscriber scenarios."""
+class TestSSEHeartbeat:
+    """Tests for SSE heartbeat mechanism."""
 
     @pytest.mark.asyncio
-    async def test_late_subscriber_replays_from_db(
+    async def test_heartbeat_on_empty_stream(
         self,
-        redis_event_hub: RedisEventHub,
-        test_session_id: str,
-        mock_event_sink: AsyncMock
+        redis_url: str,
+        test_session_id: str
     ) -> None:
-        """Late subscriber should replay missed events from DB."""
-
-        # Create tracer and publish 10 events
-        event_queue = EventSinkQueue(redis_event_hub, test_session_id)
-        tracer = EventingTracer(
-            NullTracer(),
-            event_queue=event_queue,
-            event_sink=mock_event_sink,
-            session_id=test_session_id,
+        """SSE receives heartbeat when stream is empty (timeout)."""
+        # Create hub with short timeout
+        hub = RedisEventHub(
+            redis_url=redis_url,
+            stream_maxlen=1000,
+            block_ms=500,  # 0.5 second timeout
         )
 
-        for i in range(10):
-            tracer.emit_event("test_event", {"index": i}, persist_event=True)
-            await asyncio.sleep(0.05)
+        try:
+            # Subscribe to empty stream
+            heartbeat_received = False
+            async for event in hub.subscribe(test_session_id):
+                if event.get("type") == "heartbeat":
+                    heartbeat_received = True
+                    break
 
-        await asyncio.sleep(1.0)  # Let all events process and persist
+            assert heartbeat_received
 
-        # Verify all events were persisted to mock sink
-        assert mock_event_sink.call_count == 10
+        finally:
+            await hub.close()
 
-        # Now subscribe (late subscriber)
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
+    @pytest.mark.asyncio
+    async def test_heartbeat_contains_session_info(
+        self,
+        redis_url: str,
+        test_session_id: str
+    ) -> None:
+        """Heartbeat contains session info for monitoring."""
+        hub = RedisEventHub(
+            redis_url=redis_url,
+            stream_maxlen=1000,
+            block_ms=500,
+        )
 
-        # Should NOT receive any events from Redis (all were published before)
-        assert queue.empty()
+        try:
+            async for event in hub.subscribe(test_session_id):
+                if event.get("type") == "heartbeat":
+                    # Verify heartbeat structure
+                    assert "data" in event
+                    assert "session_id" in event["data"]
+                    assert "server_time" in event["data"]
+                    assert "stream_position" in event["data"]
+                    break
 
-        # But DB should have all 10 events available for replay
-        # (In real SSE endpoint, this would be event_service.list_events())
-        persisted_events = [call[0][0] for call in mock_event_sink.call_args_list]
-        assert len(persisted_events) == 10
-
-        # Verify sequences
-        for i, event in enumerate(persisted_events):
-            assert event["data"]["index"] == i
-
-        # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        finally:
+            await hub.close()
 
 
 @pytest.mark.redis
@@ -333,15 +358,8 @@ class TestSSEConcurrentSubscribers:
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """Multiple SSE connections to same session all receive events."""
-
-        # Simulate 3 concurrent SSE connections
-        queue1 = await redis_event_hub.subscribe(test_session_id)
-        queue2 = await redis_event_hub.subscribe(test_session_id)
-        queue3 = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listeners start
-
-        # Publish 5 events
+        """Multiple SSE connections to same session all receive all events."""
+        # Publish events
         for i in range(5):
             event = {
                 "type": "test_event",
@@ -351,103 +369,293 @@ class TestSSEConcurrentSubscribers:
             }
             await redis_event_hub.publish(test_session_id, event)
 
-        await asyncio.sleep(0.5)  # Let events be received
-
-        # All 3 subscribers should receive all 5 events
-        for queue in [queue1, queue2, queue3]:
+        # Create 3 concurrent subscribers
+        async def read_stream() -> list[dict]:
             events = []
-            while not queue.empty():
-                try:
-                    event = queue.get_nowait()
+            async for event in redis_event_hub.subscribe(test_session_id):
+                if event.get("type") == "test_event":
                     events.append(event)
-                except asyncio.QueueEmpty:
-                    break
+                    if len(events) >= 5:
+                        break
+            return events
 
+        # Run all 3 concurrently
+        results = await asyncio.gather(
+            read_stream(),
+            read_stream(),
+            read_stream(),
+        )
+
+        # All 3 should have received all 5 events
+        for events in results:
             assert len(events) == 5
             for i, event in enumerate(events):
                 assert event["sequence"] == i + 1
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue1)
-        await redis_event_hub.unsubscribe(test_session_id, queue2)
-        await redis_event_hub.unsubscribe(test_session_id, queue3)
+        await redis_event_hub.delete_stream(test_session_id)
 
     @pytest.mark.asyncio
-    async def test_subscriber_disconnect_does_not_affect_others(
+    async def test_subscribers_at_different_positions(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """One subscriber disconnecting doesn't affect others."""
+        """Different subscribers can start from different positions."""
+        # Publish 10 events
+        for i in range(10):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
 
-        # Create 3 subscribers
-        queue1 = await redis_event_hub.subscribe(test_session_id)
-        queue2 = await redis_event_hub.subscribe(test_session_id)
-        queue3 = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listeners start
+        # Subscriber 1: from beginning
+        async def read_from_start() -> list[dict]:
+            events = []
+            async for event in redis_event_hub.subscribe(test_session_id):
+                if event.get("type") == "test_event":
+                    events.append(event)
+                    if len(events) >= 10:
+                        break
+            return events
 
-        # Disconnect queue2
-        await redis_event_hub.unsubscribe(test_session_id, queue2)
+        # Subscriber 2: from sequence 5
+        async def read_from_seq_5() -> list[dict]:
+            events = []
+            async for event in redis_event_hub.subscribe(test_session_id, from_sequence=5):
+                if event.get("type") == "test_event":
+                    events.append(event)
+                    if len(events) >= 5:
+                        break
+            return events
 
-        # Publish event
-        event = {
-            "type": "test_event",
-            "data": {"message": "after_disconnect"},
-            "sequence": 1,
-            "session_id": test_session_id,
-        }
-        await redis_event_hub.publish(test_session_id, event)
+        results = await asyncio.gather(
+            read_from_start(),
+            read_from_seq_5(),
+        )
 
-        await asyncio.sleep(0.5)  # Let events be received
+        # Subscriber 1 should have all 10
+        assert len(results[0]) == 10
 
-        # queue1 and queue3 should receive, queue2 should not
-        try:
-            event1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
-            assert event1["data"]["message"] == "after_disconnect"
-        except asyncio.TimeoutError:
-            pytest.fail("queue1 did not receive event")
-
-        try:
-            event3 = await asyncio.wait_for(queue3.get(), timeout=1.0)
-            assert event3["data"]["message"] == "after_disconnect"
-        except asyncio.TimeoutError:
-            pytest.fail("queue3 did not receive event")
-
-        # queue2 should be empty (disconnected)
-        assert queue2.empty()
+        # Subscriber 2 should have 5 (sequences 6-10)
+        assert len(results[1]) == 5
+        for event in results[1]:
+            assert event["sequence"] > 5
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue1)
-        await redis_event_hub.unsubscribe(test_session_id, queue3)
+        await redis_event_hub.delete_stream(test_session_id)
 
 
 @pytest.mark.redis
-class TestSSEHeartbeat:
-    """Tests for SSE heartbeat mechanism."""
+class TestSSEReconnection:
+    """Tests for SSE reconnection scenarios."""
 
     @pytest.mark.asyncio
-    async def test_heartbeat_on_timeout(
+    async def test_reconnect_resumes_from_last_sequence(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """SSE should send heartbeat on queue timeout."""
+        """SSE reconnection resumes from last seen sequence."""
+        # Publish 10 events
+        for i in range(10):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
 
-        # Subscribe
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
+        # First connection: read 5 events
+        last_sequence = 0
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
+                last_sequence = event["sequence"]
+                if last_sequence >= 5:
+                    break
 
-        # Simulate SSE heartbeat logic
-        try:
-            # Wait for event with short timeout (will timeout)
-            event = await asyncio.wait_for(queue.get(), timeout=0.5)
-            # If we get here, no heartbeat needed
-        except asyncio.TimeoutError:
-            # Should send heartbeat here
-            # In real SSE: yield ": heartbeat\n\n"
-            heartbeat_sent = True
+        # Simulate disconnect and reconnect
+        # Reconnect from last seen sequence
+        reconnect_events = []
+        async for event in redis_event_hub.subscribe(
+            test_session_id,
+            from_sequence=last_sequence
+        ):
+            if event.get("type") == "test_event":
+                reconnect_events.append(event)
+                if len(reconnect_events) >= 5:
+                    break
 
-        assert heartbeat_sent is True
+        # Should have received events 6-10
+        assert len(reconnect_events) == 5
+        assert reconnect_events[0]["sequence"] == 6
+        assert reconnect_events[-1]["sequence"] == 10
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_events_published_during_disconnect_not_lost(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str
+    ) -> None:
+        """Events published during disconnect are not lost."""
+        # First batch of events
+        for i in range(5):
+            event = {
+                "type": "test_event",
+                "data": {"batch": 1, "index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
+
+        # First connection: read all
+        first_events = []
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
+                first_events.append(event)
+                if len(first_events) >= 5:
+                    break
+
+        last_sequence = first_events[-1]["sequence"]
+
+        # Simulate disconnect... events published while disconnected
+        for i in range(5, 10):
+            event = {
+                "type": "test_event",
+                "data": {"batch": 2, "index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
+
+        # Reconnect - should get events from batch 2
+        reconnect_events = []
+        async for event in redis_event_hub.subscribe(
+            test_session_id,
+            from_sequence=last_sequence
+        ):
+            if event.get("type") == "test_event":
+                reconnect_events.append(event)
+                if len(reconnect_events) >= 5:
+                    break
+
+        # Should have batch 2 events
+        assert len(reconnect_events) == 5
+        for event in reconnect_events:
+            assert event["data"]["batch"] == 2
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
+
+
+@pytest.mark.redis
+class TestSSEWithTracer:
+    """E2E tests combining EventingTracer with SSE streaming."""
+
+    @pytest.mark.asyncio
+    async def test_tracer_events_streamed_via_sse(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str,
+        mock_event_sink: AsyncMock
+    ) -> None:
+        """Events emitted by tracer are streamed to SSE subscribers."""
+        # Create tracer
+        event_queue = EventSinkQueue(redis_event_hub, test_session_id)
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=event_queue,
+            event_sink=mock_event_sink,
+            session_id=test_session_id,
+        )
+
+        # Emit events
+        for i in range(5):
+            tracer.emit_event("test_event", {"index": i}, persist_event=True)
+            await asyncio.sleep(0.05)
+
+        await asyncio.sleep(0.5)  # Let events process
+
+        # Subscribe and receive
+        received_events = []
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") == "test_event":
+                received_events.append(event)
+                if len(received_events) >= 5:
+                    break
+
+        # Should have received all events
+        assert len(received_events) == 5
+        for i, event in enumerate(received_events):
+            assert event["data"]["index"] == i
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_tool_start_complete_events_streamed(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str,
+        mock_event_sink: AsyncMock
+    ) -> None:
+        """tool_start and tool_complete events are properly streamed."""
+        # Create tracer
+        event_queue = EventSinkQueue(redis_event_hub, test_session_id)
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=event_queue,
+            event_sink=mock_event_sink,
+            session_id=test_session_id,
+        )
+
+        # Emit tool events
+        tracer.on_tool_start(
+            tool_name="mcp__ag3ntum__Bash",
+            tool_input={"command": "echo hello"},
+            tool_id="tool_123"
+        )
+        await asyncio.sleep(0.1)
+
+        tracer.on_tool_complete(
+            tool_name="mcp__ag3ntum__Bash",
+            tool_id="tool_123",
+            result="hello",
+            duration_ms=100,
+            is_error=False,
+        )
+        await asyncio.sleep(0.1)
+
+        # Subscribe and receive
+        tool_events = []
+        async for event in redis_event_hub.subscribe(test_session_id):
+            if event.get("type") in ("tool_start", "tool_complete"):
+                tool_events.append(event)
+                if len(tool_events) >= 2:
+                    break
+            if len(tool_events) >= 2:
+                break
+
+        # Should have tool_start and tool_complete
+        assert len(tool_events) == 2
+
+        tool_start = next((e for e in tool_events if e["type"] == "tool_start"), None)
+        tool_complete = next((e for e in tool_events if e["type"] == "tool_complete"), None)
+
+        assert tool_start is not None
+        assert tool_start["data"]["tool_name"] == "mcp__ag3ntum__Bash"
+        assert tool_start["data"]["tool_id"] == "tool_123"
+
+        assert tool_complete is not None
+        assert tool_complete["data"]["tool_name"] == "mcp__ag3ntum__Bash"
+        assert tool_complete["data"]["tool_id"] == "tool_123"
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)

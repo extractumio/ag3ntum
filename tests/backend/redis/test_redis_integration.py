@@ -1,15 +1,20 @@
 """
-Integration tests for Redis + SQLite persistence.
+Integration tests for Redis Streams + SQLite persistence.
 
 Tests cover:
-- Publish to Redis first, then persist to SQLite
-- Event replay from SQLite
+- Publish to Redis Stream first, then persist to SQLite
+- Event replay from stream
 - EventingTracer with RedisEventHub + SQLite
-- Persist-then-publish order (Redis first)
+- Publish-then-persist order (Redis Streams first)
 - Event sink integration
+- Late subscriber scenarios (key advantage of Streams over Pub/Sub)
+
+Key architectural differences from Pub/Sub:
+- Events persist in Redis Stream - no race conditions
+- Late subscribers can read all events from the beginning
+- SQLite becomes backup/long-term storage, not primary delivery
 """
 import asyncio
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,8 +24,8 @@ from src.services.redis_event_hub import RedisEventHub, EventSinkQueue
 
 
 @pytest.mark.redis
-class TestRedisSQLiteIntegration:
-    """Tests for Redis + SQLite integration."""
+class TestRedisStreamsSQLiteIntegration:
+    """Tests for Redis Streams + SQLite integration."""
 
     @pytest.mark.asyncio
     async def test_publish_then_persist_order(
@@ -29,12 +34,7 @@ class TestRedisSQLiteIntegration:
         test_session_id: str,
         mock_event_sink: AsyncMock
     ) -> None:
-        """Events are published to Redis before persisting to SQLite."""
-
-        # Subscribe to Redis first
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
+        """Events are published to Redis Stream before persisting to SQLite."""
         # Create tracer with RedisEventHub and mock event sink
         event_queue = EventSinkQueue(redis_event_hub, test_session_id)
         tracer = EventingTracer(
@@ -46,18 +46,13 @@ class TestRedisSQLiteIntegration:
 
         # Emit an event
         tracer.emit_event("test_event", {"message": "hello"}, persist_event=True)
-        await asyncio.sleep(0.1)  # Let async task run
+        await asyncio.sleep(0.3)  # Let async task run
 
-        # Redis should receive event first (almost immediately)
-        try:
-            redis_event = await asyncio.wait_for(queue.get(), timeout=1.0)
-            assert redis_event["type"] == "test_event"
-            assert redis_event["data"]["message"] == "hello"
-        except asyncio.TimeoutError:
-            pytest.fail("Did not receive event from Redis")
+        # Event should be in Redis Stream
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 1
 
-        # SQLite sink should also be called (but after Redis)
-        await asyncio.sleep(0.5)  # Give time for persistence
+        # SQLite sink should also be called
         assert mock_event_sink.called
         assert mock_event_sink.call_count == 1
 
@@ -67,21 +62,16 @@ class TestRedisSQLiteIntegration:
         assert call_args["data"]["message"] == "hello"
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
 
     @pytest.mark.asyncio
-    async def test_partial_events_not_persisted(
+    async def test_partial_events_not_persisted_to_sqlite(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str,
         mock_event_sink: AsyncMock
     ) -> None:
-        """Partial events are published to Redis but not persisted to SQLite."""
-
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
+        """Partial events are published to Redis Stream but not persisted to SQLite."""
         # Create tracer
         event_queue = EventSinkQueue(redis_event_hub, test_session_id)
         tracer = EventingTracer(
@@ -93,22 +83,17 @@ class TestRedisSQLiteIntegration:
 
         # Emit partial event (persist_event=False)
         tracer.emit_event("test_event", {"message": "partial"}, persist_event=False)
-        await asyncio.sleep(0.1)  # Let async task run
+        await asyncio.sleep(0.3)  # Let async task run
 
-        # Redis should receive event
-        try:
-            redis_event = await asyncio.wait_for(queue.get(), timeout=1.0)
-            assert redis_event["type"] == "test_event"
-            assert redis_event["data"]["message"] == "partial"
-        except asyncio.TimeoutError:
-            pytest.fail("Did not receive event from Redis")
+        # Event should be in Redis Stream (streams always persist!)
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 1
 
         # SQLite sink should NOT be called
-        await asyncio.sleep(0.5)  # Give time
         assert not mock_event_sink.called
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
 
     @pytest.mark.asyncio
     async def test_multiple_events_sequence(
@@ -118,11 +103,6 @@ class TestRedisSQLiteIntegration:
         mock_event_sink: AsyncMock
     ) -> None:
         """Multiple events published and persisted in order."""
-
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
         # Create tracer
         event_queue = EventSinkQueue(redis_event_hub, test_session_id)
         tracer = EventingTracer(
@@ -139,18 +119,20 @@ class TestRedisSQLiteIntegration:
 
         await asyncio.sleep(0.5)  # Let all events process
 
-        # Redis should have received all 5 events in order
+        # Redis Stream should have all 5 events
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 5
+
+        # Read events from stream to verify order
         received_events = []
-        while not queue.empty():
-            try:
-                event = queue.get_nowait()
-                received_events.append(event)
-            except asyncio.QueueEmpty:
-                break
+        async for evt in redis_event_hub.subscribe(test_session_id):
+            if evt.get("type") == "test_event":
+                received_events.append(evt)
+                if len(received_events) >= 5:
+                    break
 
         assert len(received_events) == 5
         for i, event in enumerate(received_events):
-            assert event["type"] == "test_event"
             assert event["data"]["index"] == i
             assert event["sequence"] == i + 1
 
@@ -158,10 +140,10 @@ class TestRedisSQLiteIntegration:
         assert mock_event_sink.call_count == 5
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
 
     @pytest.mark.asyncio
-    async def test_redis_failure_still_persists_to_sqlite(
+    async def test_redis_failure_falls_back_to_sqlite(
         self,
         test_session_id: str,
         mock_event_sink: AsyncMock
@@ -170,7 +152,7 @@ class TestRedisSQLiteIntegration:
         # Create hub with invalid Redis URL (will fail)
         invalid_hub = RedisEventHub(
             redis_url="redis://invalid-host:9999/0",
-            max_queue_size=100
+            stream_maxlen=1000
         )
 
         try:
@@ -200,8 +182,8 @@ class TestRedisSQLiteIntegration:
 
 
 @pytest.mark.redis
-class TestEventSinkQueue:
-    """Tests for EventSinkQueue adapter."""
+class TestEventSinkQueueIntegration:
+    """Tests for EventSinkQueue adapter integration."""
 
     @pytest.mark.asyncio
     async def test_event_sink_queue_put(
@@ -209,16 +191,9 @@ class TestEventSinkQueue:
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """EventSinkQueue.put() publishes to Redis."""
-
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
-        # Create EventSinkQueue
+        """EventSinkQueue.put() publishes to Redis Stream."""
         event_sink_queue = EventSinkQueue(redis_event_hub, test_session_id)
 
-        # Put an event
         event = {
             "type": "test_event",
             "data": {"message": "via_sink_queue"},
@@ -227,16 +202,18 @@ class TestEventSinkQueue:
         }
         await event_sink_queue.put(event)
 
-        # Should receive from Redis
-        try:
-            received = await asyncio.wait_for(queue.get(), timeout=1.0)
-            assert received["type"] == "test_event"
-            assert received["data"]["message"] == "via_sink_queue"
-        except asyncio.TimeoutError:
-            pytest.fail("Did not receive event from Redis")
+        # Event should be in stream
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 1
+
+        # Read it back
+        async for evt in redis_event_hub.subscribe(test_session_id):
+            if evt.get("type") == "test_event":
+                assert evt["data"]["message"] == "via_sink_queue"
+                break
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
 
     @pytest.mark.asyncio
     async def test_event_sink_queue_put_nowait(
@@ -244,16 +221,9 @@ class TestEventSinkQueue:
         redis_event_hub: RedisEventHub,
         test_session_id: str
     ) -> None:
-        """EventSinkQueue.put_nowait() publishes to Redis asynchronously."""
-
-        # Subscribe to Redis
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
-        # Create EventSinkQueue
+        """EventSinkQueue.put_nowait() publishes to Redis Stream asynchronously."""
         event_sink_queue = EventSinkQueue(redis_event_hub, test_session_id)
 
-        # Put an event (nowait)
         event = {
             "type": "test_event",
             "data": {"message": "nowait"},
@@ -264,66 +234,27 @@ class TestEventSinkQueue:
 
         await asyncio.sleep(0.2)  # Give time for async task
 
-        # Should receive from Redis
-        try:
-            received = await asyncio.wait_for(queue.get(), timeout=1.0)
-            assert received["type"] == "test_event"
-            assert received["data"]["message"] == "nowait"
-        except asyncio.TimeoutError:
-            pytest.fail("Did not receive event from Redis")
+        # Event should be in stream
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 1
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
 
 
 @pytest.mark.redis
-class TestEventDeliveryTiming:
-    """Tests for event delivery timing and race conditions."""
+class TestLateSubscriberScenarios:
+    """Tests for late subscriber scenarios - key advantage of Streams over Pub/Sub."""
 
     @pytest.mark.asyncio
-    async def test_subscribe_after_publish(
+    async def test_late_subscriber_sees_all_events(
         self,
         redis_event_hub: RedisEventHub,
         test_session_id: str,
         mock_event_sink: AsyncMock
     ) -> None:
-        """Events published before subscribe are NOT received (Redis is ephemeral)."""
-
-        # Publish event BEFORE subscribing
-        event = {
-            "type": "test_event",
-            "data": {"message": "before_subscribe"},
-            "sequence": 1,
-            "session_id": test_session_id,
-        }
-        await redis_event_hub.publish(test_session_id, event)
-
-        # Now subscribe
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
-        # Should NOT receive the event (Redis Pub/Sub is ephemeral)
-        try:
-            received = await asyncio.wait_for(queue.get(), timeout=0.5)
-            # If we get here, something is wrong
-            pytest.fail(f"Should not have received event, but got: {received}")
-        except asyncio.TimeoutError:
-            # This is expected - event was published before subscribe
-            pass
-
-        # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
-
-    @pytest.mark.asyncio
-    async def test_late_subscriber_needs_replay(
-        self,
-        redis_event_hub: RedisEventHub,
-        test_session_id: str,
-        mock_event_sink: AsyncMock
-    ) -> None:
-        """Demonstrates need for SQLite replay for late subscribers."""
-
-        # Create tracer and publish 3 events
+        """Late subscriber (subscribes AFTER events published) still sees all events."""
+        # Create tracer and publish 5 events BEFORE any subscriber
         event_queue = EventSinkQueue(redis_event_hub, test_session_id)
         tracer = EventingTracer(
             NullTracer(),
@@ -332,24 +263,196 @@ class TestEventDeliveryTiming:
             session_id=test_session_id,
         )
 
-        for i in range(3):
+        for i in range(5):
             tracer.emit_event("test_event", {"index": i}, persist_event=True)
             await asyncio.sleep(0.05)
 
-        await asyncio.sleep(0.5)  # Let events process
+        await asyncio.sleep(0.5)  # Let all events process
 
-        # Now subscribe (after events were published)
-        queue = await redis_event_hub.subscribe(test_session_id)
-        await asyncio.sleep(0.1)  # Let listener start
+        # Verify events are in stream
+        info = await redis_event_hub.get_stream_info(test_session_id)
+        assert info["length"] == 5
 
-        # Should NOT receive any events from Redis (they were published before)
-        assert queue.empty()
+        # Now subscribe (late subscriber)
+        received_events = []
+        async for evt in redis_event_hub.subscribe(test_session_id):
+            if evt.get("type") == "test_event":
+                received_events.append(evt)
+                if len(received_events) >= 5:
+                    break
 
-        # But SQLite sink should have all 3 events persisted
-        assert mock_event_sink.call_count == 3
-
-        # This demonstrates why SSE endpoint needs to replay from SQLite
-        # for late subscribers (overlap buffer strategy)
+        # Should have received ALL 5 events (this would fail with Pub/Sub!)
+        assert len(received_events) == 5
+        for i, event in enumerate(received_events):
+            assert event["data"]["index"] == i
 
         # Cleanup
-        await redis_event_hub.unsubscribe(test_session_id, queue)
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_subscriber_starts_from_specific_sequence(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str,
+        mock_event_sink: AsyncMock
+    ) -> None:
+        """Subscriber can start reading from a specific sequence (resume scenario)."""
+        # Publish 10 events
+        event_queue = EventSinkQueue(redis_event_hub, test_session_id)
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=event_queue,
+            event_sink=mock_event_sink,
+            session_id=test_session_id,
+        )
+
+        for i in range(10):
+            tracer.emit_event("test_event", {"index": i}, persist_event=True)
+            await asyncio.sleep(0.05)
+
+        await asyncio.sleep(0.5)
+
+        # Subscribe starting from sequence 5 (resume from checkpoint)
+        received_events = []
+        async for evt in redis_event_hub.subscribe(test_session_id, from_sequence=5):
+            if evt.get("type") == "test_event":
+                received_events.append(evt)
+                if len(received_events) >= 5:
+                    break
+
+        # Should have events 6-10 only
+        assert len(received_events) == 5
+        for event in received_events:
+            assert event["sequence"] > 5
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
+
+    @pytest.mark.asyncio
+    async def test_multiple_late_subscribers_all_see_events(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str,
+        mock_event_sink: AsyncMock
+    ) -> None:
+        """Multiple late subscribers all see the same events independently."""
+        # Publish events BEFORE any subscriber
+        event_queue = EventSinkQueue(redis_event_hub, test_session_id)
+        tracer = EventingTracer(
+            NullTracer(),
+            event_queue=event_queue,
+            event_sink=mock_event_sink,
+            session_id=test_session_id,
+        )
+
+        for i in range(5):
+            tracer.emit_event("test_event", {"index": i}, persist_event=True)
+            await asyncio.sleep(0.05)
+
+        await asyncio.sleep(0.5)
+
+        # Create 3 late subscribers
+        async def read_events() -> list[dict]:
+            events = []
+            async for evt in redis_event_hub.subscribe(test_session_id):
+                if evt.get("type") == "test_event":
+                    events.append(evt)
+                    if len(events) >= 5:
+                        break
+            return events
+
+        # Run all 3 concurrently
+        results = await asyncio.gather(
+            read_events(),
+            read_events(),
+            read_events(),
+        )
+
+        # All 3 should have received all 5 events
+        for events in results:
+            assert len(events) == 5
+            for i, event in enumerate(events):
+                assert event["data"]["index"] == i
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)
+
+
+@pytest.mark.redis
+class TestStreamDurability:
+    """Tests for stream durability and persistence."""
+
+    @pytest.mark.asyncio
+    async def test_events_persist_across_reconnect(
+        self,
+        redis_url: str,
+        test_session_id: str,
+    ) -> None:
+        """Events persist in stream even after hub is closed and recreated."""
+        # Create hub and publish events
+        hub1 = RedisEventHub(redis_url=redis_url, stream_maxlen=1000)
+
+        for i in range(3):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await hub1.publish(test_session_id, event)
+
+        await hub1.close()
+
+        # Create new hub and read events
+        hub2 = RedisEventHub(redis_url=redis_url, stream_maxlen=1000)
+
+        try:
+            # Events should still be there
+            info = await hub2.get_stream_info(test_session_id)
+            assert info["length"] == 3
+
+            # Can read all events
+            received_events = []
+            async for evt in hub2.subscribe(test_session_id):
+                if evt.get("type") == "test_event":
+                    received_events.append(evt)
+                    if len(received_events) >= 3:
+                        break
+
+            assert len(received_events) == 3
+
+        finally:
+            await hub2.delete_stream(test_session_id)
+            await hub2.close()
+
+    @pytest.mark.asyncio
+    async def test_get_events_after_for_replay(
+        self,
+        redis_event_hub: RedisEventHub,
+        test_session_id: str,
+    ) -> None:
+        """get_events_after can be used for efficient replay without subscription."""
+        # Publish 10 events
+        for i in range(10):
+            event = {
+                "type": "test_event",
+                "data": {"index": i},
+                "sequence": i + 1,
+                "session_id": test_session_id,
+            }
+            await redis_event_hub.publish(test_session_id, event)
+
+        # Use get_events_after for bulk replay (more efficient than subscribing)
+        events = await redis_event_hub.get_events_after(
+            test_session_id,
+            after_sequence=0,  # Get all
+            limit=100
+        )
+
+        assert len(events) == 10
+        for i, event in enumerate(events):
+            assert event["data"]["index"] == i
+            assert event["sequence"] == i + 1
+
+        # Cleanup
+        await redis_event_hub.delete_stream(test_session_id)

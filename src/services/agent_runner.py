@@ -115,8 +115,13 @@ class AgentRunner:
                 f"    url: \"redis://redis:6379/0\""
             )
 
-        # Initialize RedisEventHub (required)
-        self._event_hub = RedisEventHub(redis_url=redis_url, max_queue_size=500)
+        # Initialize RedisEventHub with Redis Streams (required)
+        self._event_hub = RedisEventHub(
+            redis_url=redis_url,
+            stream_maxlen=10000,  # Keep last 10k events per session
+            block_ms=30000,  # 30 second XREAD block timeout
+            stream_ttl_seconds=86400,  # 24 hour TTL for streams
+        )
         self._redis_url = redis_url
         self._redis_verified = False
 
@@ -553,13 +558,30 @@ class AgentRunner:
         """Deprecated: event queues are managed per-subscriber."""
         return None
 
-    async def subscribe(self, session_id: str) -> asyncio.Queue:
-        """Subscribe to events for a session."""
-        return await self._event_hub.subscribe(session_id)
+    def subscribe(
+        self,
+        session_id: str,
+        from_sequence: Optional[int] = None,
+    ):
+        """
+        Subscribe to events for a session via Redis Streams.
 
-    async def unsubscribe(self, session_id: str, queue: asyncio.Queue) -> None:
-        """Unsubscribe from events for a session."""
-        await self._event_hub.unsubscribe(session_id, queue)
+        Returns an async generator that yields events from the stream.
+        With Redis Streams, events are persisted so consumers can join
+        at any time and read from any point - no race conditions.
+
+        Args:
+            session_id: The session ID to subscribe to.
+            from_sequence: Start from events after this sequence (optional).
+
+        Returns:
+            Async generator yielding event dictionaries.
+        """
+        return self._event_hub.subscribe(session_id, from_sequence=from_sequence)
+
+    async def stop_subscriber(self, session_id: str) -> None:
+        """Signal subscribers to stop for a session."""
+        await self._event_hub.stop_subscriber(session_id)
 
     async def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Publish an event to all subscribers for a session."""

@@ -703,216 +703,97 @@ async def stream_events(
             detail=f"Session not found: {session_id}",
         )
 
-    queue = await agent_runner.subscribe(session_id)
-
-    # Heartbeat interval - sends heartbeats independently of event processing
-    HEARTBEAT_INTERVAL_SECONDS = 15.0
+    # Determine starting sequence for stream subscription
+    start_sequence = after or 0
+    if last_event_id:
+        try:
+            start_sequence = int(last_event_id)
+        except ValueError:
+            start_sequence = after or 0
 
     async def event_generator():
         """
-        Generate SSE events for a session.
+        Generate SSE events for a session using Redis Streams.
 
-        Handles:
-        - Normal event streaming from the agent
-        - Independent heartbeats via background task (not blocked by event loop)
-        - Error events if the agent fails before sending events
-        - Graceful completion when agent finishes
+        Redis Streams Architecture:
+        - Events persist in the stream (unlike Pub/Sub which is fire-and-forget)
+        - Consumers can join at any time and read from any point
+        - No race conditions - events are always available in the stream
+        - Built-in heartbeats on XREAD timeout (30 seconds)
 
-        Event Delivery Guarantee (Redis-first architecture):
-        Events are published to Redis first (~1ms), then persisted to SQLite (~5-50ms).
-        To handle the race condition where SSE subscribes after Redis publish but
-        before SQLite persist, we use a 10-event overlap buffer:
-        1. Subscribe to Redis Pub/Sub first (catches future events)
-        2. Replay from DB starting at sequence-10 (overlap buffer)
-        3. Deduplicate by sequence number (prevents duplicates from overlap)
-        This ensures no events are lost while maintaining low latency.
+        The stream subscription handles:
+        - Reading from the beginning (position "0") or specific sequence
+        - Blocking reads with automatic timeout heartbeats
+        - Graceful handling of terminal events (agent_complete, error, cancelled)
 
-        Independent Heartbeat Architecture:
-        Heartbeats run in a separate background task that is NOT blocked by:
-        - Long-running tool executions
-        - Synchronous operations blocking the event loop
-        - Slow database queries
-        The heartbeat task writes to a dedicated queue, and we use asyncio.wait()
-        to listen to both the event queue and heartbeat queue simultaneously.
+        SQLite backup:
+        Events are also persisted to SQLite for long-term storage, but the
+        primary real-time delivery is via Redis Streams. SQLite is used for
+        historical queries and disaster recovery.
         """
-        # Create a dedicated heartbeat queue for independent heartbeat delivery
-        heartbeat_queue: asyncio.Queue[dict] = asyncio.Queue()
-        stop_heartbeat = asyncio.Event()
-        heartbeat_task: asyncio.Task | None = None
-
-        async def heartbeat_producer():
-            """
-            Independent heartbeat producer running in background.
-
-            This task is NOT blocked by the main event processing loop.
-            It runs independently and pushes heartbeats to a queue that
-            the main generator consumes alongside real events.
-            """
-            while not stop_heartbeat.is_set():
-                try:
-                    # Wait for heartbeat interval or stop signal
-                    try:
-                        await asyncio.wait_for(
-                            stop_heartbeat.wait(),
-                            timeout=HEARTBEAT_INTERVAL_SECONDS
-                        )
-                        # If we get here, stop was signaled
-                        break
-                    except asyncio.TimeoutError:
-                        # Timeout expired - time to send heartbeat
-                        pass
-
-                    # Build heartbeat with current session state
-                    try:
-                        current_session = await session_service.get_session(db, session_id)
-                        session_status = current_session.status if current_session else "unknown"
-                        current_last_seq = await event_service.get_last_sequence(session_id)
-                        redis_ok = agent_runner._event_hub is not None
-                    except Exception:
-                        session_status = "unknown"
-                        current_last_seq = 0
-                        redis_ok = False
-
-                    heartbeat_data = {
-                        "type": "heartbeat",
-                        "data": {
-                            "session_status": session_status,
-                            "last_sequence": current_last_seq,
-                            "redis_ok": redis_ok,
-                            "server_time": datetime.now(timezone.utc).isoformat(),
-                        },
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-
-                    # Non-blocking put to heartbeat queue
-                    try:
-                        heartbeat_queue.put_nowait(heartbeat_data)
-                    except asyncio.QueueFull:
-                        # Queue full, skip this heartbeat (old one still pending)
-                        pass
-
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.warning(f"Heartbeat producer error: {e}")
-                    # Continue trying - heartbeats are critical for connection health
-
-        async def get_next_item():
-            """
-            Wait for either an event or a heartbeat, whichever comes first.
-            Returns tuple of (item, source) where source is 'event' or 'heartbeat'.
-            """
-            event_task = asyncio.create_task(queue.get())
-            heartbeat_get_task = asyncio.create_task(heartbeat_queue.get())
-
-            try:
-                done, pending = await asyncio.wait(
-                    [event_task, heartbeat_get_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                # Cancel pending tasks
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                # Return the completed result
-                completed_task = done.pop()
-                if completed_task is event_task:
-                    return (completed_task.result(), 'event')
-                else:
-                    return (completed_task.result(), 'heartbeat')
-
-            except asyncio.CancelledError:
-                event_task.cancel()
-                heartbeat_get_task.cancel()
-                raise
+        # Track sent sequences with a set instead of just max sequence.
+        # Events can arrive out of order in Redis Streams because they're
+        # published via async tasks. Using a set ensures we don't skip
+        # events that have lower sequence numbers but arrive later.
+        sent_sequences: set[int] = set()
+        max_sent_sequence = start_sequence
 
         try:
-            # Start independent heartbeat producer
-            heartbeat_task = asyncio.create_task(heartbeat_producer())
+            # Subscribe to Redis Stream - async generator yields events
+            async for event in agent_runner.subscribe(session_id, from_sequence=start_sequence):
+                event_type = event.get("type")
+                seq = event.get("sequence", 0)
 
-            last_sequence = after or 0
-            if last_event_id:
-                try:
-                    last_sequence = int(last_event_id)
-                except ValueError:
-                    last_sequence = after or 0
+                # Heartbeats have sequence -1, always send them
+                if event_type == "heartbeat":
+                    payload = json.dumps(event, default=str)
+                    yield f"data: {payload}\n\n"
 
-            # Store original for deduplication
-            original_last_sequence = last_sequence
-
-            # Add 10-event overlap buffer to catch Redis-published but not-yet-persisted events
-            replay_start_sequence = max(0, last_sequence - 10)
-
-            # Replay missed events from persistence with overlap buffer
-            replay_events = await event_service.list_events(
-                session_id=session_id,
-                after_sequence=replay_start_sequence,
-                limit=2000,
-            )
-
-            # Deduplicate events in overlap window
-            seen_sequences = set()
-            for event in replay_events:
-                seq = event.get('sequence')
-
-                # Skip if already sent or duplicate
-                if seq in seen_sequences or seq <= original_last_sequence:
+                    # Check if task finished during heartbeat
+                    if not agent_runner.is_running(session_id):
+                        # Check SQLite for terminal event we might have missed
+                        final_events = await event_service.list_events(
+                            session_id=session_id,
+                            after_sequence=max_sent_sequence,
+                            limit=100,
+                        )
+                        for final_event in final_events:
+                            final_type = final_event.get("type")
+                            if final_type in ("agent_complete", "error", "cancelled"):
+                                final_payload = json.dumps(final_event, default=str)
+                                final_seq = final_event.get("sequence", 9999)
+                                yield f"id: {final_seq}\n"
+                                yield f"data: {final_payload}\n\n"
+                                return
                     continue
 
-                seen_sequences.add(seq)
+                # Skip events we've already sent (deduplication using set)
+                # This handles out-of-order delivery from Redis Streams
+                if seq > 0 and (seq in sent_sequences or seq <= start_sequence):
+                    continue
+
+                # Send the event
                 payload = json.dumps(event, default=str)
                 yield f"id: {seq}\n"
                 yield f"data: {payload}\n\n"
-                last_sequence = seq
 
-                if event.get("type") in ("agent_complete", "error", "cancelled"):
+                if seq > 0:
+                    sent_sequences.add(seq)
+                    max_sent_sequence = max(max_sent_sequence, seq)
+                    # Keep set bounded to prevent memory growth
+                    if len(sent_sequences) > 10000:
+                        # Remove sequences below the 1000th lowest
+                        sorted_seqs = sorted(sent_sequences)
+                        for old_seq in sorted_seqs[:1000]:
+                            sent_sequences.discard(old_seq)
+
+                # Terminal events end the stream
+                if event_type in ("agent_complete", "error", "cancelled"):
                     return
 
-            # Stream live events from Redis with independent heartbeats
-            while True:
-                try:
-                    item, source = await get_next_item()
-                except asyncio.CancelledError:
-                    break
-
-                if source == 'heartbeat':
-                    # Heartbeat from independent producer
-                    yield f"data: {json.dumps(item)}\n\n"
-
-                    # Check if task finished
-                    if not agent_runner.is_running(session_id) and queue.empty():
-                        break
-                    continue
-
-                # Regular event from queue
-                event = item
-                seq = event.get("sequence", 0)
-                event_type = event.get("type")
-
-                # CRITICAL: Never skip terminal events - they must always be delivered
-                # to ensure SSE stream properly terminates. This prevents the "infinite
-                # processing..." bug when partial message sequence numbers cause gaps.
-                # See: Session 20260118_184501_4e5cf999 analysis for details.
-                is_terminal = event_type in ("agent_complete", "error", "cancelled")
-
-                # Deduplicate (might overlap with replay) - but NEVER skip terminal events
-                if not is_terminal and (seq in seen_sequences or seq <= last_sequence):
-                    continue
-
-                seen_sequences.add(seq)
-                payload = json.dumps(event, default=str)
-
-                yield f"id: {seq}\n"
-                yield f"data: {payload}\n\n"
-
-                if is_terminal:
-                    break
-                last_sequence = seq
+        except asyncio.CancelledError:
+            logger.debug(f"SSE stream cancelled for session {session_id}")
+            raise
 
         except Exception as e:
             # Send error event if SSE streaming fails
@@ -931,15 +812,8 @@ async def stream_events(
             yield f"data: {payload}\n\n"
 
         finally:
-            # Stop heartbeat producer
-            stop_heartbeat.set()
-            if heartbeat_task:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-            await agent_runner.unsubscribe(session_id, queue)
+            # Signal subscriber to stop (cleanup)
+            await agent_runner.stop_subscriber(session_id)
 
     return StreamingResponse(
         event_generator(),

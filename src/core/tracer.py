@@ -2575,42 +2575,53 @@ class EventingTracer(TracerBase):
         except RuntimeError:
             loop = None
 
-        async def persist_then_publish():
+        async def publish_and_persist():
             """
-            Publish to Redis first, then persist to SQLite.
+            Publish to Redis Stream first, then persist to SQLite.
 
-            Order changed to minimize latency:
-            1. Publish to Redis (~1ms) - all events for real-time delivery
-            2. Persist to SQLite (~5-50ms) - only important events for history
+            With Redis Streams (not Pub/Sub), events are durably stored in the
+            stream. This eliminates the race condition that existed with Pub/Sub:
 
-            The 10-event overlap buffer in SSE replay prevents race conditions
-            where SSE subscribes after Redis publish but before DB persist.
-            Events are deduplicated by sequence number to prevent duplicates.
+            Redis Streams Architecture:
+            1. Publish to Redis Stream (~1ms) - events persist in stream
+            2. Persist to SQLite (~5-50ms) - backup for long-term storage/analytics
+
+            Why this order works:
+            - Redis Streams persist events (unlike Pub/Sub which is fire-and-forget)
+            - SSE consumers read from the stream starting at position "0" (beginning)
+            - Even if consumer connects after publish, events are still in stream
+            - No race conditions - consumers always get all events from stream
+
+            SQLite persistence is now optional backup for:
+            - Long-term analytics and reporting
+            - Disaster recovery if Redis data is lost
+            - Historical queries that span beyond Redis TTL
             """
-            # Publish to Redis FIRST for low latency
+            # Publish to Redis Stream FIRST for low latency real-time delivery
+            # Events persist in stream - no race conditions with late subscribers
             try:
                 await self._event_queue.put(event)
             except Exception as e:
-                logger.error(f"Failed to publish event to Redis/EventHub: {e}")
-                # Continue to persistence even if publish fails
+                logger.error(f"Failed to publish event to Redis Stream: {e}")
+                # Continue to SQLite persistence as fallback
 
-            # Then persist to SQLite (only if persist_event=True)
+            # Then persist to SQLite as backup/long-term storage
             if self._event_sink is not None and persist_event:
                 try:
                     await self._event_sink(event)
                 except Exception as e:
-                    logger.warning(f"Event persistence failed: {e}")
+                    logger.warning(f"SQLite persistence failed (event is in Redis Stream): {e}")
 
         if loop and loop.is_running():
-            loop.create_task(persist_then_publish())
+            loop.create_task(publish_and_persist())
         else:
             # No event loop available - this shouldn't happen in normal operation
             # but can occur during shutdown or in edge cases
             logger.error(
                 f"emit_event called outside async context for {event_type}. "
-                "Event will be published to Redis but NOT persisted to SQLite."
+                "Event will be published to Redis Stream but NOT persisted to SQLite."
             )
-            # Best effort: publish to Redis (persistence requires async context)
+            # Best effort: publish to Redis Stream (SQLite persistence requires async context)
             try:
                 self._event_queue.put_nowait(event)
             except Exception as e:

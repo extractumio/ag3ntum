@@ -765,6 +765,7 @@ class ClaudeAgent:
             configure_path_validator(
                 session_id=session_info.session_id,
                 workspace_path=workspace_dir,
+                username=username,  # Pass username to configure SandboxPathResolver
                 skills_path=self._skills_dir if self._config.enable_skills else None,
                 global_skills_path=global_skills,
                 user_skills_path=user_skills,

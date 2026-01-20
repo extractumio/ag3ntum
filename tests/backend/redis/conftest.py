@@ -1,22 +1,30 @@
 """
-Pytest configuration and fixtures for Redis SSE tests.
+Pytest configuration and fixtures for Redis Streams tests.
 
 Provides fixtures for:
 - Redis connection and cleanup
-- RedisEventHub instances with subscription helpers
+- RedisEventHub (Streams) instances with async generator helpers
 - EventingTracer factory for consistent tracer setup
 - Mock event sinks with assertion helpers
 - Test session ID generation
-- Event publishing utilities
+- Stream management utilities
 
 IMPORTANT: This test suite requires redis package to be installed.
 Tests will fail fast if dependencies are missing.
+
+Architecture Note:
+The RedisEventHub now uses Redis Streams (XADD/XREAD) instead of Pub/Sub.
+Key differences:
+- Events persist in the stream (no more race conditions)
+- subscribe() returns an async generator, not a queue
+- Consumers can start from any point in the stream
+- No need for overlap buffer (streams are durable)
 """
 import asyncio
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Callable, Any
+from typing import AsyncGenerator, Callable, Any, AsyncIterator
 from unittest.mock import AsyncMock
 from urllib.parse import urlparse, urlunparse
 
@@ -42,7 +50,22 @@ from src.core.tracer import EventingTracer, NullTracer  # noqa: E402
 
 @pytest.fixture(scope="session")
 def redis_url() -> str:
-    """Redis connection URL for tests (uses DB 1, not DB 0 from config)."""
+    """
+    Redis connection URL for tests (uses DB 1, not DB 0 from config).
+
+    Supports environment variable override for local testing:
+        REDIS_TEST_URL=redis://localhost:46379/1 pytest tests/backend/redis/
+
+    When running locally (outside Docker), use localhost:46379.
+    When running in Docker, use redis:6379 (from config).
+    """
+    import os
+
+    # Check for environment variable override (for local testing)
+    env_url = os.environ.get("REDIS_TEST_URL")
+    if env_url:
+        return env_url
+
     config_path = PROJECT_ROOT / "config" / "api.yaml"
     try:
         with open(config_path) as f:
@@ -73,7 +96,7 @@ async def redis_connection(redis_url: str) -> AsyncGenerator[redis.Redis, None]:
 
     Fails fast if Redis is not reachable or misconfigured.
     """
-    conn = redis.Redis.from_url(redis_url, decode_responses=False)
+    conn = redis.Redis.from_url(redis_url, decode_responses=True)
 
     # Test connection - fail fast if Redis not available
     try:
@@ -94,11 +117,17 @@ async def redis_connection(redis_url: str) -> AsyncGenerator[redis.Redis, None]:
 @pytest_asyncio.fixture
 async def redis_event_hub(redis_url: str) -> AsyncGenerator[RedisEventHub, None]:
     """
-    Provide a RedisEventHub instance for tests.
+    Provide a RedisEventHub (Streams) instance for tests.
 
+    Uses shorter timeouts for faster test execution.
     Fails fast if Redis is not reachable or misconfigured.
     """
-    hub = RedisEventHub(redis_url=redis_url, max_queue_size=100)
+    hub = RedisEventHub(
+        redis_url=redis_url,
+        stream_maxlen=1000,  # Smaller for tests
+        block_ms=2000,  # 2 second timeout for faster tests
+        stream_ttl_seconds=300,  # 5 minute TTL for tests
+    )
 
     # Test connection - fail fast if Redis not available
     try:
@@ -150,6 +179,89 @@ def mock_event_sink() -> AsyncMock:
 
 
 # =============================================================================
+# Stream Helper Fixtures
+# =============================================================================
+
+@dataclass
+class StreamContext:
+    """Context for managing stream subscription lifecycle in tests."""
+    session_id: str
+    hub: RedisEventHub
+    events: list[dict[str, Any]]
+    _task: asyncio.Task | None = None
+    _stop_event: asyncio.Event | None = None
+
+    async def start_collecting(self, from_sequence: int | None = None) -> None:
+        """Start collecting events from the stream in background."""
+        self._stop_event = asyncio.Event()
+        self.events = []
+
+        async def collect():
+            try:
+                async for event in self.hub.subscribe(self.session_id, from_sequence=from_sequence):
+                    if self._stop_event.is_set():
+                        break
+                    self.events.append(event)
+            except asyncio.CancelledError:
+                pass
+
+        self._task = asyncio.create_task(collect())
+        await asyncio.sleep(0.1)  # Let collector start
+
+    async def stop_collecting(self) -> list[dict[str, Any]]:
+        """Stop collecting and return all collected events."""
+        if self._stop_event:
+            self._stop_event.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        return self.events
+
+    async def wait_for_events(self, count: int, timeout: float = 5.0) -> list[dict[str, Any]]:
+        """Wait until we have at least `count` events or timeout."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while len(self.events) < count:
+            if asyncio.get_event_loop().time() > deadline:
+                break
+            await asyncio.sleep(0.1)
+        return self.events
+
+
+@pytest_asyncio.fixture
+async def stream_context_factory(
+    redis_event_hub: RedisEventHub,
+) -> AsyncGenerator[Callable[[str], StreamContext], None]:
+    """
+    Factory fixture for creating StreamContext instances.
+
+    Usage:
+        ctx = stream_context_factory(session_id)
+        await ctx.start_collecting()
+        # ... publish events ...
+        events = await ctx.stop_collecting()
+    """
+    contexts: list[StreamContext] = []
+
+    def create_context(session_id: str) -> StreamContext:
+        ctx = StreamContext(
+            session_id=session_id,
+            hub=redis_event_hub,
+            events=[],
+        )
+        contexts.append(ctx)
+        return ctx
+
+    yield create_context
+
+    # Cleanup all created contexts
+    for ctx in contexts:
+        await ctx.stop_collecting()
+
+
+# =============================================================================
 # Tracer Factory Fixture
 # =============================================================================
 
@@ -159,30 +271,25 @@ class TracerContext:
     tracer: EventingTracer
     event_queue: EventSinkQueue
     session_id: str
-    redis_queue: asyncio.Queue
+    hub: RedisEventHub
 
 
 @pytest_asyncio.fixture
 async def tracer_factory(
     redis_event_hub: RedisEventHub,
     mock_event_sink: AsyncMock,
-) -> AsyncGenerator[Callable[[str], Any], None]:
+) -> AsyncGenerator[Callable[[str], TracerContext], None]:
     """
-    Factory fixture for creating EventingTracer instances with Redis integration.
+    Factory fixture for creating EventingTracer instances with Redis Streams integration.
 
     Usage:
-        ctx = await tracer_factory(session_id)
+        ctx = tracer_factory(session_id)
         ctx.tracer.emit_event("test", {"data": "value"})
-        event = await ctx.redis_queue.get()
+        # Read events from stream using hub.subscribe() or get_events_after()
     """
     contexts: list[TracerContext] = []
 
-    async def create_tracer(session_id: str) -> TracerContext:
-        # Subscribe to Redis first
-        redis_queue = await redis_event_hub.subscribe(session_id)
-        await asyncio.sleep(0.1)  # Let listener start
-
-        # Create tracer with Redis integration
+    def create_tracer(session_id: str) -> TracerContext:
         event_queue = EventSinkQueue(redis_event_hub, session_id)
         tracer = EventingTracer(
             NullTracer(),
@@ -195,39 +302,21 @@ async def tracer_factory(
             tracer=tracer,
             event_queue=event_queue,
             session_id=session_id,
-            redis_queue=redis_queue,
+            hub=redis_event_hub,
         )
         contexts.append(ctx)
         return ctx
 
     yield create_tracer
 
-    # Cleanup all created tracers
+    # Cleanup - delete test streams
     for ctx in contexts:
-        await redis_event_hub.unsubscribe(ctx.session_id, ctx.redis_queue)
+        await redis_event_hub.delete_stream(ctx.session_id)
 
 
 # =============================================================================
 # Event Helper Fixtures
 # =============================================================================
-
-@pytest_asyncio.fixture
-async def subscribed_queue(
-    redis_event_hub: RedisEventHub,
-    test_session_id: str,
-) -> AsyncGenerator[asyncio.Queue, None]:
-    """
-    Provide a Redis-subscribed queue for a session.
-
-    Automatically cleans up subscription after test.
-    """
-    queue = await redis_event_hub.subscribe(test_session_id)
-    await asyncio.sleep(0.1)  # Let listener start
-
-    yield queue
-
-    await redis_event_hub.unsubscribe(test_session_id, queue)
-
 
 @pytest.fixture
 def event_factory() -> Callable[..., dict[str, Any]]:
@@ -257,49 +346,95 @@ def event_factory() -> Callable[..., dict[str, Any]]:
 # Assertion Helpers
 # =============================================================================
 
-async def wait_for_event(
-    queue: asyncio.Queue,
-    timeout: float = 1.0,
-    event_type: str | None = None,
-) -> dict[str, Any]:
+async def collect_events_from_stream(
+    hub: RedisEventHub,
+    session_id: str,
+    timeout: float = 2.0,
+    max_events: int = 100,
+    from_sequence: int | None = None,
+) -> list[dict[str, Any]]:
     """
-    Wait for an event from a queue with optional type filtering.
+    Collect events from a stream with timeout.
 
     Args:
-        queue: The asyncio Queue to wait on
-        timeout: Maximum time to wait in seconds
-        event_type: If specified, skip events until matching type found
+        hub: The RedisEventHub instance
+        session_id: The session ID
+        timeout: Maximum time to collect
+        max_events: Stop after collecting this many events
+        from_sequence: Start from events after this sequence
 
     Returns:
-        The event dict
+        List of collected events
+    """
+    events = []
+    stop_event = asyncio.Event()
+
+    async def collect():
+        try:
+            async for event in hub.subscribe(session_id, from_sequence=from_sequence):
+                if stop_event.is_set():
+                    break
+                events.append(event)
+                if len(events) >= max_events:
+                    break
+                # Skip heartbeats for counting
+                if event.get("type") != "heartbeat" and len([e for e in events if e.get("type") != "heartbeat"]) >= max_events:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    task = asyncio.create_task(collect())
+
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError:
+        stop_event.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    return events
+
+
+async def wait_for_stream_event(
+    hub: RedisEventHub,
+    session_id: str,
+    timeout: float = 2.0,
+    event_type: str | None = None,
+    from_sequence: int | None = None,
+) -> dict[str, Any]:
+    """
+    Wait for a specific event type from a stream.
+
+    Args:
+        hub: The RedisEventHub instance
+        session_id: The session ID
+        timeout: Maximum time to wait
+        event_type: If specified, skip events until matching type found
+        from_sequence: Start from events after this sequence
+
+    Returns:
+        The matching event
 
     Raises:
         asyncio.TimeoutError: If no matching event within timeout
     """
     deadline = asyncio.get_event_loop().time() + timeout
 
-    while True:
-        remaining = deadline - asyncio.get_event_loop().time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError(f"No event received within {timeout}s")
-
-        try:
-            event = await asyncio.wait_for(queue.get(), timeout=remaining)
-            if event_type is None or event.get("type") == event_type:
-                return event
-        except asyncio.TimeoutError:
+    async for event in hub.subscribe(session_id, from_sequence=from_sequence):
+        if asyncio.get_event_loop().time() > deadline:
             raise asyncio.TimeoutError(f"No event of type '{event_type}' within {timeout}s")
 
+        if event_type is None or event.get("type") == event_type:
+            return event
 
-async def drain_queue(queue: asyncio.Queue) -> list[dict[str, Any]]:
-    """Drain all events from a queue without blocking."""
-    events = []
-    while not queue.empty():
-        try:
-            events.append(queue.get_nowait())
-        except asyncio.QueueEmpty:
-            break
-    return events
+        # Skip heartbeats if looking for specific type
+        if event.get("type") == "heartbeat":
+            continue
+
+    raise asyncio.TimeoutError(f"Stream ended without finding event of type '{event_type}'")
 
 
 # =============================================================================

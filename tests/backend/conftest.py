@@ -6,6 +6,7 @@ Provides fixtures for:
 - FastAPI test client with mock dependencies
 - Temporary sessions directory with automatic cleanup
 - Mock services (agent runner)
+- Centralized test user management with automatic cleanup
 """
 import asyncio
 import shutil
@@ -29,6 +30,9 @@ from src.db.database import Base, get_db  # noqa: E402
 from src.api.main import create_app  # noqa: E402
 from src.services.auth_service import AuthService  # noqa: E402
 from src.services.agent_runner import AgentRunner  # noqa: E402
+
+# Import centralized test user manager
+from tests.backend.test_user_manager import TestUserManager, TestUserData  # noqa: E402
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -216,6 +220,27 @@ def auth_service() -> AuthService:
     return AuthService()
 
 
+@pytest_asyncio.fixture
+async def test_user_manager(
+    test_session_factory, temp_sessions_dir
+) -> AsyncGenerator[TestUserManager, None]:
+    """
+    Provide a TestUserManager instance with automatic cleanup.
+
+    This fixture creates a manager that tracks all test users created during
+    a test and automatically cleans them up after the test completes.
+
+    The manager handles both database cleanup and filesystem cleanup for
+    user directories.
+    """
+    manager = TestUserManager(users_dir=temp_sessions_dir)
+    yield manager
+    # Cleanup all users created during the test
+    # Note: DB records are cleaned when tables are dropped, but this ensures
+    # filesystem artifacts are also cleaned
+    manager.cleanup_filesystem_only()
+
+
 @pytest.fixture
 def test_session_service(temp_sessions_dir):
     """
@@ -285,59 +310,15 @@ async def async_client(test_app) -> AsyncGenerator[AsyncClient, None]:
 
 
 @pytest_asyncio.fixture
-async def test_user(test_session_factory) -> dict:
-    """Create a test user and return credentials."""
-    import secrets
-    import uuid
+async def test_user(test_session_factory, test_user_manager) -> dict:
+    """
+    Create a test user and return credentials.
 
-    try:
-        import bcrypt
-        has_bcrypt = True
-    except ImportError:
-        has_bcrypt = False
-
-    # Generate unique email for each test
-    test_id = str(uuid.uuid4())[:8]
-    username = f"testuser_{test_id}"
-    email = f"test_{test_id}@example.com"
-    password = "test123"
-
-    # Hash password
-    if has_bcrypt:
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    else:
-        # Fallback for tests without bcrypt - use a simple hash
-        import hashlib
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
-
-    # Generate per-user JWT secret
-    jwt_secret = secrets.token_urlsafe(32)
-
-    # Create user directly in database using the shared session factory
-    from src.db.models import User
-    user = User(
-        id=str(uuid.uuid4()),
-        username=username,
-        email=email,
-        password_hash=password_hash,
-        role="user",
-        jwt_secret=jwt_secret,
-        linux_uid=None,
-        is_active=True,
-    )
-
-    async with test_session_factory() as session:
-        session.add(user)
-        await session.commit()
-        await session.refresh(user)
-
-        return {
-            "id": user.id,
-            "username": username,
-            "email": email,
-            "password": password,
-            "jwt_secret": user.jwt_secret,
-        }
+    Uses TestUserManager for centralized user creation with automatic cleanup.
+    Returns a dict for backwards compatibility with existing tests.
+    """
+    user_data = await test_user_manager.create_user(test_session_factory)
+    return user_data.to_dict()
 
 
 @pytest.fixture
@@ -380,62 +361,15 @@ def created_session(client, auth_headers) -> dict:
 
 
 @pytest_asyncio.fixture
-async def second_test_user(test_session_factory) -> dict:
+async def second_test_user(test_session_factory, test_user_manager) -> dict:
     """
     Create a second test user for isolation tests.
 
+    Uses TestUserManager for centralized user creation with automatic cleanup.
     Returns credentials dict similar to test_user.
     """
-    import secrets
-    import uuid
-
-    try:
-        import bcrypt
-        has_bcrypt = True
-    except ImportError:
-        has_bcrypt = False
-
-    # Generate unique email for each test
-    test_id = str(uuid.uuid4())[:8]
-    username = f"testuser2_{test_id}"
-    email = f"test2_{test_id}@example.com"
-    password = "test456"
-
-    # Hash password
-    if has_bcrypt:
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    else:
-        import hashlib
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
-
-    # Generate per-user JWT secret
-    jwt_secret = secrets.token_urlsafe(32)
-
-    # Create user directly in database using the shared session factory
-    from src.db.models import User
-    user = User(
-        id=str(uuid.uuid4()),
-        username=username,
-        email=email,
-        password_hash=password_hash,
-        role="user",
-        jwt_secret=jwt_secret,
-        linux_uid=None,
-        is_active=True,
-    )
-
-    async with test_session_factory() as session:
-        session.add(user)
-        await session.commit()
-        await session.refresh(user)
-
-        return {
-            "id": user.id,
-            "username": username,
-            "email": email,
-            "password": password,
-            "jwt_secret": user.jwt_secret,
-        }
+    user_data = await test_user_manager.create_second_user(test_session_factory)
+    return user_data.to_dict()
 
 
 @pytest.fixture
@@ -452,63 +386,15 @@ def second_auth_headers(client, second_test_user) -> dict:
 
 
 @pytest_asyncio.fixture
-async def test_admin_user(test_session_factory) -> dict:
+async def test_admin_user(test_session_factory, test_user_manager) -> dict:
     """
     Create a test admin user.
 
+    Uses TestUserManager for centralized user creation with automatic cleanup.
     Returns credentials dict with admin role.
     """
-    import secrets
-    import uuid
-
-    try:
-        import bcrypt
-        has_bcrypt = True
-    except ImportError:
-        has_bcrypt = False
-
-    # Generate unique email for each test
-    test_id = str(uuid.uuid4())[:8]
-    username = f"testadmin_{test_id}"
-    email = f"admin_{test_id}@example.com"
-    password = "adminpass123"
-
-    # Hash password
-    if has_bcrypt:
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    else:
-        import hashlib
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
-
-    # Generate per-user JWT secret
-    jwt_secret = secrets.token_urlsafe(32)
-
-    # Create admin user directly in database
-    from src.db.models import User
-    user = User(
-        id=str(uuid.uuid4()),
-        username=username,
-        email=email,
-        password_hash=password_hash,
-        role="admin",  # Admin role
-        jwt_secret=jwt_secret,
-        linux_uid=None,
-        is_active=True,
-    )
-
-    async with test_session_factory() as session:
-        session.add(user)
-        await session.commit()
-        await session.refresh(user)
-
-        return {
-            "id": user.id,
-            "username": username,
-            "email": email,
-            "password": password,
-            "role": "admin",
-            "jwt_secret": user.jwt_secret,
-        }
+    user_data = await test_user_manager.create_admin_user(test_session_factory)
+    return user_data.to_dict()
 
 
 @pytest.fixture

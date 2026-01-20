@@ -1,15 +1,17 @@
 """
 Tests for the session service.
 
-Tests the SessionService layer that handles session CRUD and 
+Tests the SessionService layer that handles session CRUD and
 coordinates between database and file-based storage.
+
+Note: Uses centralized test user fixtures from conftest.py for automatic
+cleanup of test artifacts.
 """
 import pytest
 import pytest_asyncio
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import User
 from src.services.session_service import SessionService
 
 
@@ -17,34 +19,16 @@ from src.services.session_service import SessionService
 async def session_service_with_user(
     test_session: AsyncSession,
     test_session_service: SessionService,
-    temp_sessions_dir: Path
+    temp_sessions_dir: Path,
+    test_user: dict,
 ) -> tuple[SessionService, str, Path]:
-    """Create a session service with temp dir and a test user."""
-    import secrets
-    import uuid
-    
-    try:
-        import bcrypt
-        password_hash = bcrypt.hashpw(b"test123", bcrypt.gensalt()).decode()
-    except ImportError:
-        import hashlib
-        password_hash = hashlib.sha256(b"test123").hexdigest()
-    
-    # Create a test user with all required fields
-    user = User(
-        id="service-test-user",
-        username="serviceuser",
-        email="service@example.com",
-        password_hash=password_hash,
-        role="user",
-        jwt_secret=secrets.token_urlsafe(32),
-        linux_uid=None,
-        is_active=True,
-    )
-    test_session.add(user)
-    await test_session.commit()
+    """
+    Create a session service with temp dir and a test user.
 
-    return test_session_service, "service-test-user", temp_sessions_dir
+    Uses the centralized test_user fixture for automatic cleanup
+    instead of creating users with hardcoded IDs.
+    """
+    return test_session_service, test_user["id"], temp_sessions_dir
 
 
 class TestSessionServiceCreate:

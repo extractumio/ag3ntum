@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Language**: Python 3.13+
 - **License**: AGPL-3.0 (commercial license available)
-- **Core SDK**: claude-agent-sdk 0.1.19
+- **Core SDK**: claude-agent-sdk 0.1.20
 - **Architecture**: Dual-mode (CLI direct + FastAPI web server)
 
 ### Available python modules

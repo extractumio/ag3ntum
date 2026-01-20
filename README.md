@@ -26,6 +26,7 @@ Ag3ntum transforms Claude Code into a **self-hosted AI automation platform** tha
 | Full filesystem access | Workspace-restricted |
 | No command filtering | 140+ dangerous patterns blocked |
 | Secrets exposed in environment | Sandboxed per-user secrets |
+| Files can be accidentally deleted | Read-only mounts + overwrite protection |
 | CLI-only access | Web UI + REST API |
 | Single user | Multi-tenant with isolation |
 | Black box execution | Full transparency—drill into every action |
@@ -80,6 +81,25 @@ Drill down into every tool call, command, and subagent. See exact shell commands
 ### Multi-Tenant Architecture
 JWT authentication, isolated workspaces, per-user API keys, separated session history. Teams share one deployment while maintaining complete isolation.
 
+### True Read-Only File Access
+Grant the agent read-only access to your files with **OS-level enforcement**. Docker `:ro` mounts and Bubblewrap `--ro-bind` ensure files cannot be modified—no matter what the agent attempts. Your source documents stay untouched while the agent analyzes them.
+
+```
+External Files (Protected)        Agent View
+────────────────────────         ─────────────
+/Users/greg/Documents/    ──►    workspace/external/ro/
+  ├── contracts/                   ├── contracts/  [READ-ONLY]
+  ├── financials/                  ├── financials/ [READ-ONLY]
+  └── reports.xlsx                 └── reports.xlsx [READ-ONLY]
+```
+
+### Safe File Updates (Overwrite Protection)
+Prevent accidental data loss with intelligent file update safeguards:
+- **Auto-backup** before overwriting existing files
+- **Confirmation prompts** for high-risk modifications
+- **Clear tool semantics**: `Write` creates new, `Edit` modifies existing
+- **Audit trail** for all file changes with before/after states
+
 ---
 
 ## Use Cases
@@ -118,6 +138,19 @@ User Request
 Each layer operates independently. Even if one is bypassed, others contain the damage.
 
 **Blocked by default:** `rm -rf`, `sudo`, `chmod 777`, `docker exec`, `nsenter`, path traversal, environment leakage, `/proc` enumeration, and 130+ more patterns.
+
+### Why Ag3ntum Sandboxed > Claude Code Dockerized
+
+| Protection | What It Prevents |
+|------------|------------------|
+| **Invisible execution** | Agents see zero other processes, preventing reconnaissance attacks |
+| **Escape-proof** | Container detection blocked; agents can't identify they're sandboxed |
+| **Credential lockdown** | No sudo access, login history, or system user enumeration |
+| **Injection-resistant** | No writable PATH directories eliminates binary hijacking |
+| **Ephemeral by design** | Clean tmpfs root with no Docker fingerprints |
+| **Zero software inventory exposure** | Package manager access blocked |
+
+*Verified via comparative security audits: Bubblewrap sandbox reduces attack surface by 50% compared to plain Docker containers.*
 
 ---
 

@@ -31,6 +31,14 @@ from ...security import scan_and_redact, is_scanner_enabled
 from ...services.mount_service import (
     resolve_external_symlink,
     resolve_file_path_for_external_mount,
+    resolve_file_path_for_session,
+    normalize_path_for_session,
+    is_path_writable_for_session,
+    translate_docker_path_to_sandbox,
+)
+from ...core.sandbox_path_resolver import (
+    has_sandbox_path_resolver,
+    PathResolutionError,
 )
 from ..deps import get_current_user_id, get_current_user_id_from_query_or_header
 from ..waf_filter import (
@@ -351,6 +359,92 @@ def validate_path_security(
                 )
 
     return resolved_path
+
+
+def validate_and_resolve_path_for_session(
+    session_id: str,
+    sandbox_path: str,
+    workspace_root: Path,
+) -> tuple[Path, bool, str]:
+    """
+    Validate and resolve a sandbox path using the session's SandboxPathResolver.
+
+    This is the preferred method for path resolution in the File Explorer API.
+    It uses the SandboxPathResolver for consistent path handling across all
+    components and provides better error messages with sandbox paths.
+
+    Falls back to validate_path_security + resolve_file_path_for_external_mount
+    if the SandboxPathResolver is not available for the session (backward compatibility).
+
+    Args:
+        session_id: The session ID
+        sandbox_path: Path in sandbox format (e.g., 'external/persistent/file.png')
+        workspace_root: Fallback workspace root for legacy resolution
+
+    Returns:
+        Tuple of (docker_path, is_external, mount_type):
+        - docker_path: Resolved Docker filesystem path
+        - is_external: True if path is in an external mount
+        - mount_type: Type of mount ('workspace', 'persistent', 'external_ro', etc.)
+
+    Raises:
+        HTTPException: If path is invalid or cannot be resolved
+    """
+    # Try to use SandboxPathResolver (preferred)
+    if has_sandbox_path_resolver(session_id):
+        try:
+            docker_path, is_external, mount_type = resolve_file_path_for_session(
+                session_id, sandbox_path
+            )
+            return docker_path, is_external, mount_type
+        except PathResolutionError as e:
+            # Translate error to HTTPException with user-friendly message
+            logger.warning(f"Path resolution failed for session {session_id}: {e}")
+            if e.reason == "EMPTY_PATH":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Empty path not allowed",
+                )
+            elif e.reason == "NULL_BYTES":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid path: null bytes not allowed",
+                )
+            elif e.reason == "OUTSIDE_MOUNTS":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Path outside allowed directories: {sandbox_path}",
+                )
+            elif e.reason == "UNKNOWN_MOUNT":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Mount not found: {sandbox_path}",
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid path: {sandbox_path}",
+                )
+        except RuntimeError as e:
+            # Resolver not configured - fall back to legacy method
+            logger.debug(f"SandboxPathResolver not available, using legacy: {e}")
+
+    # Fallback to legacy path resolution
+    try:
+        file_path = validate_path_security(sandbox_path, workspace_root)
+    except HTTPException:
+        raise
+
+    # Resolve external mounts using legacy method
+    actual_file, is_external = resolve_file_path_for_external_mount(
+        workspace_root, sandbox_path
+    )
+
+    # Determine mount type using legacy method
+    _, is_readonly, mount_type_str = get_mount_info(sandbox_path)
+    mount_type = mount_type_str if mount_type_str else "workspace"
+
+    return actual_file, is_external, mount_type
 
 
 def is_viewable_file(file_path: Path) -> bool:
@@ -810,12 +904,10 @@ async def download_file(
 
     workspace_root = Path(session.working_dir) / "workspace"
 
-    # Validate path with security checks
-    file_path = validate_path_security(path, workspace_root)
-
-    # Resolve external mount paths to actual filesystem paths
-    actual_file, is_external = resolve_file_path_for_external_mount(
-        workspace_root, path
+    # Validate and resolve path using session-aware resolver
+    # This uses SandboxPathResolver for consistent path handling
+    actual_file, is_external, mount_type = validate_and_resolve_path_for_session(
+        session_id, path, workspace_root
     )
 
     if not actual_file.exists():
@@ -829,6 +921,10 @@ async def download_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot download directory: {path}",
         )
+
+    logger.debug(
+        f"Download: {path} -> {actual_file} (external={is_external}, type={mount_type})"
+    )
 
     return FileResponse(
         path=actual_file,

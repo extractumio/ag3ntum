@@ -2778,6 +2778,18 @@ resume-context {
   color: var(--color-success);
 }
 
+.status-connection.reconnecting {
+  color: var(--color-warning);
+}
+
+.status-connection.polling {
+  color: var(--color-warning);
+}
+
+.status-connection.degraded {
+  color: #ff8c00; /* Orange for degraded */
+}
+
 .status-connection.disconnected {
   color: var(--color-error);
 }
