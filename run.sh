@@ -20,6 +20,12 @@ IMAGE_PREFIX="ag3ntum"  # Image name prefix
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external")
 
+# Directories that container needs to WRITE to (need ownership fix)
+WRITABLE_DIRS=("logs" "data" "users")
+
+# Directories that container only READS from (just need to exist)
+READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests")
+
 function show_usage() {
   cat <<EOF
 Usage: ./run.sh <command> [OPTIONS]
@@ -105,6 +111,115 @@ CLI Hints:
   Redis CLI:     docker exec -it project-redis-1 redis-cli
   Stop all:      docker compose down
 EOF
+}
+
+# Determine the best UID/GID for container based on environment
+# Sets HOST_UID and HOST_GID if not already set
+function auto_detect_uid() {
+  # If already set by user, respect that
+  if [[ -n "${HOST_UID:-}" ]]; then
+    return
+  fi
+
+  # macOS: Docker Desktop handles UID mapping, use current user
+  if [[ "$(uname)" == "Darwin" ]]; then
+    export HOST_UID="$(id -u)"
+    export HOST_GID="$(id -g)"
+    return
+  fi
+
+  # Linux: Choose based on who's running the script
+  if [[ "$(id -u)" == "0" ]]; then
+    # Running as root (typical VPS deployment)
+    # Use dedicated service user for isolation
+    export HOST_UID="45045"
+    export HOST_GID="45045"
+  else
+    # Running as regular user (development or non-root VPS)
+    # Use current user to avoid permission issues
+    export HOST_UID="$(id -u)"
+    export HOST_GID="$(id -g)"
+  fi
+}
+
+# Setup directories with proper ownership for container user
+# This ensures bind-mounted volumes are writable by the container
+function setup_directories() {
+  # Auto-detect UID/GID if not set
+  auto_detect_uid
+
+  local target_uid="${HOST_UID}"
+  local target_gid="${HOST_GID}"
+
+  echo "=== Setting up directories ==="
+
+  # On macOS, Docker Desktop handles UID/GID mapping automatically
+  if [[ "$(uname)" == "Darwin" ]]; then
+    echo "  macOS detected - Docker Desktop handles permissions"
+    # Just ensure directories exist
+    for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
+      if [[ ! -d "${dir}" ]]; then
+        echo "  Creating ${dir}/"
+        mkdir -p "${dir}"
+      fi
+    done
+    echo "  Directories ready (UID:GID = ${target_uid}:${target_gid})"
+    return
+  fi
+
+  # Show what UID we're using and why
+  if [[ "$(id -u)" == "0" ]]; then
+    echo "  Running as root -> using service user 45045"
+  else
+    echo "  Running as $(whoami) -> using UID $(id -u)"
+  fi
+  echo "  Target UID:GID = ${target_uid}:${target_gid}"
+
+  # Create and fix ownership for writable directories (logs, data, users)
+  for dir in "${WRITABLE_DIRS[@]}"; do
+    if [[ ! -d "${dir}" ]]; then
+      echo "  Creating ${dir}/"
+      mkdir -p "${dir}"
+    fi
+
+    # Check current ownership
+    local current_uid current_gid
+    current_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
+    current_gid=$(stat -c '%g' "${dir}" 2>/dev/null || echo "0")
+
+    # Change ownership if needed
+    if [[ "${current_uid}" != "${target_uid}" || "${current_gid}" != "${target_gid}" ]]; then
+      if [[ "$(id -u)" == "0" ]]; then
+        # Running as root - can change ownership directly
+        echo "  Fixing ownership: ${dir}/ -> ${target_uid}:${target_gid}"
+        chown -R "${target_uid}:${target_gid}" "${dir}"
+      elif [[ "${target_uid}" == "$(id -u)" ]]; then
+        # Target is current user - should be able to chown our own files
+        chown -R "${target_uid}:${target_gid}" "${dir}" 2>/dev/null || {
+          # Might fail if some files are root-owned
+          echo "  Fixing ownership (sudo): ${dir}/ -> ${target_uid}:${target_gid}"
+          sudo chown -R "${target_uid}:${target_gid}" "${dir}"
+        }
+      else
+        # This shouldn't happen with auto-detection, but handle it
+        echo "  Fixing ownership (sudo): ${dir}/ -> ${target_uid}:${target_gid}"
+        sudo chown -R "${target_uid}:${target_gid}" "${dir}" 2>/dev/null || {
+          echo "  WARNING: Cannot fix ownership of ${dir}/"
+          echo "           sudo chown -R ${target_uid}:${target_gid} ${dir}"
+        }
+      fi
+    fi
+  done
+
+  # Ensure read-only directories exist (no ownership change needed)
+  for dir in "${READABLE_DIRS[@]}"; do
+    if [[ ! -d "${dir}" ]]; then
+      echo "  Creating ${dir}/"
+      mkdir -p "${dir}"
+    fi
+  done
+
+  echo "  Directories ready"
 }
 
 # Validate and process a mount specification
@@ -1047,6 +1162,10 @@ fi
 API_PORT="$(read_config_value 'api.external_port')"
 WEB_PORT="$(read_config_value 'web.external_port')"
 
+# Setup directories with proper ownership before starting containers
+# This ensures bind-mounted volumes are writable by the container user
+setup_directories
+
 # Load mounts from YAML config (before CLI args which can override)
 load_mounts_from_yaml
 
@@ -1082,6 +1201,8 @@ cat > .env <<EOF
 AG3NTUM_IMAGE_TAG=${IMAGE_TAG}
 AG3NTUM_API_PORT=${API_PORT}
 AG3NTUM_WEB_PORT=${WEB_PORT}
+HOST_UID=${HOST_UID}
+HOST_GID=${HOST_GID}
 EOF
 
 echo "Starting containers with tag ${IMAGE_TAG}..."
