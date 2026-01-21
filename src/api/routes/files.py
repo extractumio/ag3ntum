@@ -8,7 +8,9 @@ Provides endpoints for:
 - POST /files/{session_id}/upload - Upload files to workspace
 - DELETE /files/{session_id} - Delete a file
 
-Sensitive Data: Uploaded text files are scanned for API keys, tokens, passwords.
+Sensitive Data: Text files are scanned for API keys, tokens, passwords in both:
+- File uploads: Secrets redacted before writing to disk
+- File previews: Secrets redacted before displaying in File Explorer
 Detected secrets are redacted with same-length placeholders to preserve formatting.
 """
 import logging
@@ -848,6 +850,19 @@ async def get_file_content(
             else:
                 with open(actual_file, 'r', encoding='utf-8', errors='replace') as f:
                     response.content = f.read()
+
+            # Scan content for secrets and redact before returning
+            if is_scanner_enabled() and response.content:
+                try:
+                    scan_result = scan_and_redact(response.content)
+                    if scan_result.has_secrets:
+                        response.content = scan_result.redacted_text
+                        logger.info(
+                            f"Redacted {scan_result.secret_count} secrets from file preview: {path}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to scan file content for secrets: {e}")
+
         except Exception as e:
             logger.warning(f"Failed to read file {actual_file}: {e}")
             response.is_binary = True

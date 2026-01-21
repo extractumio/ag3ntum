@@ -163,11 +163,108 @@ sudo chown -R 45045:45045 logs data users
 
 ---
 
+## Production Deployment
+
+### Configure Public Access
+
+Edit `config/api.yaml` to set your public hostname:
+
+```yaml
+server:
+  # Your public IP or domain
+  hostname: "10.195.48.3"        # VPS IP
+  # hostname: "ag3ntum.example.com"  # Or domain name
+
+  # Protocol (http or https)
+  protocol: "http"
+```
+
+Then restart:
+```bash
+./run.sh restart
+```
+
+### HTTPS with Reverse Proxy
+
+For HTTPS, use nginx or traefik as a TLS-terminating reverse proxy:
+
+```yaml
+# config/api.yaml
+server:
+  hostname: "ag3ntum.example.com"
+  protocol: "https"
+  trusted_proxies:
+    - "127.0.0.1"
+```
+
+Example nginx config:
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name ag3ntum.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/ag3ntum.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ag3ntum.example.com/privkey.pem;
+
+    # Web UI
+    location / {
+        proxy_pass http://127.0.0.1:50080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # API
+    location /api/ {
+        proxy_pass http://127.0.0.1:40080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Security Settings
+
+The following security features are enabled by default in `config/api.yaml`:
+
+```yaml
+security:
+  # Security headers (X-Content-Type-Options, X-Frame-Options, etc.)
+  enable_security_headers: true
+
+  # Host header validation (prevents host header injection)
+  validate_host_header: true
+
+  # Content Security Policy: "strict", "relaxed", or "disabled"
+  content_security_policy: "strict"
+
+  # Additional allowed hosts (for accessing via multiple hostnames)
+  additional_allowed_hosts: []
+```
+
+### Deployment Checklist
+
+- [ ] Set `server.hostname` to your public IP or domain
+- [ ] Configure firewall (ports 50080, 40080)
+- [ ] Set up HTTPS via reverse proxy for production
+- [ ] Use strong passwords for admin users
+- [ ] Back up `config/secrets.yaml` and `data/` directory
+- [ ] Configure `trusted_proxies` if behind a reverse proxy
+
+---
+
 ## Next Steps
 
 - [README.md](README.md) - Full documentation and features
 - Mount external files: `./run.sh build --mount-ro=/path/to/files:myfiles`
-- Configure via `config/api.yaml` for custom ports
+- Configure via `config/api.yaml` for custom ports and security
 
 ---
 

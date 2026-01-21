@@ -418,18 +418,32 @@ function read_config_value() {
 }
 
 function render_ui_config() {
+  # Read server configuration
+  local HOSTNAME
+  local PROTOCOL
+  HOSTNAME="$(read_config_value 'server.hostname')"
+  PROTOCOL="$(read_config_value 'server.protocol')"
+
+  # Default values if not set
+  HOSTNAME="${HOSTNAME:-localhost}"
+  PROTOCOL="${PROTOCOL:-http}"
+
   cat > src/web_terminal_client/public/config.yaml <<EOF
 server:
   port: ${WEB_PORT}
   host: "0.0.0.0"
 
 api:
-  base_url: "http://localhost:${API_PORT}"
+  # API URL derived from server.hostname and server.protocol in api.yaml
+  # Frontend will replace "localhost" with browser hostname if accessed remotely
+  base_url: "${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 
 ui:
   max_output_lines: 1000
   auto_scroll: true
 EOF
+
+  echo "  Frontend config: ${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 }
 
 function generate_compose_override() {

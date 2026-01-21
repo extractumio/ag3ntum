@@ -35,6 +35,9 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Optional
 
+from detect_secrets.core.scan import scan_line
+from detect_secrets.settings import transient_settings
+
 logger = logging.getLogger(__name__)
 
 # Global scanner instance (lazy-loaded)
@@ -235,16 +238,6 @@ class SensitiveDataScanner:
     def _detect_with_detect_secrets(self, text: str) -> list[DetectedSecret]:
         """Use detect-secrets library to find secrets."""
         if not self.detect_secrets_plugins:
-            return []
-
-        try:
-            from detect_secrets.core.scan import scan_line
-            from detect_secrets.settings import transient_settings
-        except ImportError:
-            logger.warning(
-                "detect-secrets library not installed. "
-                "Install with: pip install detect-secrets"
-            )
             return []
 
         detected: list[DetectedSecret] = []

@@ -26,6 +26,7 @@ flake8==7.3.0
 python-magic==0.4.27
 pymupdf==1.25.3
 Pillow==10.4.0
+detect-secrets==1.5.0
 exifread==3.0.0
 mutagen==1.47.0
 py7zr==0.22.0

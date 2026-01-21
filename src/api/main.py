@@ -2,7 +2,9 @@
 FastAPI application for Ag3ntum API.
 
 Main entry point that configures the FastAPI app with:
-- CORS middleware
+- Security headers middleware
+- CORS middleware (origins derived from server.hostname)
+- Host header validation
 - Database initialization
 - Route registration
 - Lifespan management
@@ -26,14 +28,21 @@ from ..core.subagent_manager import get_subagent_manager
 from ..db.database import init_db, DATABASE_PATH
 from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, sessions_router, skills_router
 from .waf_filter import validate_request_size
+from .security_middleware import (
+    build_allowed_origins,
+    build_allowed_hosts,
+    SecurityHeadersMiddleware,
+    HostValidationMiddleware,
+    TrustedProxyMiddleware,
+)
 
 logger = logging.getLogger(__name__)
 
 # API configuration file
 API_CONFIG_FILE: Path = CONFIG_DIR / "api.yaml"
 
-# Required fields in api.yaml
-REQUIRED_API_FIELDS = ["host", "port", "cors_origins"]
+# Required fields in api.yaml (cors_origins now derived from server.hostname)
+REQUIRED_API_FIELDS = ["host", "port"]
 
 # Patterns for sensitive field names (case-insensitive)
 SENSITIVE_PATTERNS = re.compile(
@@ -239,22 +248,46 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
-    # CORS middleware
+    # Get security config
+    security_config = config.get("security", {})
+    server_config = config.get("server", {})
+
+    # Build CORS origins from server.hostname configuration
+    cors_origins = build_allowed_origins(config)
+
+    # CORS middleware - origins derived from server.hostname
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=api_config["cors_origins"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
+    # Security headers middleware (X-Content-Type-Options, X-Frame-Options, etc.)
+    if security_config.get("enable_security_headers", True):
+        app.add_middleware(SecurityHeadersMiddleware, config=config)
+        logger.info("Security headers middleware enabled")
+
+    # Host header validation middleware (prevents host header injection)
+    if security_config.get("validate_host_header", True):
+        allowed_hosts = build_allowed_hosts(config)
+        app.add_middleware(HostValidationMiddleware, allowed_hosts=allowed_hosts)
+        logger.info("Host header validation enabled")
+
+    # Trusted proxy middleware (for X-Forwarded-* headers)
+    trusted_proxies = server_config.get("trusted_proxies", [])
+    if trusted_proxies:
+        app.add_middleware(TrustedProxyMiddleware, trusted_proxies=trusted_proxies)
+        logger.info(f"Trusted proxy middleware enabled: {trusted_proxies}")
+
     # WAF Filter Middleware - validates request sizes before processing
     @app.middleware("http")
     async def waf_middleware(request: Request, call_next):
         """WAF filter to validate request body sizes."""
         # Validate request size (throws HTTPException if too large)
         await validate_request_size(request)
-        
+
         # Continue processing request
         response = await call_next(request)
         return response
