@@ -14,14 +14,13 @@ MOUNTS_USER_RO=()
 USED_MOUNT_NAMES=""
 
 # Configuration
-# Project name defaults to directory name (same as docker-compose behavior)
-PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}"
 IMAGE_PREFIX="ag3ntum"  # Image name prefix
+CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external")
 
-# Directories that container needs to WRITE to (need ownership fix)
+# Directories that container needs to WRITE to (need ownership fix on Linux)
 WRITABLE_DIRS=("logs" "data" "users")
 
 # Directories that container only READS from (just need to exist)
@@ -109,114 +108,53 @@ General Examples:
 CLI Hints:
   View logs:     docker compose logs -f ag3ntum-api
   API health:    curl http://localhost:40080/api/v1/health
-  Redis CLI:     docker exec -it project-redis-1 redis-cli
+  Redis CLI:     docker compose exec redis redis-cli
+  Shell:         docker compose exec ag3ntum-api bash
   Stop all:      docker compose down
 EOF
 }
 
-# Determine the best UID/GID for container based on environment
-# Sets HOST_UID and HOST_GID if not already set
-function auto_detect_uid() {
-  # If already set by user, respect that
-  if [[ -n "${HOST_UID:-}" ]]; then
-    return
-  fi
-
-  # macOS: Docker Desktop handles UID mapping, use current user
-  if [[ "$(uname)" == "Darwin" ]]; then
-    export HOST_UID="$(id -u)"
-    export HOST_GID="$(id -g)"
-    return
-  fi
-
-  # Linux: Choose based on who's running the script
-  if [[ "$(id -u)" == "0" ]]; then
-    # Running as root (typical VPS deployment)
-    # Use dedicated service user for isolation
-    export HOST_UID="45045"
-    export HOST_GID="45045"
-  else
-    # Running as regular user (development or non-root VPS)
-    # Use current user to avoid permission issues
-    export HOST_UID="$(id -u)"
-    export HOST_GID="$(id -g)"
-  fi
-}
-
 # Setup directories with proper ownership for container user
-# This ensures bind-mounted volumes are writable by the container
+# Container runs as ag3ntum_api (UID 45045) - see Dockerfile
 function setup_directories() {
-  # Auto-detect UID/GID if not set
-  auto_detect_uid
-
-  local target_uid="${HOST_UID}"
-  local target_gid="${HOST_GID}"
-
   echo "=== Setting up directories ==="
 
-  # On macOS, Docker Desktop handles UID/GID mapping automatically
-  if [[ "$(uname)" == "Darwin" ]]; then
-    echo "  macOS detected - Docker Desktop handles permissions"
-    # Just ensure directories exist
-    for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
-      if [[ ! -d "${dir}" ]]; then
-        echo "  Creating ${dir}/"
-        mkdir -p "${dir}"
-      fi
-    done
-    echo "  Directories ready (UID:GID = ${target_uid}:${target_gid})"
-    return
-  fi
-
-  # Show what UID we're using and why
-  if [[ "$(id -u)" == "0" ]]; then
-    echo "  Running as root -> using service user 45045"
-  else
-    echo "  Running as $(whoami) -> using UID $(id -u)"
-  fi
-  echo "  Target UID:GID = ${target_uid}:${target_gid}"
-
-  # Create and fix ownership for writable directories (logs, data, users)
-  for dir in "${WRITABLE_DIRS[@]}"; do
+  # Create all required directories
+  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
     if [[ ! -d "${dir}" ]]; then
       echo "  Creating ${dir}/"
       mkdir -p "${dir}"
-    fi
-
-    # Check current ownership
-    local current_uid current_gid
-    current_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
-    current_gid=$(stat -c '%g' "${dir}" 2>/dev/null || echo "0")
-
-    # Change ownership if needed
-    if [[ "${current_uid}" != "${target_uid}" || "${current_gid}" != "${target_gid}" ]]; then
-      if [[ "$(id -u)" == "0" ]]; then
-        # Running as root - can change ownership directly
-        echo "  Fixing ownership: ${dir}/ -> ${target_uid}:${target_gid}"
-        chown -R "${target_uid}:${target_gid}" "${dir}"
-      elif [[ "${target_uid}" == "$(id -u)" ]]; then
-        # Target is current user - should be able to chown our own files
-        chown -R "${target_uid}:${target_gid}" "${dir}" 2>/dev/null || {
-          # Might fail if some files are root-owned
-          echo "  Fixing ownership (sudo): ${dir}/ -> ${target_uid}:${target_gid}"
-          sudo chown -R "${target_uid}:${target_gid}" "${dir}"
-        }
-      else
-        # This shouldn't happen with auto-detection, but handle it
-        echo "  Fixing ownership (sudo): ${dir}/ -> ${target_uid}:${target_gid}"
-        sudo chown -R "${target_uid}:${target_gid}" "${dir}" 2>/dev/null || {
-          echo "  WARNING: Cannot fix ownership of ${dir}/"
-          echo "           sudo chown -R ${target_uid}:${target_gid} ${dir}"
-        }
-      fi
     fi
   done
 
-  # Ensure read-only directories exist (no ownership change needed)
-  for dir in "${READABLE_DIRS[@]}"; do
-    if [[ ! -d "${dir}" ]]; then
-      echo "  Creating ${dir}/"
-      mkdir -p "${dir}"
+  # On macOS, Docker Desktop handles file permissions automatically
+  # via its virtualization layer - no ownership changes needed
+  if [[ "$(uname)" == "Darwin" ]]; then
+    echo "  macOS: Docker Desktop handles permissions automatically"
+    echo "  Directories ready"
+    return
+  fi
+
+  # On Linux, set ownership of writable directories to container user (UID 45045)
+  echo "  Linux: Setting ownership to UID ${CONTAINER_UID} for writable directories"
+
+  for dir in "${WRITABLE_DIRS[@]}"; do
+    local current_uid
+    current_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
+
+    if [[ "${current_uid}" != "${CONTAINER_UID}" ]]; then
+      if [[ "$(id -u)" == "0" ]]; then
+        # Running as root - can chown directly
+        echo "  Setting ownership: ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
+        chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
+      else
+        # Running as regular user - need sudo
+        echo "  Setting ownership (sudo): ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
+        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}" || {
+          echo "  ERROR: Cannot set ownership. Run as root or use sudo."
+          exit 1
+        }
+      fi
     fi
   done
 
@@ -663,22 +601,22 @@ function do_cleanup() {
   echo "Stopping containers..."
   docker compose down --remove-orphans --timeout 10 2>/dev/null || true
   
-  # Step 2: Force kill any stuck containers by name pattern
+  # Step 2: Force remove any stuck containers using ag3ntum images
   echo "Force removing any stuck containers..."
   local stuck_containers
-  stuck_containers=$(docker ps -aq --filter "name=${PROJECT_NAME}" 2>/dev/null || true)
-  if [[ -n "${stuck_containers}" ]]; then
-    echo "  Found stuck containers: ${stuck_containers}"
-    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
-  fi
-  
-  # Also check for containers using ag3ntum images
   stuck_containers=$(docker ps -aq --filter "ancestor=${IMAGE_PREFIX}" 2>/dev/null || true)
   if [[ -n "${stuck_containers}" ]]; then
     echo "  Found containers using ${IMAGE_PREFIX} images: ${stuck_containers}"
     echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
   fi
-  
+
+  # Also find by name pattern (handles any project name)
+  stuck_containers=$(docker ps -aq --filter "name=ag3ntum" 2>/dev/null || true)
+  if [[ -n "${stuck_containers}" ]]; then
+    echo "  Found ag3ntum containers: ${stuck_containers}"
+    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
+  fi
+
   # Step 3: Remove all ag3ntum images (all tags)
   echo "Removing ${IMAGE_PREFIX} images..."
   local images
@@ -687,27 +625,23 @@ function do_cleanup() {
     echo "  Removing: ${images}"
     echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
   fi
-  
-  # Also remove any dangling images that might be leftovers from builds
+
+  # Also remove any dangling images
   local dangling
   dangling=$(docker images -q --filter "dangling=true" 2>/dev/null || true)
   if [[ -n "${dangling}" ]]; then
     echo "  Removing dangling images..."
     echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
   fi
-  
-  # Step 4: Remove project-specific volumes (but NOT data volumes)
-  # Only remove the web_node_modules volume, preserve data
-  echo "Cleaning build volumes..."
-  docker volume rm -f "${PROJECT_NAME}_web_node_modules" 2>/dev/null || true
 
-  # Step 5: Clean up project-specific networks only (not all networks)
-  echo "Cleaning project networks..."
-  local project_networks
-  project_networks=$(docker network ls --filter "name=${PROJECT_NAME}" -q 2>/dev/null || true)
-  if [[ -n "${project_networks}" ]]; then
-    echo "  Removing networks: ${project_networks}"
-    echo "${project_networks}" | xargs -r docker network rm 2>/dev/null || true
+  # Step 4: Clean up docker compose resources (networks, etc.)
+  # docker compose down already handled this, but clean up any orphans
+  echo "Cleaning networks..."
+  local ag3ntum_networks
+  ag3ntum_networks=$(docker network ls --filter "name=ag3ntum" -q 2>/dev/null || true)
+  if [[ -n "${ag3ntum_networks}" ]]; then
+    echo "  Removing networks: ${ag3ntum_networks}"
+    echo "${ag3ntum_networks}" | xargs -r docker network rm 2>/dev/null || true
   fi
   
   # Step 6: Remove generated files
@@ -793,7 +727,7 @@ function create_user() {
   echo "=== Creating user: $USERNAME ==="
 
   # Run create_user.py inside container
-  docker compose -p "${PROJECT_NAME}" exec ag3ntum-api \
+  docker compose exec ag3ntum-api \
     python3 src/cli/create_user.py \
     --username="$USERNAME" \
     --email="$EMAIL" \
@@ -910,7 +844,7 @@ if [[ "${ACTION}" == "test" ]]; then
       # Trim whitespace
       name="${name// /}"
       # Find matching test files in container
-      MATCHES=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
+      MATCHES=$(docker compose exec ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
       if [[ -n "${MATCHES}" ]]; then
         while IFS= read -r file; do
           TEST_FILES+=("${file}")
@@ -922,7 +856,7 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "No test files found matching: ${SUBSET}"
       echo ""
       echo "Available test files:"
-      docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -name "test_*.py" | sort
+      docker compose exec ag3ntum-api find /tests -name "test_*.py" | sort
       exit 1
     fi
 
@@ -947,9 +881,9 @@ if [[ "${ACTION}" == "test" ]]; then
       BACKEND_RESULT=0
       if [[ -z "${UI_ONLY}" ]]; then
         if [ -t 0 ]; then
-          docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+          docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
         else
-          docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+          docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
         fi
         BACKEND_RESULT=$?
       fi
@@ -995,9 +929,9 @@ if [[ "${ACTION}" == "test" ]]; then
       # First run: backend tests with --run-e2e flag
       echo "=== Running backend tests (with E2E) ==="
       if [ -t 0 ]; then
-        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
       else
-        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
       fi
       BACKEND_RESULT=$?
 
@@ -1005,14 +939,14 @@ if [[ "${ACTION}" == "test" ]]; then
       echo ""
       echo "=== Running security tests ==="
       if [ -t 0 ]; then
-        docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/security/ -v --tb=short
+        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
       else
-        docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} tests/security/ -v --tb=short
+        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
       fi
       SECURITY_RESULT=$?
 
       # Check for other test directories and run them
-      OTHER_DIRS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
+      OTHER_DIRS=$(docker compose exec ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
       OTHER_RESULT=0
 
       if [[ -n "${OTHER_DIRS}" ]]; then
@@ -1020,14 +954,14 @@ if [[ "${ACTION}" == "test" ]]; then
           dir_name=$(basename "${dir}")
           if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
             # Check if directory has any test files
-            HAS_TESTS=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
+            HAS_TESTS=$(docker compose exec ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
             if [[ -n "${HAS_TESTS}" ]]; then
               echo ""
               echo "=== Running ${dir_name} tests ==="
               if [ -t 0 ]; then
-                docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${dir}/" -v --tb=short
+                docker compose exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short
               else
-                docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${dir}/" -v --tb=short
+                docker compose exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short
               fi
               if [[ $? -ne 0 ]]; then
                 OTHER_RESULT=1
@@ -1050,7 +984,7 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "========================================"
       echo "=== COMBINED TEST SUMMARY ==="
       echo "========================================"
-      TOTAL_BACKEND=$(docker exec "${PROJECT_NAME}-ag3ntum-api-1" python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+      TOTAL_BACKEND=$(docker compose exec ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
       echo ""
       if [[ ${BACKEND_RESULT} -eq 0 ]]; then
@@ -1097,9 +1031,9 @@ if [[ "${ACTION}" == "test" ]]; then
 
   # Run tests in container (use -t only if TTY available)
   if [ -t 0 ]; then
-    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+    docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   else
-    docker exec "${PROJECT_NAME}-ag3ntum-api-1" ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+    docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   fi
   exit $?
 fi
@@ -1117,7 +1051,7 @@ if [[ "${ACTION}" == "shell" ]]; then
 
   # Shell requires TTY
   if [ -t 0 ]; then
-    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" /bin/bash
+    docker compose exec ag3ntum-api /bin/bash
   else
     echo "Error: Shell requires an interactive terminal."
     exit 1
@@ -1136,18 +1070,18 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
   echo "=== Cleaning up test users ==="
 
   # Check if container is running
-  if ! docker ps --format '{{.Names}}' | grep -q "^${PROJECT_NAME}-ag3ntum-api-1$"; then
-    echo "Error: Container ${PROJECT_NAME}-ag3ntum-api-1 is not running."
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
   fi
 
   # Run cleanup script inside container
   if [ -t 0 ]; then
-    docker exec -it "${PROJECT_NAME}-ag3ntum-api-1" \
+    docker compose exec ag3ntum-api \
       python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
   else
-    docker exec "${PROJECT_NAME}-ag3ntum-api-1" \
+    docker compose exec ag3ntum-api \
       python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
   fi
   exit 0
@@ -1202,8 +1136,6 @@ cat > .env <<EOF
 AG3NTUM_IMAGE_TAG=${IMAGE_TAG}
 AG3NTUM_API_PORT=${API_PORT}
 AG3NTUM_WEB_PORT=${WEB_PORT}
-HOST_UID=${HOST_UID}
-HOST_GID=${HOST_GID}
 EOF
 
 echo "Starting containers with tag ${IMAGE_TAG}..."
@@ -1225,12 +1157,6 @@ echo "API Port: ${API_PORT}"
 echo "Web Port: ${WEB_PORT}"
 echo ""
 echo "Container status:"
-docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Image}}"
-echo ""
-echo "Container start times:"
-for container in "${PROJECT_NAME}-ag3ntum-api-1" "${PROJECT_NAME}-ag3ntum-web-1"; do
-  started=$(docker inspect "${container}" --format '{{.State.StartedAt}}' 2>/dev/null || echo "N/A")
-  echo "  ${container}: ${started}"
-done
+docker compose ps
 echo ""
 echo "=== Deployment complete at $(date) ==="
