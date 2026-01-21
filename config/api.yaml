@@ -1,31 +1,89 @@
 # Ag3ntum API Configuration
 # FastAPI backend settings
 
+# =============================================================================
+# SERVER - Public access configuration
+# =============================================================================
+# These settings define how users access Ag3ntum from their browser.
+# The hostname is used for CORS, security headers, and frontend API URL.
+#
+# Examples:
+#   Development:  hostname: "localhost"
+#   LAN access:   hostname: "192.168.1.100"
+#   VPS by IP:    hostname: "10.195.48.3"
+#   Domain:       hostname: "ag3ntum.example.com"
+#   With HTTPS:   hostname: "ag3ntum.example.com", protocol: "https"
+
+server:
+  # Public hostname, IP, or domain that users access
+  # This is used for CORS and frontend configuration
+  # Default: "localhost" (safe for local development)
+  hostname: "localhost"
+
+  # Protocol: "http" or "https"
+  # Use "https" when behind a TLS-terminating reverse proxy (nginx, traefik)
+  # The app itself always runs HTTP internally
+  protocol: "http"
+
+  # Trusted proxy IPs/CIDRs for X-Forwarded-* headers
+  # Required when behind a reverse proxy to correctly identify client IPs
+  # Leave empty if not behind a proxy
+  # Examples: ["127.0.0.1", "10.0.0.0/8", "172.16.0.0/12"]
+  trusted_proxies: []
+
+# =============================================================================
+# API - Backend server settings
+# =============================================================================
 api:
-  # Server host and port
+  # Internal bind address (0.0.0.0 = all interfaces)
   host: "0.0.0.0"
   port: 40080
   external_port: 40080
   reload: false
 
-  # CORS allowed origins
-  # Add your frontend URL here
-  cors_origins:
-    - "http://localhost:50080"
-    - "http://127.0.0.1:50080"
-
-# Database settings
-database:
-  # SQLite database path (relative to Project root)
-  path: "./data/ag3ntum.db"
-
-# Web UI settings
+# =============================================================================
+# WEB UI - Frontend server settings
+# =============================================================================
 web:
   host: "0.0.0.0"
   port: 50080
   external_port: 50080
 
-# JWT authentication settings
+# =============================================================================
+# SECURITY - HTTP security settings
+# =============================================================================
+security:
+  # Enable strict security headers (recommended for production)
+  # Adds: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection,
+  #       Referrer-Policy, Permissions-Policy
+  enable_security_headers: true
+
+  # Enable Host header validation (recommended for production)
+  # Rejects requests with Host headers not matching server.hostname
+  # Disable only if behind a proxy that rewrites Host header
+  validate_host_header: true
+
+  # Content Security Policy (CSP) - controls what resources can be loaded
+  # "strict" - Restrictive policy (recommended)
+  # "relaxed" - Allows inline scripts/styles (for development)
+  # "disabled" - No CSP header
+  content_security_policy: "strict"
+
+  # Allowed hosts for Host header validation (in addition to server.hostname)
+  # Useful for allowing localhost access alongside domain
+  # Example: ["localhost", "127.0.0.1"]
+  additional_allowed_hosts: []
+
+# =============================================================================
+# DATABASE
+# =============================================================================
+database:
+  # SQLite database path (relative to AG3NTUM_ROOT)
+  path: "./data/ag3ntum.db"
+
+# =============================================================================
+# JWT - Authentication token settings
+# =============================================================================
 jwt:
   # Token algorithm (do not change)
   algorithm: "HS256"
@@ -33,10 +91,11 @@ jwt:
   # Token expiry in hours (7 days default)
   expiry_hours: 168
 
-# Redis configuration (required for SSE event streaming)
+# =============================================================================
+# REDIS - Required for SSE event streaming
+# =============================================================================
 redis:
   # Redis connection URL
-  # Format: redis://[host]:[port]/[db]
   url: "redis://redis:6379/0"
 
   # Connection pool settings
@@ -46,5 +105,5 @@ redis:
   socket_timeout: 5.0
   socket_connect_timeout: 5.0
 
-  # Decode responses as UTF-8 strings (false for binary JSON)
+  # Decode responses as UTF-8 strings
   decode_responses: false

@@ -19,6 +19,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
+import colorlog
+
 from ..config import LOGS_DIR
 from .constants import (
     COLORLOG_COLORS,
@@ -84,27 +86,21 @@ def _create_console_handler(level: int, colored: bool = False) -> logging.Handle
 
     Args:
         level: Logging level.
-        colored: Whether to use colored output (requires colorlog).
+        colored: Whether to use colored output.
 
     Returns:
         Configured StreamHandler.
     """
     if colored:
-        try:
-            import colorlog
-            handler = colorlog.StreamHandler(sys.stdout)
-            handler.setFormatter(
-                colorlog.ColoredFormatter(
-                    LOG_FORMAT_COLORED,
-                    log_colors=COLORLOG_COLORS,
-                    secondary_log_colors={},
-                    style="%",
-                )
+        handler = colorlog.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            colorlog.ColoredFormatter(
+                LOG_FORMAT_COLORED,
+                log_colors=COLORLOG_COLORS,
+                secondary_log_colors={},
+                style="%",
             )
-        except ImportError:
-            # Fall back to non-colored if colorlog not available
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE))
+        )
     else:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE))
