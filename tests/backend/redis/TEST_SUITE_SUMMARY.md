@@ -113,30 +113,30 @@ Comprehensive test suite created for Redis-based SSE implementation with 50+ tes
 
 ### Run All Redis Tests
 ```bash
-./deploy.sh test tests/backend/redis/
+./run.sh test tests/backend/redis/
 ```
 
 ### Run Specific Test Suite
 ```bash
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py         # Unit tests only
-./deploy.sh test tests/backend/redis/test_redis_integration.py       # Integration tests only
-./deploy.sh test tests/backend/redis/test_redis_sse_e2e.py           # E2E tests only
-./deploy.sh test tests/backend/redis/test_redis_feature_flag.py      # Feature flag tests only
+./run.sh test tests/backend/redis/test_redis_event_hub.py         # Unit tests only
+./run.sh test tests/backend/redis/test_redis_integration.py       # Integration tests only
+./run.sh test tests/backend/redis/test_redis_sse_e2e.py           # E2E tests only
+./run.sh test tests/backend/redis/test_redis_feature_flag.py      # Feature flag tests only
 ```
 
 ### Run Specific Test File
 ```bash
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py
+./run.sh test tests/backend/redis/test_redis_event_hub.py
 ```
 
 ### Run Specific Test Class
 ```bash
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish
+./run.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish
 ```
 
 ### Run Specific Test Method
 ```bash
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event -v
+./run.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event -v
 ```
 
 ---
@@ -162,13 +162,13 @@ pytest tests/backend/redis/ -m redis
 docker ps | grep redis
 
 # Start if needed
-./deploy.sh build
+./run.sh build
 ```
 
 ### 2. Redis Package Installed
 ```bash
 # Rebuild containers to install redis package
-./deploy.sh build --no-cache
+./run.sh build --no-cache
 ```
 
 ### 3. Verify Redis Connection
@@ -194,8 +194,8 @@ tests/backend/redis/test_redis_feature_flag.py .......... [100%]
 
 **If tests fail with RuntimeError:**
 - Reason: Redis not running or misconfigured
-- Error: `RuntimeError: Redis connection failed. Ensure Redis is running with './deploy.sh build'.`
-- Solution: Start Redis with `./deploy.sh build`
+- Error: `RuntimeError: Redis connection failed. Ensure Redis is running with './run.sh build'.`
+- Solution: Start Redis with `./run.sh build`
 
 ---
 
@@ -270,10 +270,10 @@ async def test_redis_sqlite(redis_event_hub, test_session_id, mock_event_sink):
 
 ### Tests Fail with "Redis connection failed"
 **Cause:** Redis not running or not reachable.
-**Error:** `RuntimeError: Redis connection failed. Ensure Redis is running with './deploy.sh build'.`
+**Error:** `RuntimeError: Redis connection failed. Ensure Redis is running with './run.sh build'.`
 **Solution:** Start Redis
 ```bash
-./deploy.sh build
+./run.sh build
 ```
 
 ### Tests Fail with ImportError
@@ -281,7 +281,7 @@ async def test_redis_sqlite(redis_event_hub, test_session_id, mock_event_sink):
 **Error:** `ModuleNotFoundError: No module named 'redis'`
 **Solution:** Rebuild containers
 ```bash
-./deploy.sh build --no-cache
+./run.sh build --no-cache
 ```
 
 ### Tests Timeout
@@ -310,7 +310,7 @@ await asyncio.sleep(0.5)  # Let events propagate
 
 2. **Restart containers:**
    ```bash
-   ./deploy.sh restart
+   ./run.sh restart
    ```
 
 3. **Verify logs:**

@@ -2,7 +2,7 @@
 """
 Parse external-mounts.yaml configuration and output mount specs.
 
-Used by deploy.sh to read mount configuration from YAML instead of CLI args.
+Used by run.sh to read mount configuration from YAML instead of CLI args.
 
 Output formats:
   --mounts-json: JSON output for complex parsing
@@ -139,7 +139,7 @@ def output_bash(global_mounts: dict, per_user_mounts: dict) -> None:
 
     # Output per-user RO mounts (mount them like global mounts for Docker access)
     for mount in per_user_mounts['ro']:
-        # Only output if the path exists (validation happens in deploy.sh)
+        # Only output if the path exists (validation happens in run.sh)
         print(f"MOUNT_USER_RO:{mount['host_path']}:{mount['name']}")
 
     # Output per-user RW mounts

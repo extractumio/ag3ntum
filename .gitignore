@@ -12,7 +12,7 @@ venv/
 # User config files (not committed)
 config/external-mounts.yaml
 
-# Auto-generated files (created by deploy.sh)
+# Auto-generated files (created by run.sh)
 data/auto-generated/
 
 docs/

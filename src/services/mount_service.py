@@ -12,7 +12,7 @@ path resolution across all components:
 - All paths are expressed in sandbox format (canonical)
 
 Note: This service runs inside Docker. External mounts are configured via:
-- deploy.sh --mount-ro and --mount-rw for global mounts
+- run.sh --mount-ro and --mount-rw for global mounts
 - external-mounts.yaml per_user section for user-specific mounts
 """
 import logging

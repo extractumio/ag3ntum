@@ -205,7 +205,7 @@ sandbox:
     # =========================================================================
     # EXTERNAL MOUNTS - User-mounted folders from host system
     # =========================================================================
-    # These are configured via deploy.sh --mount-ro and --mount-rw options.
+    # These are configured via run.sh --mount-ro and --mount-rw options.
     # Host folders are mounted to /mounts/ro/* and /mounts/rw/* in Docker,
     # then bind-mounted into the sandbox at /workspace/external/*.
     #

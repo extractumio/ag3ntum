@@ -12,8 +12,8 @@ Tests cover:
 Run with:
     pytest tests/security/test_sandboxed_envs.py -v
 
-Or via deploy.sh:
-    ./deploy.sh test
+Or via run.sh:
+    ./run.sh test
 """
 import asyncio
 import sys
