@@ -36,6 +36,7 @@ services:
     entrypoint: ["/entrypoint-web.sh"]
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
     working_dir: /src/web_terminal_client
+    user: root  # Run as root for npm install permissions on named volume
     environment:
       AG3NTUM_ROOT: "/"
       PYTHONPATH: "/"
