@@ -14,7 +14,8 @@ MOUNTS_USER_RO=()
 USED_MOUNT_NAMES=""
 
 # Configuration
-PROJECT_NAME="project"  # docker-compose project name
+# Project name defaults to directory name (same as docker-compose behavior)
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}"
 IMAGE_PREFIX="ag3ntum"  # Image name prefix
 
 # Reserved mount names that cannot be used
