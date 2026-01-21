@@ -1,0 +1,7 @@
+# For legacy CPUs without X86_V2 (SSE4.2) support
+# E.g., old QEMU/KVM virtual CPUs, pre-2010 processors
+# NumPy 1.x doesn't require X86_V2 baseline optimizations
+
+numpy==1.26.4
+pandas==2.0.3
+pyarrow==14.0.2

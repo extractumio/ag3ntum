@@ -1,0 +1,6 @@
+# For modern CPUs with X86_V2 (SSE4.2) support
+# Most CPUs from 2010+ support these instructions
+
+numpy>=2.0
+pandas>=2.2.3
+pyarrow>=17.0.0
