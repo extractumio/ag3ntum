@@ -237,7 +237,7 @@ class PathValidatorConfig(BaseModel):
     )
 
     # =========================================================================
-    # EXTERNAL MOUNT PATHS - Host folders mounted via deploy.sh
+    # EXTERNAL MOUNT PATHS - Host folders mounted via run.sh
     # =========================================================================
     # These are Docker container paths (not bwrap paths).
     # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*

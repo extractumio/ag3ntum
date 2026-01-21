@@ -104,7 +104,7 @@ async def redis_connection(redis_url: str) -> AsyncGenerator[redis.Redis, None]:
     except Exception as e:
         await conn.close()
         raise RuntimeError(
-            f"Redis connection failed. Ensure Redis is running with './deploy.sh build'. "
+            f"Redis connection failed. Ensure Redis is running with './run.sh build'. "
             f"Error: {e}"
         ) from e
 
@@ -137,7 +137,7 @@ async def redis_event_hub(redis_url: str) -> AsyncGenerator[RedisEventHub, None]
     except Exception as e:
         await hub.close()
         raise RuntimeError(
-            f"RedisEventHub initialization failed. Ensure Redis is running with './deploy.sh build'. "
+            f"RedisEventHub initialization failed. Ensure Redis is running with './run.sh build'. "
             f"Error: {e}"
         ) from e
 

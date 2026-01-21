@@ -13,6 +13,8 @@ Ag3ntum transforms Claude Code into a **self-hosted AI automation platform** tha
 > **Enterprise AI capabilities. Startup economics.**
 > Pay only for Anthropic API usage—no platform fees, no per-seat licensing.
 
+![Ag3ntum UI Demo](./docs/artifacts/ag3ntum_ui.gif)
+
 ---
 
 ## Why Ag3ntum?
@@ -156,26 +158,25 @@ Each layer operates independently. Even if one is bypassed, others contain the d
 
 ## Quick Start
 
+See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete VPS deployment instructions.
+
 ```bash
-# Clone and deploy
+# Clone and configure
 git clone https://github.com/extractum/ag3ntum.git
-cd ag3ntum
-docker compose up -d
+cd ag3ntum/Project
 
-# Access
-# API: http://localhost:40080
-# Web UI: http://localhost:50080
+# Add your Anthropic API key
+cp config/secrets.yaml.template config/secrets.yaml
+# Edit config/secrets.yaml with your key
+
+# Build and deploy
+./run.sh rebuild --no-cache
+
+# Create admin user
+./run.sh create-user --username=admin --email=admin@example.com --password=YOUR_PASSWORD --admin
+
+# Access Web UI at http://localhost:50080
 ```
-
----
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [Architecture](docs/current_architecture.md) | System design and components |
-| [Security Layers](docs/layers_of_security_for_filesystem.md) | Defense-in-depth details |
-| [API Reference](docs/api_reference.md) | REST endpoints and SSE events |
 
 ---
 
@@ -187,12 +188,6 @@ docker compose up -d
 - **Commercial License** — Proprietary applications, SaaS, enterprise
 
 **Contact:** [info@extractum.io](mailto:info@extractum.io)
-
----
-
-## About
-
-Developed by **EXTRACTUM** — secure AI products for business.
 
 ---
 

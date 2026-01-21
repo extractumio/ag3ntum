@@ -87,7 +87,7 @@ docker ps | grep redis
 
 **Start Redis if needed:**
 ```bash
-./deploy.sh build
+./run.sh build
 ```
 
 ### 2. Install Test Dependencies
@@ -103,49 +103,49 @@ pip install pytest pytest-asyncio
 ### Run All Redis Tests
 ```bash
 # From project root
-./deploy.sh test tests/backend/redis/
+./run.sh test tests/backend/redis/
 ```
 
 ### Run Specific Test Files
 ```bash
 # Unit tests only
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py
+./run.sh test tests/backend/redis/test_redis_event_hub.py
 
 # Integration tests only
-./deploy.sh test tests/backend/redis/test_redis_integration.py
+./run.sh test tests/backend/redis/test_redis_integration.py
 
 # E2E tests only
-./deploy.sh test tests/backend/redis/test_redis_sse_e2e.py
+./run.sh test tests/backend/redis/test_redis_sse_e2e.py
 
 # Feature flag tests only
-./deploy.sh test tests/backend/redis/test_redis_feature_flag.py
+./run.sh test tests/backend/redis/test_redis_feature_flag.py
 ```
 
 ### Run Specific Test Classes
 ```bash
 # Test backpressure handling
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubBackpressure
+./run.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubBackpressure
 
 # Test overlap buffer
-./deploy.sh test tests/backend/redis/test_redis_sse_e2e.py::TestSSEOverlapBuffer
+./run.sh test tests/backend/redis/test_redis_sse_e2e.py::TestSSEOverlapBuffer
 
 # Test feature flag
-./deploy.sh test tests/backend/redis/test_redis_feature_flag.py::TestFeatureFlagToggle
+./run.sh test tests/backend/redis/test_redis_feature_flag.py::TestFeatureFlagToggle
 ```
 
 ### Run Specific Test Methods
 ```bash
 # Single test
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event
+./run.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event
 
 # With verbose output
-./deploy.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event -v
+./run.sh test tests/backend/redis/test_redis_event_hub.py::TestRedisEventHubPublish::test_publish_event -v
 ```
 
 ### Run Tests with Markers
 ```bash
 # Run only tests marked with @pytest.mark.redis
-./deploy.sh test tests/backend/redis/ -m redis
+./run.sh test tests/backend/redis/ -m redis
 ```
 
 ---
@@ -374,7 +374,7 @@ def test_feature_flag(tmp_path):
 ### Tests Fail with "Redis connection failed"
 **Cause:** Redis is not running or not reachable.
 
-**Error message:** `RuntimeError: Redis connection failed. Ensure Redis is running with './deploy.sh build'.`
+**Error message:** `RuntimeError: Redis connection failed. Ensure Redis is running with './run.sh build'.`
 
 **Solution:**
 ```bash
@@ -382,7 +382,7 @@ def test_feature_flag(tmp_path):
 docker ps | grep redis
 
 # Start containers
-./deploy.sh build
+./run.sh build
 
 # Test connection
 docker exec -it project-ag3ntum-api-1 python -c "import redis; r=redis.Redis(host='redis', port=6379); print(r.ping())"
@@ -395,7 +395,7 @@ docker exec -it project-ag3ntum-api-1 python -c "import redis; r=redis.Redis(hos
 
 **Solution:**
 ```bash
-./deploy.sh build --no-cache
+./run.sh build --no-cache
 ```
 
 ### Tests Timeout
@@ -446,7 +446,7 @@ After tests pass:
 
 2. **Restart containers:**
    ```bash
-   ./deploy.sh restart
+   ./run.sh restart
    ```
 
 3. **Monitor logs:**

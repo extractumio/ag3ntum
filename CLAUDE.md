@@ -19,71 +19,71 @@ IMPORTANT: Study the available modules before you start implementing a code so t
 
 ## Deployment & Development (Docker-First)
 
-**Important**: The project is always deployed and tested locally via Docker. The `./deploy.sh` script is the main entry point for all operations.
+**Important**: The project is always deployed and tested locally via Docker. The `./run.sh` script is the main entry point for all operations.
 
-### deploy.sh Commands
+### run.sh Commands
 
 ```bash
 # Build and start containers (primary command)
-./deploy.sh build
+./run.sh build
 
 # Force rebuild without Docker cache (for significant changes)
-./deploy.sh build --no-cache
+./run.sh build --no-cache
 
 # Full cleanup + rebuild (for major changes or troubleshooting)
-./deploy.sh cleanup && ./deploy.sh build --no-cache
+./run.sh cleanup && ./run.sh build --no-cache
 # Or use the shorthand:
-./deploy.sh rebuild --no-cache
+./run.sh rebuild --no-cache
 
 # Restart containers to reload code (preserves data, for small Python changes)
-./deploy.sh restart
+./run.sh restart
 
 # Stop containers and remove images (full cleanup)
-./deploy.sh cleanup
+./run.sh cleanup
 
 # Open shell in API container
-./deploy.sh shell
+./run.sh shell
 
 # Create a new user
-./deploy.sh create-user --username=USER --email=EMAIL --password=PASS [--admin]
+./run.sh create-user --username=USER --email=EMAIL --password=PASS [--admin]
 ```
 
 ### Running Tests via Docker
 
 ```bash
 # Run all backend tests (default)
-./deploy.sh test
+./run.sh test
 
 # Run all tests (backend + core-tests + security)
-./deploy.sh test --all
+./run.sh test --all
 
 # Run specific test suites
-./deploy.sh test --backend          # Backend tests only
-./deploy.sh test --security         # Security/command filtering tests
-./deploy.sh test --sandboxing       # Sandboxing tests
+./run.sh test --backend          # Backend tests only
+./run.sh test --security         # Security/command filtering tests
+./run.sh test --sandboxing       # Sandboxing tests
 
 # Pattern matching for test files
-./deploy.sh test "session*"         # Matches test_sessions.py, test_session_service.py
-./deploy.sh test "auth|health"      # OR matching: test_auth.py and test_health.py
-./deploy.sh test "session*|streaming"
+./run.sh test "session*"         # Matches test_sessions.py, test_session_service.py
+./run.sh test "auth|health"      # OR matching: test_auth.py and test_health.py
+./run.sh test "session*|streaming"
 
 # Pytest options
-./deploy.sh test -k "ps_command"    # Filter by test name pattern
-./deploy.sh test --security -x      # Stop on first failure
-./deploy.sh test -v                 # Verbose output (default)
+./run.sh test -k "ps_command"    # Filter by test name pattern
+./run.sh test --security -x      # Stop on first failure
+./run.sh test -v                 # Verbose output (default)
 ```
 
 ### When to Use Which Command
 
 | Scenario | Command |
 |----------|---------|
-| First time setup | `./deploy.sh build` |
-| Small Python code change | `./deploy.sh restart` |
-| Config file changes | `./deploy.sh restart` |
-| Dockerfile/requirements.txt changes | `./deploy.sh build --no-cache` |
-| Major refactoring | `./deploy.sh cleanup && ./deploy.sh build --no-cache` |
-| Troubleshooting build issues | `./deploy.sh rebuild --no-cache` |
-| Running tests | `./deploy.sh test` |
+| First time setup | `./run.sh build` |
+| Small Python code change | `./run.sh restart` |
+| Config file changes | `./run.sh restart` |
+| Dockerfile/requirements.txt changes | `./run.sh build --no-cache` |
+| Major refactoring | `./run.sh cleanup && ./run.sh build --no-cache` |
+| Troubleshooting build issues | `./run.sh rebuild --no-cache` |
+| Running tests | `./run.sh test` |
 
 ### Local Development Setup (Optional)
 
@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 ### Services & Ports
 
-After `./deploy.sh build`:
+After `./run.sh build`:
 - **API**: http://localhost:40080
 - **Web UI**: http://localhost:50080
 - **API Docs**: http://localhost:40080/api/docs
@@ -253,7 +253,7 @@ URLs:
 
 The `scripts/ag3ntum_debug.py` script is the primary tool for testing agent execution against the running Docker API. See `docs/how-to-debug-agent-with-ag3ntum_debug.md` for full documentation.
 
-**Prerequisites**: Docker containers must be running (`./deploy.sh build`)
+**Prerequisites**: Docker containers must be running (`./run.sh build`)
 
 ```bash
 # Basic agent request
@@ -310,7 +310,7 @@ docker logs project-ag3ntum-api-1 2>&1 | grep -i "permission\|denied"
 docker logs project-ag3ntum-api-1 2>&1 | grep -E "PathValidationError|BLOCKED|SANDBOX"
 
 # View backend logs (inside container)
-./deploy.sh shell
+./run.sh shell
 tail -f /logs/backend.log
 ```
 
