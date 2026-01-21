@@ -58,11 +58,20 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 WORKDIR /
 
-COPY requirements.txt /requirements.txt
-# Install numpy from source first (for old CPU compatibility without X86_V2)
-# This avoids "RuntimeError: NumPy was built with baseline optimizations (X86_V2)"
-RUN pip install --no-cache-dir numpy --no-binary numpy \
-    && pip install --no-cache-dir -r /requirements.txt
+# Copy all requirements files
+COPY requirements-base.txt requirements-legacy-cpu.txt requirements-modern-cpu.txt /
+
+# Detect CPU capabilities and install appropriate packages
+# X86_V2 requires SSE4.2 - check if CPU supports it
+# Legacy CPUs (old QEMU, pre-2010) don't have SSE4.2
+RUN pip install --no-cache-dir -r /requirements-base.txt \
+    && if grep -q sse4_2 /proc/cpuinfo 2>/dev/null; then \
+         echo "Modern CPU detected (SSE4.2 supported) - installing latest numpy/pandas"; \
+         pip install --no-cache-dir -r /requirements-modern-cpu.txt; \
+       else \
+         echo "Legacy CPU detected (no SSE4.2) - installing compatible numpy/pandas"; \
+         pip install --no-cache-dir --only-binary :all: -r /requirements-legacy-cpu.txt; \
+       fi
 
 COPY . /
 
@@ -73,7 +82,7 @@ RUN chmod +x /entrypoint-web.sh
 # Create runtime directories and set ownership of application directories to ag3ntum_api
 RUN mkdir -p /data /sessions \
     && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts \
-    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /requirements.txt
+    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
 
 ENV AG3NTUM_ROOT=/
 ENV PYTHONPATH=/

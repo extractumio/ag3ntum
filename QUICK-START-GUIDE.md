@@ -71,33 +71,27 @@ Type a prompt in the chat interface and press Enter. The agent will execute in a
 
 ## File Permissions
 
-Ag3ntum uses Docker volume mounts for configuration and data. To ensure proper file ownership:
+Ag3ntum **automatically detects** the best user ID for your environment:
 
-### VPS Deployment (Recommended)
+| Environment | Auto-detected UID | Why |
+|-------------|-------------------|-----|
+| **Running as root** | 45045 (service user) | Production isolation |
+| **Running as regular user** | Your UID | No permission issues |
+| **macOS** | Your UID | Docker Desktop handles mapping |
 
-Pass your host user ID to Docker Compose:
+### How It Works
+
+1. `./run.sh build` auto-detects the appropriate UID/GID
+2. Creates required directories with correct ownership
+3. Saves settings to `.env` for future `docker compose` commands
+
+### Override (Optional)
+
+To force a specific UID:
 
 ```bash
-# One-time setup: export in your shell profile (~/.bashrc or ~/.zshrc)
-export HOST_UID=$(id -u)
-export HOST_GID=$(id -g)
-
-# Then run normally
-docker compose up -d
+HOST_UID=45045 HOST_GID=45045 ./run.sh rebuild --no-cache
 ```
-
-Or pass inline:
-```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d
-```
-
-### Why This Matters
-
-| Without HOST_UID | With HOST_UID |
-|------------------|---------------|
-| Files owned by UID 45045 | Files owned by your user |
-| May need sudo to edit | Normal user access |
-| Permission errors possible | Clean permissions |
 
 ---
 
@@ -149,17 +143,31 @@ Port 40080 (API) is optional—only needed for direct API access.
 
 **Error:** `RuntimeError: NumPy was built with baseline optimizations (X86_V2)`
 
-**Cause:** VPS has an older CPU (common with QEMU/KVM virtualization)
+**Cause:** VPS has an older CPU without SSE4.2 support (common with QEMU/KVM virtualization)
 
-**Solution:** The Dockerfile already handles this by compiling NumPy from source. If you see this error, ensure you're using the latest Dockerfile.
+**Solution:** This is automatically handled during Docker build. The Dockerfile detects CPU capabilities and installs compatible package versions:
+- Modern CPUs (SSE4.2): numpy 2.x, pandas 2.2+
+- Legacy CPUs (no SSE4.2): numpy 1.26.4, pandas 2.1.4
+
+If you see this error at runtime, rebuild the image **on the target server**:
+```bash
+./run.sh rebuild --no-cache
+```
 
 ### Permission denied errors
 
-**Error:** `EACCES: permission denied` when installing npm packages
+**Error:** `EACCES: permission denied` or `Permission denied: '/logs/backend.log'`
 
-**Solution:** Set HOST_UID/HOST_GID environment variables:
+**Cause:** Directories owned by root but container running as non-root user
+
+**Solution:** Re-run build (automatically fixes ownership):
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d
+./run.sh rebuild --no-cache
+```
+
+Or manually fix ownership:
+```bash
+sudo chown -R 45045:45045 logs data src config users
 ```
 
 ### Cannot access web UI
@@ -177,11 +185,16 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d
 
 ### Files have wrong ownership
 
-If files are owned by UID 45045 instead of your user:
+If files are owned by UID 45045 instead of your user (this is normal for production):
 ```bash
-# Fix ownership (run from project directory)
+# Option 1: Change to your user (development)
 sudo chown -R $(id -u):$(id -g) config data logs src users
+
+# Option 2: Rebuild with your UID (development)
+HOST_UID=$(id -u) HOST_GID=$(id -g) ./run.sh rebuild --no-cache
 ```
+
+> **Note:** For production deployments, UID 45045 ownership is intentional and secure.
 
 ---
 
