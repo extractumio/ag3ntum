@@ -59,7 +59,10 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 WORKDIR /
 
 COPY requirements.txt /requirements.txt
-RUN pip install --no-cache-dir -r /requirements.txt
+# Install numpy from source first (for old CPU compatibility without X86_V2)
+# This avoids "RuntimeError: NumPy was built with baseline optimizations (X86_V2)"
+RUN pip install --no-cache-dir numpy --no-binary numpy \
+    && pip install --no-cache-dir -r /requirements.txt
 
 COPY . /
 

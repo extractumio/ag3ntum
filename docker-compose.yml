@@ -1,7 +1,25 @@
+# Ag3ntum Docker Compose Configuration
+#
+# Environment Variables:
+#   AG3NTUM_IMAGE_TAG  - Docker image tag (default: latest)
+#   AG3NTUM_API_PORT   - API port on host (default: 40080)
+#   AG3NTUM_WEB_PORT   - Web UI port on host (default: 50080)
+#   HOST_UID           - Host user ID for file permissions (default: 45045)
+#   HOST_GID           - Host group ID for file permissions (default: 45045)
+#
+# Usage:
+#   Development (local):  docker compose up
+#   Production (VPS):     HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d
+#
+# See QUICK-START-GUIDE.md for detailed deployment instructions.
+
 services:
   ag3ntum-api:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
+    # Match host UID/GID for proper file ownership on mounted volumes
+    # Default 45045 matches the ag3ntum_api user created in Dockerfile
+    user: "${HOST_UID:-45045}:${HOST_GID:-45045}"
     command:
       - python
       - -m
@@ -29,10 +47,15 @@ services:
     security_opt:
       - apparmor:unconfined
       - seccomp:unconfined
+    depends_on:
+      - redis
+    restart: unless-stopped
 
   ag3ntum-web:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
+    # Match host UID/GID for proper file ownership (node_modules, logs)
+    user: "${HOST_UID:-45045}:${HOST_GID:-45045}"
     entrypoint: ["/entrypoint-web.sh"]
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
     working_dir: /src/web_terminal_client
@@ -40,16 +63,18 @@ services:
       AG3NTUM_ROOT: "/"
       PYTHONPATH: "/"
       AG3NTUM_WEB_PORT: "50080"
+      # Use /tmp for npm cache to avoid permission issues
+      npm_config_cache: /tmp/.npm
     volumes:
       - ./config:/config
       - ./logs:/logs
       - ./src:/src
-      - web_node_modules:/src/web_terminal_client/node_modules
     ports:
       - "${AG3NTUM_WEB_PORT:-50080}:50080"
     depends_on:
       - ag3ntum-api
       - redis
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -59,6 +84,3 @@ services:
     ports:
       - "127.0.0.1:46379:6379"
     restart: unless-stopped
-
-volumes:
-  web_node_modules:
