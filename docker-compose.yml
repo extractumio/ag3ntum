@@ -4,12 +4,11 @@
 #   AG3NTUM_IMAGE_TAG  - Docker image tag (default: latest)
 #   AG3NTUM_API_PORT   - API port on host (default: 40080)
 #   AG3NTUM_WEB_PORT   - Web UI port on host (default: 50080)
-#   HOST_UID           - Host user ID for file permissions (default: 45045)
-#   HOST_GID           - Host group ID for file permissions (default: 45045)
 #
 # Usage:
-#   Development (local):  docker compose up
-#   Production (VPS):     HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d
+#   ./run.sh build           # Build and start (handles permissions automatically)
+#   docker compose up -d     # Start existing containers
+#   docker compose down      # Stop containers
 #
 # See QUICK-START-GUIDE.md for detailed deployment instructions.
 
@@ -17,9 +16,8 @@ services:
   ag3ntum-api:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
-    # Match host UID/GID for proper file ownership on mounted volumes
-    # Default 45045 matches the ag3ntum_api user created in Dockerfile
-    user: "${HOST_UID:-45045}:${HOST_GID:-45045}"
+    # Runs as ag3ntum_api (UID 45045) as defined in Dockerfile
+    # Do NOT override with user: directive - breaks sudo inside container
     command:
       - python
       - -m
@@ -39,7 +37,7 @@ services:
       - ./prompts:/prompts:ro
       - ./skills:/skills:ro
       - ./tools:/tools:ro
-      - ./tests:/tests:ro  # Tests mounted read-only for ./run.sh test
+      - ./tests:/tests:ro
     ports:
       - "${AG3NTUM_API_PORT:-40080}:40080"
     cap_add:
@@ -54,8 +52,7 @@ services:
   ag3ntum-web:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
-    # Match host UID/GID for proper file ownership (node_modules, logs)
-    user: "${HOST_UID:-45045}:${HOST_GID:-45045}"
+    # Runs as ag3ntum_api (UID 45045) as defined in Dockerfile
     entrypoint: ["/entrypoint-web.sh"]
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
     working_dir: /src/web_terminal_client
@@ -63,7 +60,6 @@ services:
       AG3NTUM_ROOT: "/"
       PYTHONPATH: "/"
       AG3NTUM_WEB_PORT: "50080"
-      # Use /tmp for npm cache to avoid permission issues
       npm_config_cache: /tmp/.npm
     volumes:
       - ./config:/config

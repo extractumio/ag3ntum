@@ -32,20 +32,11 @@ Replace `sk-ant-api03-YOUR_KEY_HERE` with your actual key.
 
 ### 3. Build and Start
 
-**On VPS/Production:**
-```bash
-# Set file ownership to current user (recommended)
-HOST_UID=$(id -u) HOST_GID=$(id -g) ./run.sh rebuild --no-cache
-```
-
-**On Local/Development:**
 ```bash
 ./run.sh rebuild --no-cache
 ```
 
 This builds the Docker images and starts all services. First build takes 5-10 minutes.
-
-> **Note:** Building takes longer on older VPS servers due to NumPy compilation for CPU compatibility.
 
 ### 4. Create Admin User
 
@@ -71,27 +62,14 @@ Type a prompt in the chat interface and press Enter. The agent will execute in a
 
 ## File Permissions
 
-Ag3ntum **automatically detects** the best user ID for your environment:
+Ag3ntum handles file permissions automatically:
 
-| Environment | Auto-detected UID | Why |
-|-------------|-------------------|-----|
-| **Running as root** | 45045 (service user) | Production isolation |
-| **Running as regular user** | Your UID | No permission issues |
-| **macOS** | Your UID | Docker Desktop handles mapping |
+| Platform | How Permissions Work |
+|----------|---------------------|
+| **macOS** | Docker Desktop handles permissions automatically |
+| **Linux** | `run.sh` sets ownership to UID 45045 (container user) |
 
-### How It Works
-
-1. `./run.sh build` auto-detects the appropriate UID/GID
-2. Creates required directories with correct ownership
-3. Saves settings to `.env` for future `docker compose` commands
-
-### Override (Optional)
-
-To force a specific UID:
-
-```bash
-HOST_UID=45045 HOST_GID=45045 ./run.sh rebuild --no-cache
-```
+The container always runs as `ag3ntum_api` (UID 45045) for security and consistency.
 
 ---
 
@@ -116,8 +94,6 @@ Port 40080 (API) is optional—only needed for direct API access.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HOST_UID` | 45045 | Container user ID (set to `$(id -u)` on VPS) |
-| `HOST_GID` | 45045 | Container group ID (set to `$(id -g)` on VPS) |
 | `AG3NTUM_API_PORT` | 40080 | API port on host |
 | `AG3NTUM_WEB_PORT` | 50080 | Web UI port on host |
 | `AG3NTUM_IMAGE_TAG` | latest | Docker image tag |
@@ -132,8 +108,10 @@ Port 40080 (API) is optional—only needed for direct API access.
 | `./run.sh restart` | Restart containers (keeps data) |
 | `./run.sh cleanup` | Stop and remove containers |
 | `./run.sh shell` | Open shell inside container |
+| `./run.sh create-user` | Create a new user |
 | `docker compose logs -f` | View logs |
 | `docker compose ps` | Check container status |
+| `docker compose exec ag3ntum-api bash` | Shell into API container |
 
 ---
 
@@ -158,16 +136,16 @@ If you see this error at runtime, rebuild the image **on the target server**:
 
 **Error:** `EACCES: permission denied` or `Permission denied: '/logs/backend.log'`
 
-**Cause:** Directories owned by root but container running as non-root user
+**Cause:** Directories not owned by container user (UID 45045)
 
-**Solution:** Re-run build (automatically fixes ownership):
+**Solution:** Re-run build (automatically fixes ownership on Linux):
 ```bash
 ./run.sh rebuild --no-cache
 ```
 
 Or manually fix ownership:
 ```bash
-sudo chown -R 45045:45045 logs data src config users
+sudo chown -R 45045:45045 logs data users
 ```
 
 ### Cannot access web UI
@@ -182,19 +160,6 @@ sudo chown -R 45045:45045 logs data src config users
 - Verify user was created: check output of `create-user` command
 - Use **email** (not username) to login
 - Check API logs: `docker compose logs ag3ntum-api`
-
-### Files have wrong ownership
-
-If files are owned by UID 45045 instead of your user (this is normal for production):
-```bash
-# Option 1: Change to your user (development)
-sudo chown -R $(id -u):$(id -g) config data logs src users
-
-# Option 2: Rebuild with your UID (development)
-HOST_UID=$(id -u) HOST_GID=$(id -g) ./run.sh rebuild --no-cache
-```
-
-> **Note:** For production deployments, UID 45045 ownership is intentional and secure.
 
 ---
 
