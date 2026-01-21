@@ -1,7 +1,9 @@
 # For legacy CPUs without X86_V2 (SSE4.2) support
 # E.g., old QEMU/KVM virtual CPUs, pre-2010 processors
 # NumPy 1.x doesn't require X86_V2 baseline optimizations
+#
+# These versions have manylinux wheels available for Python 3.12
 
 numpy==1.26.4
-pandas==2.0.3
+pandas==2.1.4
 pyarrow==14.0.2

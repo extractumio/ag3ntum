@@ -70,7 +70,7 @@ RUN pip install --no-cache-dir -r /requirements-base.txt \
          pip install --no-cache-dir -r /requirements-modern-cpu.txt; \
        else \
          echo "Legacy CPU detected (no SSE4.2) - installing compatible numpy/pandas"; \
-         pip install --no-cache-dir -r /requirements-legacy-cpu.txt; \
+         pip install --no-cache-dir --only-binary :all: -r /requirements-legacy-cpu.txt; \
        fi
 
 COPY . /
