@@ -328,22 +328,39 @@ fi
 
 function read_config_value() {
   local key="$1"
-  python3 - <<PY
-import sys
-import yaml
+  local config_file="config/api.yaml"
 
-with open("config/api.yaml", "r", encoding="utf-8") as handle:
-    config = yaml.safe_load(handle)
+  # Split key into section and field (e.g., "api.external_port" -> "api" "external_port")
+  local section="${key%%.*}"
+  local field="${key##*.}"
 
-value = config
-for part in "${key}".split("."):
-    value = value.get(part, {})
-
-if isinstance(value, dict):
-    sys.exit("Missing key: ${key}")
-
-print(value)
-PY
+  # Parse simple nested YAML without external dependencies
+  # Handles format:  section:
+  #                    field: value
+  awk -v section="$section" -v field="$field" '
+    BEGIN { in_section = 0 }
+    # Match section header (starts at column 0, ends with colon)
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      gsub(/:.*/, "", $0)
+      in_section = ($0 == section) ? 1 : 0
+      next
+    }
+    # Match field within section (indented, has colon)
+    in_section && /^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      # Extract field name (remove leading whitespace and trailing colon)
+      fname = $0
+      gsub(/^[[:space:]]+/, "", fname)
+      gsub(/:.*/, "", fname)
+      if (fname == field) {
+        # Extract value (everything after first colon, trimmed)
+        val = $0
+        sub(/^[^:]*:[[:space:]]*/, "", val)
+        gsub(/^["'\'']|["'\'']$/, "", val)  # Remove quotes
+        print val
+        exit
+      }
+    }
+  ' "$config_file"
 }
 
 function render_ui_config() {
@@ -563,25 +580,26 @@ function do_cleanup() {
     echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
   fi
   
-  # Step 4: Clear Docker build cache for this project
-  echo "Clearing Docker build cache..."
-  docker builder prune -f --filter "until=24h" 2>/dev/null || true
-  
-  # Step 5: Remove project-specific volumes (but NOT data volumes)
+  # Step 4: Remove project-specific volumes (but NOT data volumes)
   # Only remove the web_node_modules volume, preserve data
   echo "Cleaning build volumes..."
   docker volume rm -f "${PROJECT_NAME}_web_node_modules" 2>/dev/null || true
+
+  # Step 5: Clean up project-specific networks only (not all networks)
+  echo "Cleaning project networks..."
+  local project_networks
+  project_networks=$(docker network ls --filter "name=${PROJECT_NAME}" -q 2>/dev/null || true)
+  if [[ -n "${project_networks}" ]]; then
+    echo "  Removing networks: ${project_networks}"
+    echo "${project_networks}" | xargs -r docker network rm 2>/dev/null || true
+  fi
   
-  # Step 6: Clean up any orphaned networks
-  echo "Cleaning orphaned networks..."
-  docker network prune -f 2>/dev/null || true
-  
-  # Step 7: Remove generated files
+  # Step 6: Remove generated files
   echo "Removing generated files..."
   rm -f docker-compose.override.yml
   rm -f .env.bak
-  
-  # Step 8: Kill any orphaned processes that might be using ports
+
+  # Step 7: Kill any orphaned processes that might be using ports
   echo "Checking for orphaned processes on configured ports..."
   local api_port="${1:-40080}"
   local web_port="${2:-50080}"
