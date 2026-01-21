@@ -14,8 +14,8 @@ Deploy Ag3ntum on your VPS in 5 minutes.
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/extractum/ag3ntum.git
-cd ag3ntum/Project
+git clone https://github.com/extractumio/ag3ntum.git
+cd ag3ntum
 ```
 
 ### 2. Configure API Key

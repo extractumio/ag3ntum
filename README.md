@@ -162,8 +162,8 @@ See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete VPS deployment
 
 ```bash
 # Clone and configure
-git clone https://github.com/extractum/ag3ntum.git
-cd ag3ntum/Project
+git clone https://github.com/extractumio/ag3ntum.git
+cd ag3ntum
 
 # Add your Anthropic API key
 cp config/secrets.yaml.template config/secrets.yaml
