@@ -294,17 +294,26 @@ def test_app(test_db_override, mock_agent_runner, temp_sessions_dir):
 
 @pytest.fixture
 def client(test_app) -> Generator[TestClient, None, None]:
-    """Create a synchronous test client."""
-    with TestClient(test_app) as c:
+    """Create a synchronous test client.
+
+    Note: Uses base_url with localhost to pass HostValidationMiddleware
+    which rejects the default 'testserver' Host header.
+    """
+    with TestClient(test_app, base_url="http://localhost") as c:
         yield c
 
 
 @pytest_asyncio.fixture
 async def async_client(test_app) -> AsyncGenerator[AsyncClient, None]:
-    """Create an async test client."""
+    """Create an async test client.
+
+    Note: Uses localhost base_url to pass HostValidationMiddleware
+    which rejects invalid Host headers.
+    """
     async with AsyncClient(
         transport=ASGITransport(app=test_app),
-        base_url="http://test"
+        base_url="http://localhost",
+        headers={"Host": "localhost"}
     ) as ac:
         yield ac
 
