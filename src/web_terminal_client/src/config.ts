@@ -38,9 +38,6 @@ const DEFAULT_CONFIG: AppConfig = {
  * The config's protocol and port are preserved.
  *
  * Examples:
- * - Config: "http://localhost:40080", Browser: 10.195.48.3
- *   Result: "http://10.195.48.3:40080"
- *
  * - Config: "https://app.example.com:40080", Browser: app.example.com
  *   Result: "https://app.example.com:40080"
  *

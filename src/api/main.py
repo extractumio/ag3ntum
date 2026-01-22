@@ -323,6 +323,42 @@ def create_app() -> FastAPI:
             content={"detail": str(exc)},
         )
 
+    @app.exception_handler(PermissionError)
+    async def permission_error_handler(
+        request: Request, exc: PermissionError
+    ) -> JSONResponse:
+        """
+        Handle PermissionError explicitly to prevent 500 errors without CORS headers.
+
+        This typically happens when the API cannot access user directories due to
+        misconfigured permissions. The error is logged but the user gets a
+        generic message without internal path details.
+        """
+        logger.error(f"PermissionError during request: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Server configuration error: insufficient permissions. "
+                "Please contact administrator."
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        """
+        Catch-all handler for unhandled exceptions.
+
+        Ensures all errors return proper JSON responses (which will have CORS headers
+        added by the middleware) instead of bare 500 errors.
+        """
+        logger.error(f"Unhandled exception during {request.method} {request.url}: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
+
     return app
 
 

@@ -31,6 +31,7 @@ from src.core.command_security import (
     SecurityCheckResult,
     get_command_security_filter,
 )
+from src.core.sandbox import create_demote_fn
 
 if TYPE_CHECKING:
     from src.core.sandbox import SandboxExecutor
@@ -243,6 +244,23 @@ Example:
             # asyncio timeout is a fallback safety net (timeout + kill_after + 30s buffer)
             asyncio_timeout = bound_timeout + bound_kill_after + 30
 
+            # SECURITY: Privilege dropping for user isolation
+            # When sandbox_executor has linux_uid/linux_gid set, commands will
+            # run as that user instead of the API user (45045). This ensures
+            # files created by the agent are owned by the session user.
+            preexec_fn = None
+            if (bound_sandbox_executor is not None
+                    and bound_sandbox_executor.linux_uid is not None
+                    and bound_sandbox_executor.linux_gid is not None):
+                preexec_fn = create_demote_fn(
+                    bound_sandbox_executor.linux_uid,
+                    bound_sandbox_executor.linux_gid,
+                )
+                logger.info(
+                    f"Ag3ntumBash: Dropping privileges to UID={bound_sandbox_executor.linux_uid}, "
+                    f"GID={bound_sandbox_executor.linux_gid}"
+                )
+
             if use_shell:
                 process = await asyncio.create_subprocess_shell(
                     exec_command,
@@ -250,6 +268,7 @@ Example:
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=exec_cwd,
                     env=exec_env,
+                    preexec_fn=preexec_fn,
                 )
             else:
                 process = await asyncio.create_subprocess_exec(
@@ -258,6 +277,7 @@ Example:
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=exec_cwd,
                     env=exec_env,
+                    preexec_fn=preexec_fn,
                 )
 
             try:

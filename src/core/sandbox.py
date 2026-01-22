@@ -380,13 +380,30 @@ def _mount_args(mount: SandboxMount) -> list[str]:
     return ["--ro-bind", mount.source, mount.target]
 
 
-def _create_demote_fn(uid: int, gid: int):
-    """Create preexec_fn for dropping privileges before exec."""
+def create_demote_fn(uid: int, gid: int):
+    """
+    Create preexec_fn for dropping privileges before exec.
+
+    This function returns a callable that, when used as preexec_fn in
+    subprocess creation, will drop the process privileges to the specified
+    UID and GID before executing the command.
+
+    This is used by Ag3ntumBash to ensure sandboxed commands run as the
+    session user's UID instead of the API user (45045), so files created
+    by the agent are owned by the correct user.
+
+    Args:
+        uid: Linux user ID to switch to.
+        gid: Linux group ID to switch to.
+
+    Returns:
+        Callable that drops privileges when called.
+    """
     import os
 
     def demote():
         try:
-            # Drop supplementary groups
+            # Drop supplementary groups first
             os.setgroups([])
             # Set GID (must be before UID)
             os.setgid(gid)
@@ -397,6 +414,10 @@ def _create_demote_fn(uid: int, gid: int):
             raise
 
     return demote
+
+
+# Alias for backward compatibility
+_create_demote_fn = create_demote_fn
 
 
 async def execute_sandboxed_command(

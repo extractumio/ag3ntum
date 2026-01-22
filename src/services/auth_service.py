@@ -52,47 +52,87 @@ class AuthService:
         - Home directory: /users/{username}
         - Python venv: /users/{username}/venv
 
+        Permission Model Note:
+        =====================
+        This validation runs as the API user (ag3ntum_api), not the target user.
+        The directory permissions must allow the API to traverse and check existence:
+        - /users/{username}/     mode 711 (execute allows traversal)
+        - /users/{username}/venv mode 711 (execute allows traversal, hides package list)
+
+        If validation fails with PermissionError, the user's directory permissions
+        are misconfigured and need to be fixed.
+
         Args:
             username: The username to validate.
 
         Raises:
-            UserEnvironmentError: If any required resource is missing.
+            UserEnvironmentError: If any required resource is missing or inaccessible.
         """
         user_home = USERS_DIR / username
 
         # Check home directory
-        if not user_home.exists():
+        try:
+            if not user_home.exists():
+                logger.error(
+                    f"SECURITY: User '{username}' home directory missing: {user_home}. "
+                    "User account is misconfigured."
+                )
+                raise UserEnvironmentError(
+                    f"User '{username}' is misconfigured: home directory does not exist. "
+                    "Please contact administrator to recreate the account."
+                )
+        except PermissionError as e:
             logger.error(
-                f"SECURITY: User '{username}' home directory missing: {user_home}. "
-                "User account is misconfigured."
+                f"SECURITY: Cannot access user '{username}' home directory: {user_home}. "
+                f"Permission denied: {e}. Directory permissions may be misconfigured."
             )
             raise UserEnvironmentError(
-                f"User '{username}' is misconfigured: home directory does not exist. "
-                "Please contact administrator to recreate the account."
+                f"User '{username}' environment is inaccessible. "
+                "This is a server configuration issue. Please contact administrator."
             )
 
         # Check venv directory (required for sandbox)
         venv_path = user_home / "venv"
-        if not venv_path.exists():
+        try:
+            if not venv_path.exists():
+                logger.error(
+                    f"SECURITY: User '{username}' venv missing: {venv_path}. "
+                    "User account is misconfigured."
+                )
+                raise UserEnvironmentError(
+                    f"User '{username}' is misconfigured: Python environment not initialized. "
+                    "Please contact administrator to recreate the account."
+                )
+        except PermissionError as e:
             logger.error(
-                f"SECURITY: User '{username}' venv missing: {venv_path}. "
-                "User account is misconfigured."
+                f"SECURITY: Cannot access user '{username}' venv: {venv_path}. "
+                f"Permission denied: {e}. Home directory should have mode 711, venv should have mode 755."
             )
             raise UserEnvironmentError(
-                f"User '{username}' is misconfigured: Python environment not initialized. "
-                "Please contact administrator to recreate the account."
+                f"User '{username}' environment is inaccessible due to permission settings. "
+                "Please contact administrator to fix directory permissions."
             )
 
         # Check venv has Python binary
         python_bin = venv_path / "bin" / "python3"
-        if not python_bin.exists():
+        try:
+            if not python_bin.exists():
+                logger.error(
+                    f"SECURITY: User '{username}' venv corrupted: {python_bin} missing. "
+                    "User account is misconfigured."
+                )
+                raise UserEnvironmentError(
+                    f"User '{username}' is misconfigured: Python environment corrupted. "
+                    "Please contact administrator to recreate the account."
+                )
+        except PermissionError as e:
             logger.error(
-                f"SECURITY: User '{username}' venv corrupted: {python_bin} missing. "
-                "User account is misconfigured."
+                f"SECURITY: Cannot access user '{username}' python binary: {python_bin}. "
+                f"Permission denied: {e}. venv/bin should have mode 755."
             )
             raise UserEnvironmentError(
-                f"User '{username}' is misconfigured: Python environment corrupted. "
-                "Please contact administrator to recreate the account."
+                f"User '{username}' Python environment is inaccessible. "
+                "Please contact administrator to fix directory permissions."
             )
 
         logger.debug(f"User environment validated for '{username}'")

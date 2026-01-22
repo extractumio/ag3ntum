@@ -114,24 +114,44 @@ class UserService:
         return (max_uid + 1) if max_uid and max_uid >= 2000 else 2000
 
     def _create_linux_user(self, username: str, uid: int) -> None:
-        """Create Linux user with sudo useradd."""
+        """
+        Create Linux user with sudo useradd and set up tiered directory permissions.
+
+        Permission Model (Tiered Access):
+        ================================
+
+        Tier 1 - Traverse-only (API can validate existence but not list):
+          /users/{username}/      mode 711 (drwx--x--x) - traverse only
+          /users/{username}/venv/ mode 711 (drwx--x--x) - traverse only (hides package list)
+
+        Tier 2 - Operational (API + User via group):
+          /users/{username}/sessions/ mode 770 (drwxrwx---) group=ag3ntum
+
+        Tier 3 - Private (User only, accessed via sandbox UID switch):
+          /users/{username}/ag3ntum/  mode 700 (drwx------) - secrets
+          /users/{username}/.claude/  mode 700 (drwx------) - user skills
+
+        Why this works:
+        - API (UID 45045) can validate venv/bin/python3 exists (711 allows stat on children)
+        - Package list in venv is hidden from other users (no read permission on dirs)
+        - API can manage sessions via ag3ntum group membership
+        - Secrets remain private, only accessible when sandbox runs as user's UID
+        """
         home_dir = Path(f"/users/{username}")
 
         # Strategy:
         # 1. Ensure directory exists and we own it (so we can set permissions)
-        # 2. Set strict permissions (700)
-        # 3. Create user (without creating home, since we managed it)
-        # 4. Transfer ownership to the new user
+        # 2. Create directory structure with proper permissions
+        # 3. Create Linux user with ag3ntum as supplementary group
+        # 4. Transfer ownership with correct group settings
 
         # 1. Ensure directory exists
         try:
             home_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            # Directory likely exists but we can't access it (e.g., wrong owner/perms)
-            logger.warning(f"Could not mkdir {home_dir}, assuming it exists/permission denied. Attempting to claim ownership.")
+            logger.warning(f"Could not mkdir {home_dir}, assuming it exists. Attempting to claim ownership.")
 
         # Claim ownership to ag3ntum_api so we can manipulate it
-        # This fixes cases where directory exists with bad perms (e.g. 000) or wrong owner
         try:
             subprocess.run(
                 ["sudo", "chown", "-R", "ag3ntum_api:ag3ntum_api", str(home_dir)],
@@ -142,31 +162,31 @@ class UserService:
             logger.error(f"Failed to claim ownership of {home_dir}: {e.stderr.decode()}")
             raise ValueError(f"Failed to setup user directory: {e}")
 
-        # 2. Set strict permissions (700)
-        # We own it now, so we can chmod
+        # 2. Create directory structure with tiered permissions
         try:
-            home_dir.chmod(0o700)
-            
-            # Create sessions directory while we have access
+            # TIER 1: Public - allows API to validate user environment
+            # Home dir: 711 (execute-only for others - allows traversal but not listing)
+            home_dir.chmod(0o711)
+
+            # TIER 2: Operational - API needs access for session management
+            # Sessions dir: 770 with group ag3ntum (API user is in this group)
             sessions_dir = home_dir / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
-            sessions_dir.chmod(0o700)
-            
-            # Create .claude/skills directory for user skills
-            # Required by sandbox configuration in permissions.yaml
+            sessions_dir.chmod(0o770)
+
+            # TIER 3: Private - only user can access (via sandbox UID switch)
+            # .claude/skills directory for user skills
             skills_dir = home_dir / ".claude" / "skills"
             skills_dir.mkdir(parents=True, exist_ok=True)
+            (home_dir / ".claude").chmod(0o700)
             skills_dir.chmod(0o700)
 
-            # Create ag3ntum directory structure
-            # This directory contains user-specific ag3ntum data
+            # ag3ntum directory for user-specific config and secrets
             ag3ntum_dir = home_dir / "ag3ntum"
             ag3ntum_dir.mkdir(parents=True, exist_ok=True)
             ag3ntum_dir.chmod(0o700)
 
-            # Create persistent storage directory
-            # This directory survives across sessions and is mounted at
-            # /workspace/external/persistent/ inside the sandbox
+            # Persistent storage directory (inside ag3ntum, so private)
             persistent_dir = ag3ntum_dir / "persistent"
             persistent_dir.mkdir(parents=True, exist_ok=True)
             persistent_dir.chmod(0o700)
@@ -187,46 +207,113 @@ class UserService:
                     "- Share data between multiple sessions\n"
                 )
 
-            # Create user-specific Python venv
-            # This is separate from the backend venv and mounted read-only in sandbox
+            # Create user-specific Python venv (TIER 1: public, read-only)
             self._create_user_venv(home_dir, username)
 
-            # Create user secrets.yaml from template
-            # User can add API keys here after registration
+            # Create user secrets.yaml from template (inside ag3ntum, so private)
             self._create_user_secrets(home_dir, username)
 
         except PermissionError as e:
             logger.error(f"Failed to chmod/mkdir {home_dir}: {e}")
             raise ValueError(f"Failed to set directory permissions: {e}")
 
-        # 3. Create Linux user
-        # Always use -M because we managed the directory ourselves
-        # Check if user exists first to avoid error
+        # 3. Create Linux user with ag3ntum as supplementary group
+        # This allows the user to access group-writable directories
         try:
             subprocess.run(
-                ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash", "-u", str(uid), username],
+                ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
+                 "-u", str(uid), "-G", "ag3ntum", username],
                 check=True,
                 capture_output=True,
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 9:
                 logger.warning(f"Linux user {username} already exists. Proceeding with directory setup.")
+                # Add user to ag3ntum group if not already
+                try:
+                    subprocess.run(
+                        ["sudo", "usermod", "-a", "-G", "ag3ntum", username],
+                        check=True,
+                        capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    pass  # Group may not exist or user already in it
             else:
                 logger.error(f"Failed to create Linux user {username}: {e.stderr.decode()}")
                 raise ValueError(f"Failed to create Linux user: {e.stderr.decode()}")
 
-        # 4. Transfer ownership to the new user
+        # 4. Transfer ownership with correct group settings
+        # - Home dir and private paths: user:user (UID:UID)
+        # - Sessions dir: user:ag3ntum (for API access)
+        # - venv: user:user with mode 711 (traverse-only, hides package list)
         try:
+            # First, set ownership of everything to user:user
             subprocess.run(
                 ["sudo", "chown", "-R", f"{uid}:{uid}", str(home_dir)],
                 check=True,
                 capture_output=True,
             )
+
+            # Then, set sessions dir group to ag3ntum for API access
+            subprocess.run(
+                ["sudo", "chgrp", "ag3ntum", str(sessions_dir)],
+                check=True,
+                capture_output=True,
+            )
+
+            # Set venv to traverse-only (711) - hides package list from other users
+            # while allowing API to verify python3 binary exists via stat()
+            # Subdirectories (lib, bin) also get 711 for traversal
+            venv_dir = home_dir / "venv"
+            if venv_dir.exists():
+                # Set all directories to 711 (traverse only)
+                subprocess.run(
+                    ["sudo", "find", str(venv_dir), "-type", "d", "-exec", "chmod", "711", "{}", ";"],
+                    check=True,
+                    capture_output=True,
+                )
+                # Set all files to 644 (readable by owner, but hidden due to parent 711)
+                subprocess.run(
+                    ["sudo", "find", str(venv_dir), "-type", "f", "-exec", "chmod", "644", "{}", ";"],
+                    check=True,
+                    capture_output=True,
+                )
+                # Make bin files executable (755) - needed for python3, pip, etc.
+                bin_dir = venv_dir / "bin"
+                if bin_dir.exists():
+                    subprocess.run(
+                        ["sudo", "find", str(bin_dir), "-type", "f", "-exec", "chmod", "755", "{}", ";"],
+                        check=True,
+                        capture_output=True,
+                    )
+
+            # Re-apply permissions that may have been changed by chown -R
+            subprocess.run(
+                ["sudo", "chmod", "711", str(home_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "770", str(sessions_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "700", str(ag3ntum_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "700", str(home_dir / ".claude")],
+                check=True,
+                capture_output=True,
+            )
+
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to set final ownership for {home_dir}: {e.stderr.decode()}")
             raise ValueError(f"Failed to set final ownership: {e}")
 
-        logger.info(f"Created/Updated Linux user {username} with UID {uid}")
+        logger.info(f"Created/Updated Linux user {username} with UID {uid} (tiered permissions)")
 
     def _create_user_venv(self, home_dir: Path, username: str) -> None:
         """

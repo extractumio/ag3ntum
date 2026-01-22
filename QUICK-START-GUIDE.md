@@ -172,7 +172,7 @@ Edit `config/api.yaml` to set your public hostname:
 ```yaml
 server:
   # Your public IP or domain
-  hostname: "10.195.48.3"        # VPS IP
+  hostname: "199.195.48.1"        # VPS IP
   # hostname: "ag3ntum.example.com"  # Or domain name
 
   # Protocol (http or https)
