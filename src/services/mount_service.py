@@ -235,67 +235,6 @@ def resolve_external_symlink(symlink_path: Path) -> Optional[Path]:
     return None
 
 
-def resolve_file_path_for_external_mount(
-    workspace_path: Path,
-    relative_path: str,
-) -> tuple[Path, bool]:
-    """
-    Resolve a relative path that might be in an external mount to its actual filesystem path.
-
-    DEPRECATED: Use resolve_file_path_for_session() instead, which uses the
-    SandboxPathResolver for consistent path handling across all components.
-
-    This function is kept for backward compatibility but should not be used
-    in new code.
-
-    Args:
-        workspace_path: Absolute path to the workspace root
-        relative_path: Relative path from workspace (e.g., 'external/ro/downloads/file.txt')
-                      Can also be sandbox format like '/workspace/external/...'
-
-    Returns:
-        Tuple of (resolved_path, is_external):
-        - resolved_path: The actual filesystem path to use
-        - is_external: True if this is an external mount path
-    """
-    # Normalize the path to handle sandbox format (e.g., /workspace/external/...)
-    normalized = relative_path.replace("\\", "/")
-    while normalized.startswith("/"):
-        normalized = normalized[1:]
-    if normalized.startswith("workspace/"):
-        normalized = normalized[len("workspace/"):]
-    elif normalized == "workspace":
-        normalized = ""
-
-    is_external = normalized.startswith("external/") or normalized == "external"
-    target_path = workspace_path / normalized
-
-    if not is_external:
-        return target_path, False
-
-    # Walk through path components to find and resolve symlinks
-    parts = normalized.split('/')
-    current_path = workspace_path
-
-    for i, part in enumerate(parts):
-        current_path = current_path / part
-        if current_path.is_symlink():
-            # Resolve this symlink
-            resolved = resolve_external_symlink(current_path)
-            if resolved:
-                # Reconstruct path with remaining parts
-                remaining_parts = parts[i+1:]
-                if remaining_parts:
-                    resolved = resolved / '/'.join(remaining_parts)
-                return resolved, True
-            else:
-                # Symlink couldn't be resolved - return original path
-                return target_path, True
-
-    # No symlink found, return original path
-    return target_path, True
-
-
 # =============================================================================
 # Session-Aware Path Resolution (uses SandboxPathResolver)
 # =============================================================================

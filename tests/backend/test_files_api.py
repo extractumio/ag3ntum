@@ -19,7 +19,6 @@ from src.api.routes.files import (
     validate_path_security,
     get_mount_info,
 )
-from src.services.mount_service import resolve_file_path_for_external_mount
 
 
 class TestNormalizePathForMountCheck:
@@ -176,66 +175,6 @@ class TestValidatePathSecurity:
         with pytest.raises(HTTPException) as exc_info:
             validate_path_security("/workspace/../../../etc/passwd", temp_workspace)
         assert "traversal" in exc_info.value.detail.lower()
-
-
-class TestResolveFilePathForExternalMount:
-    """Tests for resolve_file_path_for_external_mount with sandbox-format paths."""
-
-    @pytest.fixture
-    def temp_workspace(self):
-        """Create a temporary workspace directory."""
-        temp_dir = Path(tempfile.mkdtemp(prefix="test_workspace_"))
-        workspace = temp_dir / "workspace"
-        workspace.mkdir()
-        # Create external directory structure
-        external = workspace / "external"
-        external.mkdir()
-        (external / "persistent").mkdir()
-        (external / "ro").mkdir()
-        yield workspace
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_relative_path(self, temp_workspace):
-        """Relative paths should work correctly."""
-        result, is_external = resolve_file_path_for_external_mount(
-            temp_workspace, "file.txt"
-        )
-        assert result == temp_workspace / "file.txt"
-        assert is_external is False
-
-    def test_sandbox_format_regular_path(self, temp_workspace):
-        """Sandbox format regular paths should work."""
-        result, is_external = resolve_file_path_for_external_mount(
-            temp_workspace, "/workspace/file.txt"
-        )
-        assert result == temp_workspace / "file.txt"
-        assert is_external is False
-
-    def test_sandbox_format_external_path(self, temp_workspace):
-        """Sandbox format external paths should be detected."""
-        result, is_external = resolve_file_path_for_external_mount(
-            temp_workspace, "/workspace/external/persistent/image.png"
-        )
-        assert is_external is True
-        # The path should be correctly constructed
-        assert "external/persistent/image.png" in str(result)
-
-    def test_relative_external_path(self, temp_workspace):
-        """Relative external paths should work."""
-        result, is_external = resolve_file_path_for_external_mount(
-            temp_workspace, "external/persistent/image.png"
-        )
-        assert is_external is True
-
-    def test_workspace_prefix_stripped(self, temp_workspace):
-        """The workspace prefix should be correctly stripped."""
-        # Should NOT create workspace/workspace/file.txt
-        result, is_external = resolve_file_path_for_external_mount(
-            temp_workspace, "workspace/file.txt"
-        )
-        # After fix, this should resolve to workspace/file.txt, not workspace/workspace/file.txt
-        assert result == temp_workspace / "file.txt"
-        assert "workspace/workspace" not in str(result)
 
 
 class TestPathNormalizationRegression:
