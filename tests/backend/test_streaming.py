@@ -521,6 +521,36 @@ class TestPersistThenPublish:
         assert len(published) == 1  # But published
 
 
+def _redis_available():
+    """Check if Redis is available by trying to connect."""
+    try:
+        import socket
+        from pathlib import Path
+        from urllib.parse import urlparse
+        import yaml
+
+        config_path = Path(__file__).parent.parent.parent / "config" / "api.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        parsed = urlparse(config["redis"]["url"])
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 6379
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+requires_redis = pytest.mark.skipif(
+    not _redis_available(),
+    reason="Redis server not available"
+)
+
+
 @pytest.fixture
 def redis_url():
     """Load Redis URL from config (uses DB 1 for tests)."""
@@ -546,6 +576,7 @@ async def redis_hub(redis_url):
     await hub.close()
 
 
+@requires_redis
 class TestRedisEventHubSubscription:
     """Tests for RedisEventHub subscription and event delivery (requires Redis)."""
 

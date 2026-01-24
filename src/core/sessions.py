@@ -293,10 +293,12 @@ class SessionManager:
             logger.warning(f"Failed to load per-user mounts: {e}")
 
         # Create persistent storage symlink
-        # The persistent directory should exist at /users/{username}/ag3ntum/persistent
+        # The persistent directory is at {user_home}/ag3ntum/persistent
+        # where user_home is derived from the sessions directory (sessions_dir.parent)
         # This is created during user registration, but we ensure it exists here too
         persistent_link = external_dir / "persistent"
-        persistent_dir = Path(f"/users/{username}/ag3ntum/persistent")
+        user_home = self._sessions_dir.parent  # e.g., /users/{username}/sessions -> /users/{username}
+        persistent_dir = user_home / "ag3ntum" / "persistent"
 
         # Ensure the persistent directory exists
         # FAIL FAST: If we can't create it, the session should fail - not silently skip
@@ -305,7 +307,7 @@ class SessionManager:
                 persistent_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"Created persistent storage directory: {persistent_dir}")
             except OSError as e:
-                raise SessionCreationError(
+                raise SessionError(
                     f"Failed to create persistent storage directory {persistent_dir}: {e}. "
                     "This directory is required for bwrap sandbox mounts."
                 )
@@ -324,7 +326,7 @@ class SessionManager:
                 persistent_link.symlink_to(persistent_dir)
                 logger.debug(f"Created persistent symlink: {persistent_link} -> {persistent_dir}")
         except OSError as e:
-            raise SessionCreationError(
+            raise SessionError(
                 f"Failed to create persistent storage symlink: {e}"
             )
 

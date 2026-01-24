@@ -621,10 +621,21 @@ export function FileExplorer({
   useEffect(() => {
     if (!navigateTo) return;
 
-    // Normalize the path (remove leading ./ if present)
+    // Normalize the path (remove leading ./, /, and workspace/ prefixes)
+    // Agent messages use sandbox format like "/workspace/file.txt"
     let targetPath = navigateTo;
     if (targetPath.startsWith('./')) {
       targetPath = targetPath.slice(2);
+    }
+    // Remove leading slashes
+    while (targetPath.startsWith('/')) {
+      targetPath = targetPath.slice(1);
+    }
+    // Remove workspace/ prefix (sandbox format from agent messages)
+    if (targetPath.startsWith('workspace/')) {
+      targetPath = targetPath.slice('workspace/'.length);
+    } else if (targetPath === 'workspace') {
+      targetPath = '';
     }
 
     // Get parent folder path

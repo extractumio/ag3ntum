@@ -98,6 +98,27 @@ class TestUserManager:
         """Generate a unique 8-character identifier."""
         return str(uuid.uuid4())[:8]
 
+    def _create_user_directories(self, username: str) -> None:
+        """
+        Create the required directory structure for a test user.
+
+        Creates:
+        - {users_dir}/{username}/sessions/ - For session storage
+        - {users_dir}/{username}/ag3ntum/persistent/ - For persistent storage
+
+        This mirrors the production directory structure created during
+        user registration.
+        """
+        user_home = self.users_dir / username
+
+        # Create sessions directory
+        sessions_dir = user_home / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create persistent storage directory
+        persistent_dir = user_home / "ag3ntum" / "persistent"
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+
     async def create_user(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -151,6 +172,9 @@ class TestUserManager:
             linux_uid=linux_uid,
             is_active=is_active,
         )
+
+        # Create user directory structure (sessions, persistent storage)
+        self._create_user_directories(username)
 
         # Create user in database
         user = User(

@@ -10,6 +10,7 @@ const nodeModulesPath = path.resolve(__dirname, 'node_modules');
 
 export default defineConfig({
   plugins: [react()],
+  cacheDir: path.resolve(__dirname, 'node_modules/.vite'),
   server: {
     fs: {
       allow: [projectRoot],
@@ -25,6 +26,7 @@ export default defineConfig({
       '@testing-library/user-event': path.resolve(nodeModulesPath, '@testing-library/user-event'),
       'msw': path.resolve(nodeModulesPath, 'msw'),
       'vitest': path.resolve(nodeModulesPath, 'vitest'),
+      '@vitest/coverage-v8': path.resolve(nodeModulesPath, '@vitest/coverage-v8'),
     },
   },
   test: {

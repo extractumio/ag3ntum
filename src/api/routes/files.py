@@ -256,6 +256,13 @@ def validate_path_security(
     while normalized.startswith('/') or normalized.startswith('\\'):
         normalized = normalized[1:]
 
+    # Handle sandbox-format paths (e.g., "/workspace/file.txt" or "workspace/file.txt")
+    # These come from agent messages which use the sandbox path format
+    if normalized.startswith('workspace/'):
+        normalized = normalized[len('workspace/'):]
+    elif normalized == 'workspace':
+        normalized = ''
+
     # Check for path traversal attempts (including encoded variants)
     # This catches .., encoded .., and various bypass attempts
     path_parts = normalized.replace('\\', '/').split('/')
@@ -471,19 +478,48 @@ def is_viewable_file(file_path: Path) -> bool:
     return False
 
 
+def normalize_path_for_mount_check(path: str) -> str:
+    """
+    Normalize a path for external mount checking.
+
+    Strips /workspace/ prefix and leading slashes so paths from agent messages
+    (which use sandbox format like "/workspace/external/...") can be correctly
+    identified as external mount paths.
+
+    Args:
+        path: Path that may be in sandbox format or relative format
+
+    Returns:
+        Normalized relative path (e.g., "external/persistent/file.txt")
+    """
+    normalized = path.replace("\\", "/")
+
+    # Remove leading slashes
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
+
+    # Remove workspace/ prefix (sandbox format from agent messages)
+    if normalized.startswith("workspace/"):
+        normalized = normalized[len("workspace/"):]
+    elif normalized == "workspace":
+        normalized = ""
+
+    return normalized
+
+
 def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
     """
     Determine if a path is in an external mount and its type.
 
     Args:
-        relative_path: Path relative to workspace root
+        relative_path: Path relative to workspace root (can include /workspace/ prefix)
 
     Returns:
         Tuple of (is_external, is_readonly, mount_type)
         mount_type is one of: "ro", "rw", "persistent", "user-ro", "user-rw", or None
     """
-    # Normalize path separators
-    normalized = relative_path.replace("\\", "/")
+    # Normalize path separators and strip workspace prefix
+    normalized = normalize_path_for_mount_check(relative_path)
 
     # Check for external mount paths (order matters - more specific first)
     if normalized.startswith("external/user-ro/") or normalized == "external/user-ro":
@@ -710,7 +746,9 @@ async def browse_files(
         target_dir = workspace_root.resolve()
 
     # Check if this is an external mount path that needs special handling
-    is_external_path = path and (path.startswith("external/") or path == "external")
+    # Normalize the path to handle sandbox format (e.g., /workspace/external/...)
+    normalized_path = normalize_path_for_mount_check(path) if path else ""
+    is_external_path = normalized_path.startswith("external/") or normalized_path == "external"
     actual_dir = target_dir
 
     if is_external_path:
@@ -750,7 +788,7 @@ async def browse_files(
         sort_by=sort_by,
         sort_order=sort_order,
         limit=limit,
-        relative_path_prefix=path if is_external_path else None,
+        relative_path_prefix=normalized_path if is_external_path else None,
     )
 
     return DirectoryListing(
@@ -1294,12 +1332,15 @@ async def delete_file(
     # Validate path with security checks
     file_path = validate_path_security(path, workspace_root)
 
+    # Normalize the path for mount checking (handles /workspace/ prefix from agent messages)
+    normalized_path = normalize_path_for_mount_check(path)
+
     # Check if this is an external mount path
-    is_external_path = path.startswith("external/") or path == "external"
+    is_external_path = normalized_path.startswith("external/") or normalized_path == "external"
 
     # Prevent deletion of files in read-only external mounts
     if is_external_path:
-        is_external, is_readonly, mount_type = get_mount_info(path)
+        is_external, is_readonly, mount_type = get_mount_info(normalized_path)
         if is_readonly:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1308,7 +1349,7 @@ async def delete_file(
 
     # Resolve external mount paths to actual filesystem paths
     actual_file, _ = resolve_file_path_for_external_mount(
-        workspace_root, path
+        workspace_root, normalized_path
     )
 
     if not actual_file.exists():

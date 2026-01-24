@@ -58,21 +58,25 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
     """
     Skip e2e and slow tests by default unless explicitly requested.
-    
-    Run e2e tests with: pytest -m e2e
+
+    Run e2e tests with: pytest -m e2e --run-e2e
     Run all tests including e2e: pytest --run-e2e
+    Run slow tests: pytest --run-e2e (slow tests require --run-e2e)
     """
     run_e2e = config.getoption("--run-e2e", default=False)
-    
+
     if run_e2e:
         # Don't skip anything if --run-e2e is passed
         return
-    
+
     skip_e2e = pytest.mark.skip(reason="E2E test skipped by default. Use --run-e2e to run.")
-    
+    skip_slow = pytest.mark.skip(reason="Slow test skipped by default. Use --run-e2e to run.")
+
     for item in items:
         if "e2e" in item.keywords:
             item.add_marker(skip_e2e)
+        elif "slow" in item.keywords:
+            item.add_marker(skip_slow)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

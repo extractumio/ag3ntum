@@ -1,0 +1,50 @@
+# =============================================================================
+# TEST-ONLY SUDOERS RULES
+# =============================================================================
+#
+# WARNING: These rules create CRITICAL SECURITY VULNERABILITIES!
+# NEVER include in production images or deployments.
+#
+# These are required for integration tests that verify:
+# - User isolation (need to run commands as different users)
+# - Filesystem isolation (need to inspect files from outside sandbox)
+# - Process isolation (need to see processes from outside sandbox)
+#
+# This file is mounted at runtime via docker-compose.test.yml and
+# installed by entrypoint-test.sh. It is NOT baked into the Docker image.
+#
+# =============================================================================
+
+# Allow running shell commands as any user (for integration tests)
+# SEC-CTR-002: Required to verify user isolation by running commands as session users
+ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/sh *
+
+# Allow reading files as any user (for test verification)
+# SEC-CTR-017: Required to verify filesystem isolation from outside sandbox
+ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/cat *
+
+# Allow listing directories as any user
+ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/ls *
+
+# Allow process inspection (for isolation verification)
+ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/ps *
+
+# Allow touch for test file creation
+ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/touch *
+
+# Allow unrestricted userdel for test cleanup (production restricts to user_* pattern)
+# SEC-CTR-010: Required to clean up test users with any naming pattern
+ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel *
+ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r *
+
+# Allow find with -exec for test verification
+# SEC-PY-002: Required to search and verify file permissions across user directories
+ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/find /users/* *
+
+# Allow chmod for test setup (setting up test file permissions)
+# SEC-PY-009: Required to set up test scenarios with specific permission patterns
+ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod * /users/*
+
+# Allow rm for test cleanup (removing test user directories)
+# SEC-INF-011: Required to clean up test directories between test runs
+ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/rm -rf /users/*

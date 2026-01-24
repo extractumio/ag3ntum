@@ -11,10 +11,17 @@ Tests cover:
 - Mount source validation (fail-closed security)
 - Placeholder resolution in paths
 """
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Skip marker for tests requiring Linux-specific features (bwrap, /lib, etc.)
+requires_linux = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="Test requires Linux-specific features (bwrap sandbox)"
+)
 
 from src.core.sandbox import (
     SandboxConfig,
@@ -168,8 +175,14 @@ class TestSandboxConfig:
         assert resolved.writable_paths[0] == "/users/bob/output"
 
 
+@requires_linux
 class TestSandboxExecutor:
-    """Test SandboxExecutor command building."""
+    """Test SandboxExecutor command building.
+
+    These tests require Linux-specific features:
+    - bwrap (bubblewrap) sandbox utility
+    - Linux filesystem paths (/lib, /usr/lib, etc.)
+    """
 
     @pytest.fixture
     def workspace(self, tmp_path: Path) -> Path:

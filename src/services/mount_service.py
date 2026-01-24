@@ -251,20 +251,30 @@ def resolve_file_path_for_external_mount(
     Args:
         workspace_path: Absolute path to the workspace root
         relative_path: Relative path from workspace (e.g., 'external/ro/downloads/file.txt')
+                      Can also be sandbox format like '/workspace/external/...'
 
     Returns:
         Tuple of (resolved_path, is_external):
         - resolved_path: The actual filesystem path to use
         - is_external: True if this is an external mount path
     """
-    is_external = relative_path.startswith("external/") or relative_path == "external"
-    target_path = workspace_path / relative_path
+    # Normalize the path to handle sandbox format (e.g., /workspace/external/...)
+    normalized = relative_path.replace("\\", "/")
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
+    if normalized.startswith("workspace/"):
+        normalized = normalized[len("workspace/"):]
+    elif normalized == "workspace":
+        normalized = ""
+
+    is_external = normalized.startswith("external/") or normalized == "external"
+    target_path = workspace_path / normalized
 
     if not is_external:
         return target_path, False
 
     # Walk through path components to find and resolve symlinks
-    parts = relative_path.split('/')
+    parts = normalized.split('/')
     current_path = workspace_path
 
     for i, part in enumerate(parts):

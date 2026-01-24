@@ -61,11 +61,13 @@ class TestAgentRunnerExecution:
             # Make the mock complete immediately
             mock_run.return_value = None
 
-            params = make_task_params(
-                session_id="test-session",
-                task="Test task"
-            )
-            await runner.start_task(params)
+            # Mock Redis connection check since Redis may not be available
+            with patch.object(runner, '_ensure_redis_connection', new_callable=AsyncMock):
+                params = make_task_params(
+                    session_id="test-session",
+                    task="Test task"
+                )
+                await runner.start_task(params)
 
             # Give the task a chance to start
             await asyncio.sleep(0.1)
@@ -84,9 +86,11 @@ class TestAgentRunnerExecution:
             asyncio.sleep(100)
         )
 
-        params = make_task_params(session_id="test-session", task="Duplicate task")
-        with pytest.raises(RuntimeError, match="already running"):
-            await runner.start_task(params)
+        # Mock Redis connection check since Redis may not be available
+        with patch.object(runner, '_ensure_redis_connection', new_callable=AsyncMock):
+            params = make_task_params(session_id="test-session", task="Duplicate task")
+            with pytest.raises(RuntimeError, match="already running"):
+                await runner.start_task(params)
 
         # Cleanup
         runner._running_tasks["test-session"].cancel()
@@ -269,12 +273,14 @@ class TestAgentRunnerIntegration:
             return_value=mock_result
         ):
             with patch.object(runner, '_update_session_status', new_callable=AsyncMock):
-                # Start the task using TaskParams
-                params = make_task_params(
-                    session_id="integration-test",
-                    task="Test task"
-                )
-                await runner.start_task(params)
+                # Mock Redis connection check since Redis may not be available
+                with patch.object(runner, '_ensure_redis_connection', new_callable=AsyncMock):
+                    # Start the task using TaskParams
+                    params = make_task_params(
+                        session_id="integration-test",
+                        task="Test task"
+                    )
+                    await runner.start_task(params)
 
                 # Wait for completion
                 await asyncio.sleep(0.5)

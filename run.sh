@@ -765,29 +765,91 @@ fi
 run_ui_tests() {
   echo "=== Running UI/React tests ==="
 
-  local WEB_CLIENT_DIR="${ROOT_DIR}/src/web_terminal_client"
-
-  # Check if web_terminal_client directory exists
-  if [[ ! -d "${WEB_CLIENT_DIR}" ]]; then
-    echo "Error: web_terminal_client directory not found at ${WEB_CLIENT_DIR}"
+  # Check if ag3ntum-web container is running
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+    echo "Error: ag3ntum-web container is not running."
+    echo "Start it first with: ./run.sh build"
     return 1
   fi
 
-  # Check if node_modules exists
-  if [[ ! -d "${WEB_CLIENT_DIR}/node_modules" ]]; then
-    echo "Installing npm dependencies..."
-    (cd "${WEB_CLIENT_DIR}" && npm install)
+  # Check if node_modules needs reinstalling (platform mismatch between host and container)
+  # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux)
+  echo "Checking node_modules platform compatibility..."
+  NEEDS_REINSTALL=$(docker compose exec ag3ntum-web sh -c '
+    if [ ! -d /src/web_terminal_client/node_modules ]; then
+      echo "missing"
+    elif [ ! -d /src/web_terminal_client/node_modules/@rollup ]; then
+      echo "missing_rollup"
+    elif ! ls /src/web_terminal_client/node_modules/@rollup/rollup-linux-* >/dev/null 2>&1; then
+      echo "wrong_platform"
+    else
+      echo "ok"
+    fi
+  ' 2>/dev/null | tr -d '\r')
+
+  if [[ "${NEEDS_REINSTALL}" != "ok" ]]; then
+    echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
+    docker compose exec ag3ntum-web sh -c '
+      cd /src/web_terminal_client && \
+      rm -rf node_modules package-lock.json && \
+      npm install --no-fund --no-audit
+    '
   fi
 
-  # Run vitest
-  echo "Running vitest..."
-  (cd "${WEB_CLIENT_DIR}" && npm run test:run)
+  # Run vitest inside the Docker container
+  echo "Running vitest in Docker container..."
+  if [ -t 0 ]; then
+    docker compose exec ag3ntum-web npm run test:run
+  else
+    docker compose exec ag3ntum-web npm run test:run
+  fi
   return $?
 }
 
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests ==="
+
+  # Use test compose override for test runs
+  # This mounts test sudoers and uses test entrypoint
+  COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+
+  # Check if test configuration files exist
+  if [[ ! -f "docker-compose.test.yml" ]]; then
+    echo "Error: docker-compose.test.yml not found"
+    echo "This file is required for running tests with proper permissions."
+    exit 1
+  fi
+
+  if [[ ! -f "config/test/sudoers-test" ]]; then
+    echo "Error: config/test/sudoers-test not found"
+    echo "This file is required for integration tests that need elevated permissions."
+    exit 1
+  fi
+
+  if [[ ! -f "entrypoint-test.sh" ]]; then
+    echo "Error: entrypoint-test.sh not found"
+    echo "This script is required to inject test sudoers at runtime."
+    exit 1
+  fi
+
+  # Ensure container is running with test configuration
+  # This restarts the API container with test volumes and entrypoint
+  echo "Configuring container for test mode..."
+  ${COMPOSE_TEST} up -d ag3ntum-api
+
+  # Wait for container to be ready
+  echo "Waiting for container to be ready..."
+  sleep 2
+
+  # Verify container is running
+  if ! ${COMPOSE_TEST} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    echo "Error: Failed to start ag3ntum-api container in test mode."
+    echo "Check logs with: ${COMPOSE_TEST} logs ag3ntum-api"
+    exit 1
+  fi
+
+  echo ""
 
   # Build pytest command
   PYTEST_CMD="python -m pytest"
@@ -839,8 +901,8 @@ if [[ "${ACTION}" == "test" ]]; then
     exit $?
   fi
 
-  # For backend tests, check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  # For backend tests, verify container is still running
+  if ! ${COMPOSE_TEST} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -858,7 +920,7 @@ if [[ "${ACTION}" == "test" ]]; then
       # Trim whitespace
       name="${name// /}"
       # Find matching test files in container
-      MATCHES=$(docker compose exec ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
+      MATCHES=$(${COMPOSE_TEST} exec ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
       if [[ -n "${MATCHES}" ]]; then
         while IFS= read -r file; do
           TEST_FILES+=("${file}")
@@ -870,7 +932,7 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "No test files found matching: ${SUBSET}"
       echo ""
       echo "Available test files:"
-      docker compose exec ag3ntum-api find /tests -name "test_*.py" | sort
+      ${COMPOSE_TEST} exec ag3ntum-api find /tests -name "test_*.py" | sort
       exit 1
     fi
 
@@ -892,14 +954,14 @@ if [[ "${ACTION}" == "test" ]]; then
       echo ""
 
       # Run backend tests in container (use -t only if TTY available)
+      # Use || true to prevent set -e from exiting on test failures
       BACKEND_RESULT=0
       if [[ -z "${UI_ONLY}" ]]; then
         if [ -t 0 ]; then
-          docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+          ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
         else
-          docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+          ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
         fi
-        BACKEND_RESULT=$?
       fi
 
       # Run UI tests unless backend-only
@@ -931,6 +993,11 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
       echo "========================================"
 
+      # Restore container to production mode
+      echo ""
+      echo "Restoring container to production mode..."
+      docker compose up -d ag3ntum-api
+
       if [[ ${BACKEND_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         exit 1
       fi
@@ -941,26 +1008,27 @@ if [[ "${ACTION}" == "test" ]]; then
       echo ""
 
       # First run: backend tests with --run-e2e flag
+      # Use || to capture exit code without triggering set -e
       echo "=== Running backend tests (with E2E) ==="
+      BACKEND_RESULT=0
       if [ -t 0 ]; then
-        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
       else
-        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
       fi
-      BACKEND_RESULT=$?
 
       # Second run: security tests (no --run-e2e flag)
       echo ""
       echo "=== Running security tests ==="
+      SECURITY_RESULT=0
       if [ -t 0 ]; then
-        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
+        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
       else
-        docker compose exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
+        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
       fi
-      SECURITY_RESULT=$?
 
       # Check for other test directories and run them
-      OTHER_DIRS=$(docker compose exec ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
+      OTHER_DIRS=$(${COMPOSE_TEST} exec ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
       OTHER_RESULT=0
 
       if [[ -n "${OTHER_DIRS}" ]]; then
@@ -968,16 +1036,17 @@ if [[ "${ACTION}" == "test" ]]; then
           dir_name=$(basename "${dir}")
           if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
             # Check if directory has any test files
-            HAS_TESTS=$(docker compose exec ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
+            HAS_TESTS=$(${COMPOSE_TEST} exec ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
             if [[ -n "${HAS_TESTS}" ]]; then
               echo ""
               echo "=== Running ${dir_name} tests ==="
+              DIR_RESULT=0
               if [ -t 0 ]; then
-                docker compose exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short
+                ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
               else
-                docker compose exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short
+                ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
               fi
-              if [[ $? -ne 0 ]]; then
+              if [[ ${DIR_RESULT} -ne 0 ]]; then
                 OTHER_RESULT=1
               fi
             fi
@@ -989,8 +1058,7 @@ if [[ "${ACTION}" == "test" ]]; then
       UI_RESULT=0
       if [[ -z "${BACKEND_ONLY}" ]]; then
         echo ""
-        run_ui_tests
-        UI_RESULT=$?
+        run_ui_tests || UI_RESULT=$?
       fi
 
       # Print combined summary
@@ -998,7 +1066,7 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "========================================"
       echo "=== COMBINED TEST SUMMARY ==="
       echo "========================================"
-      TOTAL_BACKEND=$(docker compose exec ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
       echo ""
       if [[ ${BACKEND_RESULT} -eq 0 ]]; then
@@ -1025,6 +1093,11 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
       echo "========================================"
 
+      # Restore container to production mode
+      echo ""
+      echo "Restoring container to production mode..."
+      docker compose up -d ag3ntum-api
+
       # Exit with error if any test suite failed
       if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo ""
@@ -1045,11 +1118,18 @@ if [[ "${ACTION}" == "test" ]]; then
 
   # Run tests in container (use -t only if TTY available)
   if [ -t 0 ]; then
-    docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+    ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   else
-    docker compose exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+    ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   fi
-  exit $?
+  TEST_EXIT_CODE=$?
+
+  # Restore container to production mode (without test sudoers)
+  echo ""
+  echo "Restoring container to production mode..."
+  docker compose up -d ag3ntum-api
+
+  exit ${TEST_EXIT_CODE}
 fi
 
 # Handle shell action
@@ -1083,8 +1163,23 @@ fi
 if [[ "${ACTION}" == "cleanup-test-users" ]]; then
   echo "=== Cleaning up test users ==="
 
+  # Use test compose override for cleanup (needs elevated permissions)
+  COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+
+  # Check if test configuration files exist
+  if [[ ! -f "docker-compose.test.yml" ]] || [[ ! -f "config/test/sudoers-test" ]]; then
+    echo "Warning: Test configuration files not found, using standard compose."
+    echo "Some cleanup operations may fail without test permissions."
+    COMPOSE_TEST="docker compose"
+  fi
+
+  # Ensure container is running with test configuration for cleanup
+  echo "Configuring container for cleanup..."
+  ${COMPOSE_TEST} up -d ag3ntum-api
+  sleep 2
+
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_TEST} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1092,12 +1187,18 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
 
   # Run cleanup script inside container
   if [ -t 0 ]; then
-    docker compose exec ag3ntum-api \
+    ${COMPOSE_TEST} exec ag3ntum-api \
       python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
   else
-    docker compose exec ag3ntum-api \
+    ${COMPOSE_TEST} exec ag3ntum-api \
       python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
   fi
+
+  # Restore container to production mode
+  echo ""
+  echo "Restoring container to production mode..."
+  docker compose up -d ag3ntum-api
+
   exit 0
 fi
 
