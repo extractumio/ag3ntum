@@ -141,7 +141,19 @@ def test_environment() -> Generator[dict, None, None]:
         "api": {
             "host": "127.0.0.1",
             "port": test_port,
+            "external_port": test_port,  # Required for Host header validation
             "cors_origins": ["http://localhost:3000"],
+        },
+        "server": {
+            "hostname": "127.0.0.1",  # Must match the test URL hostname
+            "protocol": "http",
+        },
+        "security": {
+            # Allow the test host and any origin for CORS testing
+            "additional_allowed_hosts": ["127.0.0.1"],
+        },
+        "web": {
+            "external_port": 3000,  # For CORS origin validation
         },
         "database": {
             "path": str(temp_data / "test.db"),
@@ -449,12 +461,18 @@ class TestServerStartup:
     def test_cors_headers_present(self, running_server: dict) -> None:
         """Server returns CORS headers."""
         base_url = running_server["base_url"]
+        # Extract host:port from base_url for Host header validation
+        # base_url is like "http://127.0.0.1:12345"
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        host_header = f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
 
         response = httpx.options(
             f"{base_url}/api/v1/health",
             headers={
                 "Origin": "http://localhost:3000",
                 "Access-Control-Request-Method": "GET",
+                "Host": host_header,  # Explicit host to pass validation
             },
             timeout=5.0,
         )

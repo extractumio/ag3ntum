@@ -3,6 +3,7 @@ FastAPI dependencies for Ag3ntum API.
 
 Provides dependency injection for authentication, database sessions, etc.
 """
+import logging
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Query, status
@@ -11,6 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.database import get_db
 from ..services.auth_service import auth_service, UserEnvironmentError
+from ..core.sandbox_path_resolver import (
+    configure_sandbox_path_resolver,
+    has_sandbox_path_resolver,
+)
+
+logger = logging.getLogger(__name__)
 
 # HTTP Bearer authentication scheme
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -164,4 +171,36 @@ async def get_current_user_id_from_query_or_header(
         )
 
     return user_id
+
+
+def configure_sandbox_path_resolver_if_needed(
+    session_id: str,
+    username: str,
+    workspace_docker: str,
+) -> None:
+    """
+    Configure SandboxPathResolver for a session if not already configured.
+
+    This is used by the File Explorer API to configure the resolver on-demand
+    when accessing existing sessions after a server restart.
+
+    Args:
+        session_id: The session ID
+        username: The username for the session
+        workspace_docker: The Docker workspace path
+    """
+    if has_sandbox_path_resolver(session_id):
+        return
+
+    try:
+        configure_sandbox_path_resolver(
+            session_id=session_id,
+            username=username,
+            workspace_docker=workspace_docker,
+        )
+        logger.info(
+            f"On-demand SandboxPathResolver configured for session {session_id}"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to configure SandboxPathResolver on-demand: {e}")
 

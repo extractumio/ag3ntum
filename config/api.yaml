@@ -10,7 +10,6 @@
 # Examples:
 #   Development:  hostname: "localhost"
 #   LAN access:   hostname: "192.168.1.100"
-#   VPS by IP:    hostname: "10.195.48.3"
 #   Domain:       hostname: "ag3ntum.example.com"
 #   With HTTPS:   hostname: "ag3ntum.example.com", protocol: "https"
 

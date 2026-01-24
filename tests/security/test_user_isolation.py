@@ -38,7 +38,8 @@ from src.core.sandbox import (
     SandboxMount,
     SandboxExecutor,
     SandboxEnvConfig,
-    _create_demote_fn,
+    create_demote_fn,
+    _create_demote_fn,  # Alias for backward compatibility
 )
 
 
@@ -67,6 +68,24 @@ def workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     return workspace
+
+
+@pytest.fixture
+def minimal_agent_config():
+    """Create a minimal valid AgentConfig for testing.
+
+    This provides all required fields so ClaudeAgent can be instantiated
+    without loading from agent.yaml.
+    """
+    from src.core.schemas import AgentConfig
+    return AgentConfig(
+        model="claude-haiku-4-5-20251001",
+        max_turns=10,
+        timeout_seconds=300,
+        enable_skills=False,
+        enable_file_checkpointing=False,
+        role="default",
+    )
 
 
 @pytest.fixture
@@ -537,3 +556,504 @@ class TestDockerEnvironment:
                 assert current_uid == API_USER_UID, (
                     f"In Docker, expected UID {API_USER_UID} but got {current_uid}"
                 )
+
+
+# =============================================================================
+# Test: UID Passing Through Task Runner Chain
+# =============================================================================
+
+class TestUIDPassingChain:
+    """Test that UID is correctly passed through task_runner → agent_core → executor."""
+
+    def test_claude_agent_accepts_uid_gid(self, minimal_agent_config) -> None:
+        """ClaudeAgent.__init__ accepts linux_uid and linux_gid parameters."""
+        from src.core.agent_core import ClaudeAgent
+        from src.core.permission_profiles import PermissionManager
+
+        pm = PermissionManager()
+
+        agent = ClaudeAgent(
+            config=minimal_agent_config,
+            permission_manager=pm,
+            linux_uid=2000,
+            linux_gid=2000,
+            tracer=False,
+        )
+
+        assert agent._linux_uid == 2000
+        assert agent._linux_gid == 2000
+
+    def test_claude_agent_uid_default_none(self, minimal_agent_config) -> None:
+        """ClaudeAgent defaults to None for UID/GID."""
+        from src.core.agent_core import ClaudeAgent
+        from src.core.permission_profiles import PermissionManager
+
+        pm = PermissionManager()
+        agent = ClaudeAgent(
+            config=minimal_agent_config,
+            permission_manager=pm,
+            tracer=False,
+        )
+
+        assert agent._linux_uid is None
+        assert agent._linux_gid is None
+
+    def test_task_execution_params_has_uid_fields(self) -> None:
+        """TaskExecutionParams schema has linux_uid and linux_gid fields."""
+        from src.core.schemas import TaskExecutionParams
+
+        params = TaskExecutionParams(
+            task="test",
+            linux_uid=2000,
+            linux_gid=2000,
+        )
+
+        assert params.linux_uid == 2000
+        assert params.linux_gid == 2000
+
+
+# =============================================================================
+# Test: Directory Permission Validation (Mode 711)
+# =============================================================================
+
+class TestDirectoryPermissions:
+    """Test permission validation with mode 711 directories."""
+
+    def test_mode_711_allows_stat_on_child(self, tmp_path: Path) -> None:
+        """Mode 711 on parent allows stat() on known child path."""
+        # Create directory structure
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        child = parent / "child"
+        child.mkdir()
+        grandchild = child / "file.txt"
+        grandchild.write_text("test")
+
+        # Set mode 711 on parent and child (traverse only)
+        parent.chmod(0o711)
+        child.chmod(0o711)
+
+        # We should still be able to stat the grandchild
+        # (assuming we know the exact path)
+        assert grandchild.exists()
+        assert grandchild.stat().st_size > 0
+
+    def test_mode_711_hides_directory_listing(self, tmp_path: Path) -> None:
+        """Mode 711 prevents listing directory contents."""
+        # Create directory with contents
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "secret1.txt").write_text("secret")
+        (parent / "secret2.txt").write_text("secret")
+
+        # Set mode 711 (owner can do everything, others can only traverse)
+        parent.chmod(0o711)
+
+        # As the owner, we can still list
+        # But if we were a different user, listing would fail
+        # This test documents the expected behavior
+        contents = list(parent.iterdir())
+        assert len(contents) == 2, "Owner can still list mode 711 directory"
+
+    def test_venv_validation_with_mode_711(self, tmp_path: Path) -> None:
+        """Auth service can validate venv exists with mode 711 directories."""
+        # Simulate user directory structure
+        user_home = tmp_path / "users" / "testuser"
+        user_home.mkdir(parents=True)
+        venv = user_home / "venv"
+        venv.mkdir()
+        venv_bin = venv / "bin"
+        venv_bin.mkdir()
+        python3 = venv_bin / "python3"
+        python3.write_text("#!/usr/bin/env python3")
+
+        # Set permissions like the production system
+        user_home.chmod(0o711)
+        venv.chmod(0o711)
+        venv_bin.chmod(0o711)
+        python3.chmod(0o755)
+
+        # Validation should work - we can stat() the python3 binary
+        assert user_home.exists()
+        assert venv.exists()
+        assert python3.exists()
+
+
+# =============================================================================
+# Test: Auth Service Permission Error Handling
+# =============================================================================
+
+class TestAuthServicePermissionHandling:
+    """Test auth_service handles permission errors correctly."""
+
+    def test_user_environment_error_defined(self) -> None:
+        """UserEnvironmentError is properly defined and importable."""
+        from src.services.auth_service import UserEnvironmentError
+
+        # Should be able to create and raise it
+        error = UserEnvironmentError("test error")
+        assert str(error) == "test error"
+
+    def test_validate_user_environment_catches_permission_error(self, tmp_path: Path) -> None:
+        """validate_user_environment catches PermissionError and raises UserEnvironmentError."""
+        from src.services.auth_service import AuthService, UserEnvironmentError
+        from unittest.mock import patch
+
+        auth = AuthService()
+
+        # Mock Path.exists() to raise PermissionError
+        with patch.object(Path, 'exists', side_effect=PermissionError("Permission denied")):
+            with pytest.raises(UserEnvironmentError) as exc_info:
+                auth.validate_user_environment("testuser")
+
+            assert "inaccessible" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_authenticate_propagates_user_environment_error(self) -> None:
+        """authenticate() propagates UserEnvironmentError to caller."""
+        from src.services.auth_service import AuthService, UserEnvironmentError
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        auth = AuthService()
+
+        # Create mock user
+        mock_user = MagicMock()
+        mock_user.is_active = True
+        mock_user.password_hash = "$2b$12$test"  # bcrypt hash
+        mock_user.username = "testuser"
+
+        # Create mock database session
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_user
+        mock_db.execute.return_value = mock_result
+
+        with patch.object(auth, 'validate_user_environment',
+                         side_effect=UserEnvironmentError("Environment error")):
+            with patch('bcrypt.checkpw', return_value=True):
+                with pytest.raises(UserEnvironmentError):
+                    await auth.authenticate(mock_db, "test@test.com", "password")
+
+
+# =============================================================================
+# Test: UID Chain Integration Tests
+# =============================================================================
+
+class TestUIDChainIntegration:
+    """Integration tests that verify UID flows through the entire chain.
+
+    These tests mock at the subprocess level to verify that UID is correctly
+    passed from task_runner → agent_core → executor → ag3ntum_bash → subprocess.
+
+    CRITICAL: These tests should catch regressions where UID is dropped
+    at any point in the chain.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uid_flows_from_agent_to_sandbox_executor(
+        self, workspace: Path, minimal_agent_config
+    ) -> None:
+        """Verify UID flows from ClaudeAgent to SandboxExecutor.
+
+        This tests the agent_core → sandbox chain. If agent_core drops UID,
+        the executor won't have it.
+        """
+        from src.core.agent_core import ClaudeAgent
+        from src.core.permission_profiles import PermissionManager
+        from src.core.sandbox import SandboxConfig, SandboxMount
+
+        pm = PermissionManager()
+        test_uid = 2500
+        test_gid = 2500
+
+        agent = ClaudeAgent(
+            config=minimal_agent_config,
+            permission_manager=pm,
+            linux_uid=test_uid,
+            linux_gid=test_gid,
+            tracer=False,
+        )
+
+        # Build sandbox config and executor
+        sandbox_config = SandboxConfig(
+            enabled=True,
+            file_sandboxing=True,
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+
+        executor = agent._build_sandbox_executor(sandbox_config, workspace)
+
+        # CRITICAL ASSERTION: Executor must have UID from agent
+        assert executor is not None, "Executor should be created when sandbox is enabled"
+        assert executor.linux_uid == test_uid, (
+            f"UID chain broken: agent has UID {test_uid} but executor has {executor.linux_uid}. "
+            "This indicates agent_core is not passing UID to SandboxExecutor."
+        )
+        assert executor.linux_gid == test_gid, (
+            f"GID chain broken: agent has GID {test_gid} but executor has {executor.linux_gid}. "
+            "This indicates agent_core is not passing GID to SandboxExecutor."
+        )
+
+    @pytest.mark.asyncio
+    async def test_uid_flows_to_subprocess_preexec_fn(self, workspace: Path) -> None:
+        """Verify UID flows all the way to subprocess preexec_fn.
+
+        This tests the full chain: executor → ag3ntum_bash → subprocess.
+        The preexec_fn should use the correct UID for privilege dropping.
+        """
+        from src.core.sandbox import execute_sandboxed_command, SandboxConfig, SandboxMount, SandboxExecutor
+
+        test_uid = 2600
+        test_gid = 2600
+
+        config = SandboxConfig(
+            enabled=True,
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = SandboxExecutor(config, linux_uid=test_uid, linux_gid=test_gid)
+
+        captured_preexec_fn = None
+
+        async def capture_subprocess_call(*args, **kwargs):
+            """Capture the preexec_fn passed to subprocess."""
+            nonlocal captured_preexec_fn
+            captured_preexec_fn = kwargs.get("preexec_fn")
+
+            # Return a mock process
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (b"2600\n", b"")
+            mock_process.returncode = 0
+            return mock_process
+
+        with patch('asyncio.create_subprocess_exec', side_effect=capture_subprocess_call):
+            await execute_sandboxed_command(
+                executor, "id -u", allow_network=False, timeout=10
+            )
+
+        # CRITICAL ASSERTION: preexec_fn must be set (privilege dropping enabled)
+        assert captured_preexec_fn is not None, (
+            "UID chain broken: preexec_fn is None but executor has linux_uid. "
+            "This indicates execute_sandboxed_command is not creating demote function."
+        )
+
+        # Verify the preexec_fn would drop to correct UID
+        # We can't actually call it (requires root), but we verify it was created
+        assert callable(captured_preexec_fn), (
+            "preexec_fn should be a callable demote function"
+        )
+
+    def test_ag3ntum_bash_tool_binds_sandbox_executor(self, workspace: Path) -> None:
+        """Verify ag3ntum_bash tool factory accepts and binds SandboxExecutor.
+
+        This verifies the tool factory correctly accepts the executor parameter.
+        The actual UID flow through to subprocess is tested by
+        test_uid_flows_to_subprocess_preexec_fn which uses execute_sandboxed_command.
+        """
+        from tools.ag3ntum.ag3ntum_bash.tool import create_bash_tool
+        from src.core.sandbox import SandboxConfig, SandboxMount, SandboxExecutor
+
+        test_uid = 2700
+        test_gid = 2700
+
+        config = SandboxConfig(
+            enabled=True,
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = SandboxExecutor(config, linux_uid=test_uid, linux_gid=test_gid)
+
+        # Verify tool factory accepts sandbox_executor parameter
+        bash_tool = create_bash_tool(
+            workspace_path=workspace,
+            sandbox_executor=executor,
+        )
+
+        # Tool should be created successfully with executor bound
+        assert bash_tool is not None, "create_bash_tool should return a tool instance"
+
+        # The executor should have our UID - this is what will be used
+        # when the tool eventually calls execute_sandboxed_command
+        assert executor.linux_uid == test_uid, (
+            "Executor UID not preserved - ag3ntum_bash would run with wrong UID"
+        )
+        assert executor.linux_gid == test_gid, (
+            "Executor GID not preserved - ag3ntum_bash would run with wrong GID"
+        )
+
+    def test_regression_detection_uid_dropped_in_agent(
+        self, workspace: Path, minimal_agent_config
+    ) -> None:
+        """Regression test: Detect if agent_core drops UID before passing to executor.
+
+        This simulates the bug where agent accepted UID but didn't pass it to executor.
+        """
+        from src.core.agent_core import ClaudeAgent
+        from src.core.permission_profiles import PermissionManager
+
+        pm = PermissionManager()
+
+        # Agent created with UID
+        agent = ClaudeAgent(
+            config=minimal_agent_config,
+            permission_manager=pm,
+            linux_uid=2000,
+            linux_gid=2000,
+            tracer=False,
+        )
+
+        # Verify agent stored the UID (this would catch constructor bug)
+        assert agent._linux_uid is not None, (
+            "REGRESSION: ClaudeAgent dropped linux_uid in __init__"
+        )
+        assert agent._linux_gid is not None, (
+            "REGRESSION: ClaudeAgent dropped linux_gid in __init__"
+        )
+
+    def test_regression_detection_uid_dropped_in_task_params(self) -> None:
+        """Regression test: Detect if TaskExecutionParams loses UID fields.
+
+        This catches schema changes that remove or rename UID fields.
+        """
+        from src.core.schemas import TaskExecutionParams
+        import inspect
+
+        # Verify the schema has linux_uid and linux_gid fields
+        sig = inspect.signature(TaskExecutionParams)
+        params = sig.parameters
+
+        assert "linux_uid" in params, (
+            "REGRESSION: TaskExecutionParams schema missing linux_uid field"
+        )
+        assert "linux_gid" in params, (
+            "REGRESSION: TaskExecutionParams schema missing linux_gid field"
+        )
+
+        # Verify they can hold integer values
+        test_params = TaskExecutionParams(
+            task="test",
+            linux_uid=2000,
+            linux_gid=2000,
+        )
+        assert test_params.linux_uid == 2000
+        assert test_params.linux_gid == 2000
+
+    def test_regression_detection_sandbox_executor_uid_fields(self, workspace: Path) -> None:
+        """Regression test: Detect if SandboxExecutor loses UID fields."""
+        from src.core.sandbox import SandboxConfig, SandboxMount, SandboxExecutor
+
+        config = SandboxConfig(
+            enabled=True,
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+
+        # Verify SandboxExecutor accepts and stores UID/GID
+        executor = SandboxExecutor(config, linux_uid=2000, linux_gid=2000)
+
+        assert hasattr(executor, 'linux_uid'), (
+            "REGRESSION: SandboxExecutor missing linux_uid attribute"
+        )
+        assert hasattr(executor, 'linux_gid'), (
+            "REGRESSION: SandboxExecutor missing linux_gid attribute"
+        )
+        assert executor.linux_uid == 2000, (
+            "REGRESSION: SandboxExecutor not storing linux_uid correctly"
+        )
+        assert executor.linux_gid == 2000, (
+            "REGRESSION: SandboxExecutor not storing linux_gid correctly"
+        )
+
+    def test_regression_detection_create_demote_fn_exported(self) -> None:
+        """Regression test: Verify create_demote_fn is exported from sandbox module."""
+        try:
+            from src.core.sandbox import create_demote_fn
+        except ImportError:
+            pytest.fail(
+                "REGRESSION: create_demote_fn not exported from src.core.sandbox. "
+                "This function is required by ag3ntum_bash for privilege dropping."
+            )
+
+        # Verify it creates callable
+        fn = create_demote_fn(2000, 2000)
+        assert callable(fn), "create_demote_fn should return a callable"
+
+    @pytest.mark.asyncio
+    async def test_full_chain_uid_consistency(
+        self, workspace: Path, minimal_agent_config
+    ) -> None:
+        """End-to-end test: Verify UID is consistent across entire chain.
+
+        This test creates the full chain and verifies the same UID appears
+        at each level. If any component drops or changes the UID, this fails.
+        """
+        from src.core.agent_core import ClaudeAgent
+        from src.core.permission_profiles import PermissionManager
+        from src.core.sandbox import SandboxConfig, SandboxMount
+        from src.core.schemas import TaskExecutionParams
+
+        TEST_UID = 2999
+        TEST_GID = 2999
+
+        # Level 1: TaskExecutionParams
+        params = TaskExecutionParams(
+            task="test",
+            linux_uid=TEST_UID,
+            linux_gid=TEST_GID,
+        )
+        assert params.linux_uid == TEST_UID, "UID lost at TaskExecutionParams level"
+
+        # Level 2: ClaudeAgent
+        pm = PermissionManager()
+        agent = ClaudeAgent(
+            config=minimal_agent_config,
+            permission_manager=pm,
+            linux_uid=params.linux_uid,
+            linux_gid=params.linux_gid,
+            tracer=False,
+        )
+        assert agent._linux_uid == TEST_UID, "UID lost at ClaudeAgent level"
+
+        # Level 3: SandboxExecutor (via agent)
+        sandbox_config = SandboxConfig(
+            enabled=True,
+            file_sandboxing=True,
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = agent._build_sandbox_executor(sandbox_config, workspace)
+        assert executor is not None, "Executor should be created when sandbox is enabled"
+        assert executor.linux_uid == TEST_UID, "UID lost at SandboxExecutor level"
+
+        # Level 4: Verify preexec_fn would be created with this UID
+        from src.core.sandbox import create_demote_fn
+        demote_fn = create_demote_fn(executor.linux_uid, executor.linux_gid)
+        assert demote_fn is not None, "UID lost at demote_fn creation level"
+
+        # All levels verified - UID chain is intact

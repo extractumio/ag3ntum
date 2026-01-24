@@ -29,8 +29,10 @@ RUN chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/* \
     && git lfs install
 
-# Create ag3ntum_api user (UID 45045, well outside typical user range to avoid conflicts)
-RUN useradd -m -u 45045 -s /bin/bash ag3ntum_api
+# Create ag3ntum group and ag3ntum_api user (UID 45045, well outside typical user range)
+# The ag3ntum group is used for session directory access (API + user both need access)
+RUN groupadd ag3ntum \
+    && useradd -m -u 45045 -s /bin/bash -G ag3ntum ag3ntum_api
 
 # Create /users directory with proper permissions
 RUN mkdir -p /users && chmod 755 /users
@@ -42,14 +44,27 @@ RUN mkdir -p /users && chmod 755 /users
 RUN mkdir -p /mounts/ro /mounts/rw \
     && chmod 755 /mounts /mounts/ro /mounts/rw
 
-# Configure sudoers for restricted access
+# Configure sudoers for PRODUCTION - restricted access only
 # Allow both -m (create home) and -M (don't create home) for useradd
 # Note: sudoers uses * as wildcard, [0-9] patterns need escaping or simpler wildcards
+#
+# SECURITY: Test-only sudoers rules are NOT included here.
+# They are injected at runtime via docker-compose.test.yml for test runs only.
+# See config/test/sudoers-test for test-specific rules.
 RUN echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /bin/bash -u * *' > /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * *' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -L *' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -a -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
+    echo '# Restricted userdel - only session users (user_ prefix) can be deleted' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel user_*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r user_*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp -R ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo '# bwrap is required for sandbox execution' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/bwrap *' >> /etc/sudoers.d/ag3ntum && \
     chmod 440 /etc/sudoers.d/ag3ntum
 
 ENV VIRTUAL_ENV=/opt/venv
@@ -87,6 +102,12 @@ RUN mkdir -p /data /sessions \
 ENV AG3NTUM_ROOT=/
 ENV PYTHONPATH=/
 ENV PYTHONUNBUFFERED=1
+
+# UID Security Mode Configuration
+# ISOLATED (default): UIDs from 50000-60000, safer for multi-tenant
+# DIRECT: UIDs map to host UIDs (1000-65533), simpler for dev
+# Set via docker-compose environment or CLI: -e AG3NTUM_UID_MODE=direct
+ENV AG3NTUM_UID_MODE=isolated
 
 # Switch to non-root user
 USER ag3ntum_api

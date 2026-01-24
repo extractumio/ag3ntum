@@ -178,7 +178,12 @@ async def execute_agent_task(
         logs_dir=LOGS_DIR,
         tracer=tracer,
         permission_manager=permission_manager,
+        linux_uid=params.linux_uid,
+        linux_gid=params.linux_gid,
     )
+
+    if params.linux_uid is not None:
+        logger.info(f"User isolation: UID={params.linux_uid}, GID={params.linux_gid}")
 
     # Execute the agent
     result = await agent.run(

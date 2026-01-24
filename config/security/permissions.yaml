@@ -119,7 +119,10 @@ sandbox:
   enabled: true
   file_sandboxing: true
   network_sandboxing: true
-  bwrap_path: "bwrap"
+  # Use sudo bwrap because the API runs as ag3ntum_api (non-root)
+  # and needs elevated privileges to drop to user UIDs via bwrap --uid/--gid
+  # Sudoers rules in Dockerfile grant NOPASSWD access to bwrap
+  bwrap_path: "sudo bwrap"
   use_tmpfs_root: true
 
   # /proc filtering configuration (security enhancement for nested containers)

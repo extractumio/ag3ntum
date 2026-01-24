@@ -31,7 +31,6 @@ from src.core.command_security import (
     SecurityCheckResult,
     get_command_security_filter,
 )
-
 if TYPE_CHECKING:
     from src.core.sandbox import SandboxExecutor
 
@@ -242,6 +241,21 @@ Example:
             # Note: Linux `timeout` handles the primary timeout via SIGTERM/SIGKILL
             # asyncio timeout is a fallback safety net (timeout + kill_after + 30s buffer)
             asyncio_timeout = bound_timeout + bound_kill_after + 30
+
+            # SECURITY: Privilege dropping is handled by bwrap --uid/--gid flags
+            # (configured in build_bwrap_command). Bwrap runs via sudo (see
+            # bwrap_path in permissions.yaml) which has NOPASSWD access configured
+            # in the Dockerfile sudoers rules. This approach works because:
+            # 1. The API runs as ag3ntum_api (UID 45045) - not root
+            # 2. Direct os.setuid() would fail (no CAP_SETUID)
+            # 3. But sudo bwrap --uid/--gid CAN switch UIDs
+            if (bound_sandbox_executor is not None
+                    and bound_sandbox_executor.linux_uid is not None
+                    and bound_sandbox_executor.linux_gid is not None):
+                logger.info(
+                    f"Ag3ntumBash: Bwrap will drop privileges to UID={bound_sandbox_executor.linux_uid}, "
+                    f"GID={bound_sandbox_executor.linux_gid}"
+                )
 
             if use_shell:
                 process = await asyncio.create_subprocess_shell(

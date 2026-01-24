@@ -11,10 +11,17 @@ Tests cover:
 - Mount source validation (fail-closed security)
 - Placeholder resolution in paths
 """
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Skip marker for tests requiring Linux-specific features (bwrap, /lib, etc.)
+requires_linux = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="Test requires Linux-specific features (bwrap sandbox)"
+)
 
 from src.core.sandbox import (
     SandboxConfig,
@@ -142,9 +149,19 @@ class TestSandboxConfig:
         assert config.network_sandboxing is True
 
     def test_default_bwrap_path(self) -> None:
-        """Default bwrap path is 'bwrap'."""
+        """Default bwrap path is 'bwrap'.
+
+        Note: In production (permissions.yaml), bwrap_path is set to 'sudo bwrap'
+        to allow privilege dropping via bwrap --uid/--gid flags. The default here
+        is for unit testing without sudo.
+        """
         config = SandboxConfig()
         assert config.bwrap_path == "bwrap"
+
+    def test_custom_bwrap_path_sudo(self) -> None:
+        """Custom bwrap path 'sudo bwrap' is accepted for privilege dropping."""
+        config = SandboxConfig(bwrap_path="sudo bwrap")
+        assert config.bwrap_path == "sudo bwrap"
 
     def test_resolve_config_placeholders(self) -> None:
         """Config resolution applies to all mounts."""
@@ -168,8 +185,14 @@ class TestSandboxConfig:
         assert resolved.writable_paths[0] == "/users/bob/output"
 
 
+@requires_linux
 class TestSandboxExecutor:
-    """Test SandboxExecutor command building."""
+    """Test SandboxExecutor command building.
+
+    These tests require Linux-specific features:
+    - bwrap (bubblewrap) sandbox utility
+    - Linux filesystem paths (/lib, /usr/lib, etc.)
+    """
 
     @pytest.fixture
     def workspace(self, tmp_path: Path) -> Path:
@@ -200,10 +223,35 @@ class TestSandboxExecutor:
     def test_build_bwrap_command_includes_bwrap(
         self, basic_config: SandboxConfig
     ) -> None:
-        """Built command starts with bwrap."""
+        """Built command includes bwrap (possibly prefixed with sudo)."""
         executor = SandboxExecutor(basic_config)
         cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+        # With default bwrap_path="bwrap", command starts with bwrap
         assert cmd[0] == "bwrap"
+
+    def test_build_bwrap_command_with_sudo_prefix(
+        self, workspace: Path
+    ) -> None:
+        """Built command with sudo bwrap starts with sudo."""
+        config = SandboxConfig(
+            bwrap_path="sudo bwrap",
+            static_mounts={
+                "bin": SandboxMount(source="/usr/bin", target="/usr/bin"),
+                "lib": SandboxMount(source="/lib", target="/lib"),
+            },
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = SandboxExecutor(config)
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+        # With bwrap_path="sudo bwrap", command starts with "sudo"
+        assert cmd[0] == "sudo"
+        assert cmd[1] == "bwrap"
 
     def test_build_bwrap_includes_die_with_parent(
         self, basic_config: SandboxConfig
@@ -233,6 +281,32 @@ class TestSandboxExecutor:
         )
         assert "--unshare-pid" in cmd
         assert "--unshare-all" not in cmd
+
+    def test_nested_container_adds_unshare_user_when_uid_set(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """Nested container with UID adds --unshare-user (required by bwrap for --uid)."""
+        executor = SandboxExecutor(basic_config, linux_uid=50000, linux_gid=50000)
+        cmd = executor.build_bwrap_command(
+            ["echo", "hello"],
+            allow_network=False,
+            nested_container=True
+        )
+        assert "--unshare-user" in cmd
+        assert "--uid" in cmd
+        assert "--gid" in cmd
+
+    def test_nested_container_no_unshare_user_without_uid(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """Nested container without UID does not add --unshare-user."""
+        executor = SandboxExecutor(basic_config)  # No linux_uid
+        cmd = executor.build_bwrap_command(
+            ["echo", "hello"],
+            allow_network=False,
+            nested_container=True
+        )
+        assert "--unshare-user" not in cmd
 
     def test_non_nested_uses_unshare_all(
         self, basic_config: SandboxConfig
@@ -293,6 +367,47 @@ class TestSandboxExecutor:
         assert "bwrap" in wrapped
         assert "bash" in wrapped
         assert "echo hello" in wrapped
+
+    def test_bwrap_includes_uid_gid_flags_when_set(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """Built command includes --uid and --gid flags when executor has UID/GID."""
+        executor = SandboxExecutor(basic_config, linux_uid=50000, linux_gid=50000)
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+
+        # Check --uid flag
+        assert "--uid" in cmd
+        uid_idx = cmd.index("--uid")
+        assert cmd[uid_idx + 1] == "50000"
+
+        # Check --gid flag
+        assert "--gid" in cmd
+        gid_idx = cmd.index("--gid")
+        assert cmd[gid_idx + 1] == "50000"
+
+    def test_bwrap_no_uid_gid_flags_when_not_set(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """Built command does not include --uid/--gid when not set."""
+        executor = SandboxExecutor(basic_config)  # No linux_uid/linux_gid
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+
+        assert "--uid" not in cmd
+        assert "--gid" not in cmd
+
+    def test_bwrap_uid_gid_flags_before_command_separator(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """UID/GID flags appear before -- separator (before command)."""
+        executor = SandboxExecutor(basic_config, linux_uid=2000, linux_gid=2000)
+        cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
+
+        separator_idx = cmd.index("--")
+        uid_idx = cmd.index("--uid")
+        gid_idx = cmd.index("--gid")
+
+        assert uid_idx < separator_idx, "--uid should appear before --"
+        assert gid_idx < separator_idx, "--gid should appear before --"
 
 
 class TestMountValidation:
@@ -493,7 +608,7 @@ class TestExecuteSandboxedCommand:
 
     @pytest.mark.asyncio
     async def test_execute_with_uid_gid(self, workspace: Path) -> None:
-        """Execution with UID/GID sets preexec_fn for privilege dropping."""
+        """Execution with UID/GID includes --uid/--gid flags in bwrap command."""
         config = SandboxConfig(
             session_mounts={
                 "workspace": SandboxMount(
@@ -515,10 +630,20 @@ class TestExecuteSandboxedCommand:
                 executor, "whoami", allow_network=False, timeout=10
             )
 
-            # Verify preexec_fn was passed
-            call_kwargs = mock_exec.call_args.kwargs
-            assert "preexec_fn" in call_kwargs
-            assert call_kwargs["preexec_fn"] is not None
+            # Verify the bwrap command includes --uid and --gid flags
+            # (privilege dropping is now handled by bwrap, not preexec_fn)
+            call_args = mock_exec.call_args.args
+            cmd_list = list(call_args)
+
+            # Check --uid flag is present with correct value
+            assert "--uid" in cmd_list
+            uid_idx = cmd_list.index("--uid")
+            assert cmd_list[uid_idx + 1] == "2000"
+
+            # Check --gid flag is present with correct value
+            assert "--gid" in cmd_list
+            gid_idx = cmd_list.index("--gid")
+            assert cmd_list[gid_idx + 1] == "2000"
 
 
 class TestOptionalMounts:

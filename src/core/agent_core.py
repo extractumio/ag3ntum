@@ -239,7 +239,9 @@ class ClaudeAgent:
         logs_dir: Optional[Path] = None,
         skills_dir: Optional[Path] = None,
         tracer: Optional[Union[TracerBase, bool]] = True,
-        permission_manager: Optional[PermissionManager] = None
+        permission_manager: Optional[PermissionManager] = None,
+        linux_uid: Optional[int] = None,
+        linux_gid: Optional[int] = None,
     ) -> None:
         """
         Initialize the Claude Agent.
@@ -255,11 +257,17 @@ class ClaudeAgent:
                 - TracerBase instance: Use custom tracer.
             permission_manager: PermissionManager for permission checking.
                 Required - agent will fail without permission profile.
+            linux_uid: Linux UID for privilege dropping during command execution.
+                When set, sandboxed commands will run as this UID instead of the API user.
+            linux_gid: Linux GID for privilege dropping during command execution.
+                When set, sandboxed commands will run with this GID.
         """
         self._config = config or AgentConfig()
         self._sessions_dir = sessions_dir or SESSIONS_DIR
         self._logs_dir = logs_dir or LOGS_DIR
         self._permission_manager = permission_manager
+        self._linux_uid = linux_uid
+        self._linux_gid = linux_gid
 
         # SECURITY: Validate that permission_mode is None or empty
         # Setting permission_mode to any value causes SDK to use --permission-prompt-tool stdio
@@ -997,6 +1005,10 @@ class ClaudeAgent:
         This creates the executor that will wrap Bash commands in bubblewrap
         to provide proper filesystem isolation within Docker containers.
 
+        When linux_uid/linux_gid are set on the agent, sandboxed commands will
+        drop privileges to run as that user instead of the API user (45045).
+        This ensures files created by the agent are owned by the session user.
+
         Args:
             sandbox_config: Sandbox configuration from permissions.yaml.
             workspace_dir: Absolute path to the session workspace directory.
@@ -1012,7 +1024,15 @@ class ClaudeAgent:
             logger.info("BWRAP SANDBOX: File sandboxing disabled")
             return None
 
-        executor = SandboxExecutor(sandbox_config)
+        # Pass linux_uid/linux_gid to executor for privilege dropping
+        executor = SandboxExecutor(
+            sandbox_config,
+            linux_uid=self._linux_uid,
+            linux_gid=self._linux_gid,
+        )
+
+        if self._linux_uid is not None:
+            logger.info(f"BWRAP SANDBOX: Will drop privileges to UID={self._linux_uid}, GID={self._linux_gid}")
 
         # Validate mount sources exist
         missing = executor.validate_mount_sources()

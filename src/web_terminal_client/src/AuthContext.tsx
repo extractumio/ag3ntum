@@ -1,13 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { login as apiLogin, logout as apiLogout, getCurrentUser, invalidateAllCaches } from './api';
 import { loadConfig } from './config';
-
-interface User {
-  id: string;
-  username: string;
-  email: string;
-  role: string;
-}
+import type { User } from './types';
 
 interface AuthContextType {
   user: User | null;

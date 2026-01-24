@@ -618,72 +618,100 @@ export function FileExplorer({
   }, [previewFile, isLoadingPreview, deleteTarget]);
 
   // Handle navigation to a specific path
+  // Path normalization is handled by the backend - we use browseFiles to get
+  // the canonical normalized path from the server response (SEC-PY-004 / DUP-003)
   useEffect(() => {
     if (!navigateTo) return;
 
-    // Normalize the path (remove leading ./ if present)
-    let targetPath = navigateTo;
-    if (targetPath.startsWith('./')) {
-      targetPath = targetPath.slice(2);
-    }
+    // Extract parent directory and filename from the path
+    // This is basic string parsing, NOT normalization - the backend handles all path normalization
+    const lastSlashIndex = navigateTo.lastIndexOf('/');
+    const parentPath = lastSlashIndex > 0 ? navigateTo.slice(0, lastSlashIndex) : '';
+    const filename = navigateTo.slice(lastSlashIndex + 1);
 
-    // Get parent folder path
-    const lastSlashIndex = targetPath.lastIndexOf('/');
-    const parentPath = lastSlashIndex > 0 ? targetPath.slice(0, lastSlashIndex) : '';
+    // Use the backend to get the normalized path via browseFiles
+    const navigateWithBackendNormalization = async () => {
+      try {
+        // Browse the parent directory - backend will normalize the path
+        const response = await browseFiles(baseUrl, token, sessionId, parentPath, {
+          includeHidden: showHiddenFiles,
+          sortBy,
+          sortOrder,
+        });
 
-    // Build list of all parent folders to expand
-    const foldersToExpand: string[] = [];
-    if (parentPath) {
-      const parts = parentPath.split('/');
-      let currentPath = '';
-      for (const part of parts) {
-        currentPath = currentPath ? `${currentPath}/${part}` : part;
-        foldersToExpand.push(currentPath);
-      }
-    }
-
-    // Expand all parent folders
-    if (foldersToExpand.length > 0) {
-      setExpandedFolders((prev) => {
-        const next = { ...prev };
-        for (const folder of foldersToExpand) {
-          next[folder] = true;
+        // Find the file in the response by name
+        const file = response.files.find((f: FileInfo) => f.name === filename);
+        if (!file) {
+          console.warn(`File "${filename}" not found in directory`);
+          onNavigateCompleteRef.current?.();
+          return;
         }
-        return next;
-      });
 
-      // Load contents of each folder that needs to be expanded
-      const loadFolders = async () => {
-        for (const folder of foldersToExpand) {
-          if (!folderContents[folder]) {
-            try {
-              const listing = await browseFiles(baseUrl, token, sessionId, folder, {
-                includeHidden: showHiddenFiles,
-                sortBy,
-                sortOrder,
-              });
-              setFolderContents((prev) => ({ ...prev, [folder]: listing.files }));
-            } catch {
-              // Ignore errors during navigation
+        // Use the normalized path from the backend response
+        const normalizedPath = file.path;
+
+        // Build list of all parent folders to expand from the normalized path
+        const foldersToExpand: string[] = [];
+        const pathParts = normalizedPath.split('/');
+        pathParts.pop(); // Remove the filename
+        let currentPath = '';
+        for (const part of pathParts) {
+          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          foldersToExpand.push(currentPath);
+        }
+
+        // Expand all parent folders and load their contents
+        if (foldersToExpand.length > 0) {
+          setExpandedFolders((prev) => {
+            const next = { ...prev };
+            for (const folder of foldersToExpand) {
+              next[folder] = true;
+            }
+            return next;
+          });
+
+          // Load contents of each folder that needs to be expanded
+          for (const folder of foldersToExpand) {
+            if (!folderContents[folder]) {
+              try {
+                const listing = await browseFiles(baseUrl, token, sessionId, folder, {
+                  includeHidden: showHiddenFiles,
+                  sortBy,
+                  sortOrder,
+                });
+                setFolderContents((prev) => ({ ...prev, [folder]: listing.files }));
+              } catch {
+                // Ignore errors during navigation
+              }
             }
           }
         }
-      };
-      loadFolders();
-    }
 
-    // Highlight the target file
-    setHighlightedPath(targetPath);
+        // Update parent folder contents to include the browsed files
+        const parentNormalized = foldersToExpand.length > 0
+          ? foldersToExpand[foldersToExpand.length - 1]
+          : '';
+        if (parentNormalized || response.files.length > 0) {
+          setFolderContents((prev) => ({ ...prev, [parentNormalized]: response.files }));
+        }
 
-    // Clear highlight after a few seconds
-    const timer = setTimeout(() => {
-      setHighlightedPath(null);
-    }, 3000);
+        // Highlight the target file using the normalized path
+        setHighlightedPath(normalizedPath);
 
-    // Notify that navigation is complete
-    onNavigateCompleteRef.current?.();
+        // Clear highlight after a few seconds
+        setTimeout(() => {
+          setHighlightedPath(null);
+        }, 3000);
 
-    return () => clearTimeout(timer);
+        // Notify that navigation is complete
+        onNavigateCompleteRef.current?.();
+      } catch (error) {
+        console.error('Failed to navigate to file:', error);
+        onNavigateCompleteRef.current?.();
+      }
+    };
+
+    navigateWithBackendNormalization();
   }, [navigateTo, baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, folderContents]);
 
   // Load root directory

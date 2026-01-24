@@ -1,5 +1,25 @@
-"""User management service."""
+"""User management service.
+
+This module handles user creation, deletion, and management with support for
+two UID mapping modes:
+
+Mode A: Isolated Range (Default)
+    - UIDs allocated from dedicated range (legacy: 2000-49999, new: 50000-60000)
+    - Safer for multi-tenant deployments
+    - Set AG3NTUM_UID_MODE=isolated (default)
+
+Mode B: Direct Host Mapping (Opt-in)
+    - UIDs map to host system UIDs (1000-65533)
+    - Set AG3NTUM_UID_MODE=direct
+    - WARNING: Requires understanding of security implications
+
+Security invariants enforced regardless of mode:
+    - UID 0 (root) is NEVER allocated
+    - System UIDs (1-999) are never used
+    - Each user gets a unique UID validated against seccomp policies
+"""
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -14,6 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import USERS_DIR, CONFIG_DIR
 from ..db.models import User
+from ..core.uid_security import (
+    UIDMode,
+    UIDSecurityConfig,
+    get_uid_security_config,
+    validate_uid_for_setuid,
+    log_uid_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +52,25 @@ DEFAULT_USER_SECRETS_TEMPLATE = CONFIG_DIR / "user_secrets.yaml.template"
 
 
 class UserService:
-    """Service for user management and Linux user creation."""
+    """Service for user management and Linux user creation.
+
+    Supports two UID allocation modes:
+    - ISOLATED (default): UIDs from dedicated range, safer for multi-tenant
+    - DIRECT: UIDs map to host UIDs, simpler for dev/single-tenant
+
+    Set AG3NTUM_UID_MODE environment variable to select mode.
+    """
+
+    def __init__(self):
+        """Initialize the user service with UID security configuration."""
+        self._uid_config: Optional[UIDSecurityConfig] = None
+
+    @property
+    def uid_config(self) -> UIDSecurityConfig:
+        """Get the UID security configuration (lazy loaded)."""
+        if self._uid_config is None:
+            self._uid_config = get_uid_security_config()
+        return self._uid_config
 
     async def create_user(
         self,
@@ -34,6 +79,7 @@ class UserService:
         email: str,
         password: str,
         role: str = "user",
+        uid_mode: Optional[UIDMode] = None,
     ) -> User:
         """
         Create a new user with Linux account.
@@ -42,12 +88,22 @@ class UserService:
         1. Validate username/email uniqueness
         2. Hash password with bcrypt
         3. Generate per-user JWT secret
-        4. Create Linux user with sudo useradd
-        5. Store linux_uid in database
-        6. Create user directories
+        4. Generate UID based on current mode (isolated or direct)
+        5. Validate UID against security policies
+        6. Create Linux user with sudo useradd
+        7. Store linux_uid in database
+        8. Create user directories
+
+        Args:
+            db: Database session
+            username: Unique username (3-32 chars, alphanumeric)
+            email: User email address
+            password: User password (will be hashed)
+            role: User role (default: "user")
+            uid_mode: Override UID mode for this user (default: use global config)
 
         Raises:
-            ValueError: If user already exists or creation fails
+            ValueError: If user already exists, creation fails, or UID validation fails
         """
         # Validate username format (Linux username constraints)
         if not self._validate_username(username):
@@ -70,8 +126,21 @@ class UserService:
         # Generate per-user JWT secret
         jwt_secret = secrets.token_urlsafe(32)
 
-        # Generate UID (start from 2000 to avoid system users)
-        linux_uid = await self._generate_next_uid(db)
+        # Determine UID mode and generate UID
+        effective_mode = uid_mode or self.uid_config.mode
+        linux_uid = await self._generate_next_uid(db, effective_mode)
+
+        # SECURITY: Validate the generated UID
+        uid_valid, uid_reason = validate_uid_for_setuid(linux_uid, self.uid_config)
+        if not uid_valid:
+            log_uid_operation("create_user", linux_uid, success=False, reason=uid_reason)
+            raise ValueError(f"Generated UID {linux_uid} failed security validation: {uid_reason}")
+
+        log_uid_operation("create_user", linux_uid, success=True)
+        logger.info(
+            f"Creating user {username} with UID {linux_uid} "
+            f"(mode: {effective_mode.value})"
+        )
 
         # Create Linux user with sudo
         try:
@@ -105,33 +174,111 @@ class UserService:
         pattern = r"^[a-z_][a-z0-9_]{2,31}$"
         return bool(re.match(pattern, username))
 
-    async def _generate_next_uid(self, db: AsyncSession) -> int:
-        """Generate next available UID (starting from 2000)."""
+    async def _generate_next_uid(
+        self,
+        db: AsyncSession,
+        mode: Optional[UIDMode] = None,
+    ) -> int:
+        """Generate next available UID based on the configured mode.
+
+        For ISOLATED mode:
+            - New users: UIDs from 50000-60000
+            - Legacy users: UIDs from 2000-49999 (still valid)
+
+        For DIRECT mode:
+            - UIDs from 1000-65533 (maps to host users)
+
+        Args:
+            db: Database session
+            mode: UID mode to use (default: use global config)
+
+        Returns:
+            Next available UID in the valid range
+
+        Raises:
+            ValueError: If no valid UIDs are available in the range
+        """
+        effective_mode = mode or self.uid_config.mode
+
+        # Get the starting UID for new allocations based on mode
+        if effective_mode == UIDMode.ISOLATED:
+            # For isolated mode, prefer the new range (50000+) for new users
+            # Legacy users (2000-49999) are still valid but we don't allocate there
+            min_uid = self.uid_config.isolated_uid_min
+            max_uid = self.uid_config.isolated_uid_max
+        else:
+            # For direct mode, use host user range
+            min_uid = self.uid_config.direct_uid_min
+            max_uid = self.uid_config.direct_uid_max
+
+        # Check for existing users in the target range
         result = await db.execute(
-            select(User.linux_uid).order_by(User.linux_uid.desc()).limit(1)
+            select(User.linux_uid)
+            .where(User.linux_uid >= min_uid)
+            .where(User.linux_uid <= max_uid)
+            .order_by(User.linux_uid.desc())
+            .limit(1)
         )
-        max_uid = result.scalar_one_or_none()
-        return (max_uid + 1) if max_uid and max_uid >= 2000 else 2000
+        max_existing = result.scalar_one_or_none()
+
+        if max_existing is not None:
+            next_uid = max_existing + 1
+        else:
+            next_uid = min_uid
+
+        # Verify we haven't exceeded the range
+        if next_uid > max_uid:
+            raise ValueError(
+                f"UID range exhausted for mode {effective_mode.value}. "
+                f"Range [{min_uid}, {max_uid}] is full."
+            )
+
+        logger.debug(
+            f"Generated UID {next_uid} for mode {effective_mode.value} "
+            f"(range: {min_uid}-{max_uid})"
+        )
+
+        return next_uid
 
     def _create_linux_user(self, username: str, uid: int) -> None:
-        """Create Linux user with sudo useradd."""
+        """
+        Create Linux user with sudo useradd and set up tiered directory permissions.
+
+        Permission Model (Tiered Access):
+        ================================
+
+        Tier 1 - Traverse-only (API can validate existence but not list):
+          /users/{username}/      mode 711 (drwx--x--x) - traverse only
+          /users/{username}/venv/ mode 711 (drwx--x--x) - traverse only (hides package list)
+
+        Tier 2 - Operational (API + User via group):
+          /users/{username}/sessions/ mode 770 (drwxrwx---) group=ag3ntum
+
+        Tier 3 - Private (User only, accessed via sandbox UID switch):
+          /users/{username}/ag3ntum/  mode 700 (drwx------) - secrets
+          /users/{username}/.claude/  mode 700 (drwx------) - user skills
+
+        Why this works:
+        - API (UID 45045) can validate venv/bin/python3 exists (711 allows stat on children)
+        - Package list in venv is hidden from other users (no read permission on dirs)
+        - API can manage sessions via ag3ntum group membership
+        - Secrets remain private, only accessible when sandbox runs as user's UID
+        """
         home_dir = Path(f"/users/{username}")
 
         # Strategy:
         # 1. Ensure directory exists and we own it (so we can set permissions)
-        # 2. Set strict permissions (700)
-        # 3. Create user (without creating home, since we managed it)
-        # 4. Transfer ownership to the new user
+        # 2. Create directory structure with proper permissions
+        # 3. Create Linux user with ag3ntum as supplementary group
+        # 4. Transfer ownership with correct group settings
 
         # 1. Ensure directory exists
         try:
             home_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            # Directory likely exists but we can't access it (e.g., wrong owner/perms)
-            logger.warning(f"Could not mkdir {home_dir}, assuming it exists/permission denied. Attempting to claim ownership.")
+            logger.warning(f"Could not mkdir {home_dir}, assuming it exists. Attempting to claim ownership.")
 
         # Claim ownership to ag3ntum_api so we can manipulate it
-        # This fixes cases where directory exists with bad perms (e.g. 000) or wrong owner
         try:
             subprocess.run(
                 ["sudo", "chown", "-R", "ag3ntum_api:ag3ntum_api", str(home_dir)],
@@ -142,31 +289,31 @@ class UserService:
             logger.error(f"Failed to claim ownership of {home_dir}: {e.stderr.decode()}")
             raise ValueError(f"Failed to setup user directory: {e}")
 
-        # 2. Set strict permissions (700)
-        # We own it now, so we can chmod
+        # 2. Create directory structure with tiered permissions
         try:
-            home_dir.chmod(0o700)
-            
-            # Create sessions directory while we have access
+            # TIER 1: Public - allows API to validate user environment
+            # Home dir: 711 (execute-only for others - allows traversal but not listing)
+            home_dir.chmod(0o711)
+
+            # TIER 2: Operational - API needs access for session management
+            # Sessions dir: 770 with group ag3ntum (API user is in this group)
             sessions_dir = home_dir / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
-            sessions_dir.chmod(0o700)
-            
-            # Create .claude/skills directory for user skills
-            # Required by sandbox configuration in permissions.yaml
+            sessions_dir.chmod(0o770)
+
+            # TIER 3: Private - only user can access (via sandbox UID switch)
+            # .claude/skills directory for user skills
             skills_dir = home_dir / ".claude" / "skills"
             skills_dir.mkdir(parents=True, exist_ok=True)
+            (home_dir / ".claude").chmod(0o700)
             skills_dir.chmod(0o700)
 
-            # Create ag3ntum directory structure
-            # This directory contains user-specific ag3ntum data
+            # ag3ntum directory for user-specific config and secrets
             ag3ntum_dir = home_dir / "ag3ntum"
             ag3ntum_dir.mkdir(parents=True, exist_ok=True)
             ag3ntum_dir.chmod(0o700)
 
-            # Create persistent storage directory
-            # This directory survives across sessions and is mounted at
-            # /workspace/external/persistent/ inside the sandbox
+            # Persistent storage directory (inside ag3ntum, so private)
             persistent_dir = ag3ntum_dir / "persistent"
             persistent_dir.mkdir(parents=True, exist_ok=True)
             persistent_dir.chmod(0o700)
@@ -187,46 +334,113 @@ class UserService:
                     "- Share data between multiple sessions\n"
                 )
 
-            # Create user-specific Python venv
-            # This is separate from the backend venv and mounted read-only in sandbox
+            # Create user-specific Python venv (TIER 1: public, read-only)
             self._create_user_venv(home_dir, username)
 
-            # Create user secrets.yaml from template
-            # User can add API keys here after registration
+            # Create user secrets.yaml from template (inside ag3ntum, so private)
             self._create_user_secrets(home_dir, username)
 
         except PermissionError as e:
             logger.error(f"Failed to chmod/mkdir {home_dir}: {e}")
             raise ValueError(f"Failed to set directory permissions: {e}")
 
-        # 3. Create Linux user
-        # Always use -M because we managed the directory ourselves
-        # Check if user exists first to avoid error
+        # 3. Create Linux user with ag3ntum as supplementary group
+        # This allows the user to access group-writable directories
         try:
             subprocess.run(
-                ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash", "-u", str(uid), username],
+                ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
+                 "-u", str(uid), "-G", "ag3ntum", username],
                 check=True,
                 capture_output=True,
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 9:
                 logger.warning(f"Linux user {username} already exists. Proceeding with directory setup.")
+                # Add user to ag3ntum group if not already
+                try:
+                    subprocess.run(
+                        ["sudo", "usermod", "-a", "-G", "ag3ntum", username],
+                        check=True,
+                        capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    pass  # Group may not exist or user already in it
             else:
                 logger.error(f"Failed to create Linux user {username}: {e.stderr.decode()}")
                 raise ValueError(f"Failed to create Linux user: {e.stderr.decode()}")
 
-        # 4. Transfer ownership to the new user
+        # 4. Transfer ownership with correct group settings
+        # - Home dir and private paths: user:user (UID:UID)
+        # - Sessions dir: user:ag3ntum (for API access)
+        # - venv: user:user with mode 711 (traverse-only, hides package list)
         try:
+            # First, set ownership of everything to user:user
             subprocess.run(
                 ["sudo", "chown", "-R", f"{uid}:{uid}", str(home_dir)],
                 check=True,
                 capture_output=True,
             )
+
+            # Then, set sessions dir group to ag3ntum for API access
+            subprocess.run(
+                ["sudo", "chgrp", "ag3ntum", str(sessions_dir)],
+                check=True,
+                capture_output=True,
+            )
+
+            # Set venv to traverse-only (711) - hides package list from other users
+            # while allowing API to verify python3 binary exists via stat()
+            # Subdirectories (lib, bin) also get 711 for traversal
+            venv_dir = home_dir / "venv"
+            if venv_dir.exists():
+                # Set all directories to 711 (traverse only)
+                subprocess.run(
+                    ["sudo", "find", str(venv_dir), "-type", "d", "-exec", "chmod", "711", "{}", ";"],
+                    check=True,
+                    capture_output=True,
+                )
+                # Set all files to 644 (readable by owner, but hidden due to parent 711)
+                subprocess.run(
+                    ["sudo", "find", str(venv_dir), "-type", "f", "-exec", "chmod", "644", "{}", ";"],
+                    check=True,
+                    capture_output=True,
+                )
+                # Make bin files executable (755) - needed for python3, pip, etc.
+                bin_dir = venv_dir / "bin"
+                if bin_dir.exists():
+                    subprocess.run(
+                        ["sudo", "find", str(bin_dir), "-type", "f", "-exec", "chmod", "755", "{}", ";"],
+                        check=True,
+                        capture_output=True,
+                    )
+
+            # Re-apply permissions that may have been changed by chown -R
+            subprocess.run(
+                ["sudo", "chmod", "711", str(home_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "770", str(sessions_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "700", str(ag3ntum_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["sudo", "chmod", "700", str(home_dir / ".claude")],
+                check=True,
+                capture_output=True,
+            )
+
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to set final ownership for {home_dir}: {e.stderr.decode()}")
             raise ValueError(f"Failed to set final ownership: {e}")
 
-        logger.info(f"Created/Updated Linux user {username} with UID {uid}")
+        logger.info(f"Created/Updated Linux user {username} with UID {uid} (tiered permissions)")
 
     def _create_user_venv(self, home_dir: Path, username: str) -> None:
         """

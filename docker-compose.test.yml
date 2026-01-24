@@ -1,0 +1,32 @@
+# =============================================================================
+# Test-Only Docker Compose Override
+# =============================================================================
+#
+# This file adds test-specific configuration to the production Docker setup.
+# It is used ONLY when running tests via: ./run.sh test
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml <command>
+#
+# What this does:
+#   1. Mounts the test sudoers file directly into /etc/sudoers.d/
+#   2. Sets AG3NTUM_TEST_MODE=true environment variable
+#
+# SECURITY:
+#   - Test sudoers rules are NOT baked into the Docker image
+#   - They are only active when explicitly using this override
+#   - Production deployments should NEVER include this file
+#   - The mount is read-only, so no modifications can be made
+#
+# =============================================================================
+
+services:
+  ag3ntum-api:
+    # Additional volumes for test configuration
+    # Mount test sudoers directly into /etc/sudoers.d/ (Docker handles permissions)
+    volumes:
+      - ./config/test/sudoers-test:/etc/sudoers.d/ag3ntum-test:ro
+
+    # Test-specific environment variables
+    environment:
+      AG3NTUM_TEST_MODE: "true"

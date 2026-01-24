@@ -343,24 +343,20 @@ const OUTPUT_STATUS_CLASS: Record<string, string> = {
   cancelled: 'output-status-cancelled',
 };
 
+const STATUS_ALIASES: Record<string, string> = {
+  completed: 'complete',
+  complete: 'complete',
+  failed: 'failed',
+  error: 'failed',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
+  running: 'running',
+  partial: 'partial',
+};
+
 function normalizeStatus(value: string): string {
   const statusValue = value.toLowerCase();
-  if (statusValue === 'completed' || statusValue === 'complete') {
-    return 'complete';
-  }
-  if (statusValue === 'failed' || statusValue === 'error') {
-    return 'failed';
-  }
-  if (statusValue === 'cancelled' || statusValue === 'canceled') {
-    return 'cancelled';
-  }
-  if (statusValue === 'running') {
-    return 'running';
-  }
-  if (statusValue === 'partial') {
-    return 'partial';
-  }
-  return statusValue || 'idle';
+  return (STATUS_ALIASES[statusValue] ?? statusValue) || 'idle';
 }
 
 /**
@@ -395,6 +391,11 @@ function truncateSessionTitle(title: string | null | undefined): string {
   return truncated;
 }
 
+// Placeholder values that don't represent real errors
+const ERROR_PLACEHOLDERS = new Set([
+  'none', 'none yet', 'no error', 'no errors', 'n/a', 'na', 'null', 'undefined', 'empty', '-', ''
+]);
+
 /**
  * Check if an error string represents a meaningful error that should be displayed.
  * Filters out empty values and placeholder text like "None", "None yet", "No error", etc.
@@ -404,32 +405,7 @@ function isMeaningfulError(error: string | undefined | null): boolean {
     return false;
   }
   const normalized = error.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  // Filter out common placeholder values that don't represent real errors
-  const placeholders = [
-    'none',
-    'none yet',
-    'no error',
-    'no errors',
-    'n/a',
-    'na',
-    'null',
-    'undefined',
-    'empty',
-    '-',
-    '',
-  ];
-  // Check exact matches
-  if (placeholders.includes(normalized)) {
-    return false;
-  }
-  // Check if it starts with common "no error" patterns
-  if (normalized.startsWith('none yet') || normalized.startsWith('no error')) {
-    return false;
-  }
-  return true;
+  return normalized !== '' && !ERROR_PLACEHOLDERS.has(normalized);
 }
 
 type StructuredMessage = {
