@@ -1,0 +1,115 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_AARCH64"
+  ],
+  "syscalls": [
+    {
+      "names": ["setuid", "setuid32", "setreuid", "setreuid32", "setresuid", "setresuid32", "setfsuid", "setfsuid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 0,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "CRITICAL: Block setuid to root (UID 0) unconditionally"
+    },
+    {
+      "names": ["setgid", "setgid32", "setregid", "setregid32", "setresgid", "setresgid32", "setfsgid", "setfsgid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 0,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "CRITICAL: Block setgid to root group (GID 0) unconditionally"
+    },
+    {
+      "names": ["setuid", "setuid32", "setreuid", "setreuid32", "setresuid", "setresuid32", "setfsuid", "setfsuid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 999,
+          "op": "SCMP_CMP_LE"
+        }
+      ],
+      "comment": "Block setuid to system accounts (UID 1-999)"
+    },
+    {
+      "names": ["setgid", "setgid32", "setregid", "setregid32", "setresgid", "setresgid32", "setfsgid", "setfsgid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 999,
+          "op": "SCMP_CMP_LE"
+        }
+      ],
+      "comment": "Block setgid to system groups (GID 1-999)"
+    },
+    {
+      "names": ["setuid", "setuid32", "setreuid", "setreuid32", "setresuid", "setresuid32", "setfsuid", "setfsuid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 2000,
+          "op": "SCMP_CMP_LT"
+        }
+      ],
+      "comment": "Block setuid to UIDs below session user range (< 2000) - includes legacy range"
+    },
+    {
+      "names": ["setgid", "setgid32", "setregid", "setregid32", "setresgid", "setresgid32", "setfsgid", "setfsgid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 2000,
+          "op": "SCMP_CMP_LT"
+        }
+      ],
+      "comment": "Block setgid to GIDs below session user range (< 2000)"
+    },
+    {
+      "names": ["setuid", "setuid32", "setreuid", "setreuid32", "setresuid", "setresuid32", "setfsuid", "setfsuid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 60000,
+          "op": "SCMP_CMP_GT"
+        }
+      ],
+      "comment": "Block setuid to UIDs above isolated range (> 60000)"
+    },
+    {
+      "names": ["setgid", "setgid32", "setregid", "setregid32", "setresgid", "setresgid32", "setfsgid", "setfsgid32"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [
+        {
+          "index": 0,
+          "value": 60000,
+          "op": "SCMP_CMP_GT"
+        }
+      ],
+      "comment": "Block setgid to GIDs above isolated range (> 60000)"
+    }
+  ],
+  "_comment": "Seccomp profile for Ag3ntum ISOLATED mode. Valid UID/GID range: [2000, 60000]. Root (0) and system accounts (1-999) are ALWAYS blocked. This mode uses an isolated UID range that doesn't map to real host users."
+}

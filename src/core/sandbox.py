@@ -218,12 +218,17 @@ class SandboxExecutor:
         config = self._config
 
         # Base command - avoid flags that cause pivot_root in Docker
-        cmd = [config.bwrap_path]
+        # Split bwrap_path to handle "sudo bwrap" as separate arguments
+        cmd = config.bwrap_path.split()
 
         # In Docker, we need to be careful about namespace operations
         # Use --unshare-user --unshare-pid for basic isolation
         # but avoid --unshare-all which requires pivot_root
         if nested_container:
+            # --unshare-user is required when using --uid/--gid flags
+            # It creates a new user namespace where we can set custom UIDs
+            if self._linux_uid is not None or self._linux_gid is not None:
+                cmd.append("--unshare-user")
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",
@@ -338,6 +343,14 @@ class SandboxExecutor:
                     f"from sandboxed_envs"
                 )
 
+        # Add UID/GID dropping via bwrap (instead of preexec_fn)
+        # This works because bwrap runs via sudo (configured in permissions.yaml)
+        # and can drop to the target user UID/GID
+        if self._linux_uid is not None:
+            cmd.extend(["--uid", str(self._linux_uid)])
+        if self._linux_gid is not None:
+            cmd.extend(["--gid", str(self._linux_gid)])
+
         cmd.extend(["--chdir", config.environment.home])
 
         cmd.append("--")
@@ -380,7 +393,17 @@ def _mount_args(mount: SandboxMount) -> list[str]:
     return ["--ro-bind", mount.source, mount.target]
 
 
-def create_demote_fn(uid: int, gid: int):
+class UIDValidationError(Exception):
+    """Raised when a UID/GID fails security validation."""
+    pass
+
+
+def create_demote_fn(
+    uid: int,
+    gid: int,
+    session_uid: Optional[int] = None,
+    validate: bool = True,
+):
     """
     Create preexec_fn for dropping privileges before exec.
 
@@ -392,14 +415,49 @@ def create_demote_fn(uid: int, gid: int):
     session user's UID instead of the API user (45045), so files created
     by the agent are owned by the correct user.
 
+    SECURITY: This function performs UID/GID validation before creating the
+    demote function. The following are ALWAYS blocked:
+    - UID 0 (root)
+    - GID 0 (root group)
+    - System UIDs/GIDs (1-999)
+    - UIDs outside the configured range
+
     Args:
         uid: Linux user ID to switch to.
         gid: Linux group ID to switch to.
+        session_uid: If provided, validates that uid matches the session's UID
+                     (principle of least privilege - each session only uses its own UID)
+        validate: If True (default), perform UID/GID validation. Set to False
+                  only for testing purposes.
 
     Returns:
         Callable that drops privileges when called.
+
+    Raises:
+        UIDValidationError: If the UID or GID fails security validation.
     """
     import os
+
+    # Import UID security validation
+    from src.core.uid_security import (
+        validate_uid_for_setuid,
+        validate_gid_for_setgid,
+        log_uid_operation,
+    )
+
+    # SECURITY: Validate UID before creating demote function
+    if validate:
+        uid_valid, uid_reason = validate_uid_for_setuid(uid, session_uid=session_uid)
+        if not uid_valid:
+            log_uid_operation("create_demote_fn", uid, session_uid, success=False, reason=uid_reason)
+            raise UIDValidationError(f"UID validation failed: {uid_reason}")
+
+        gid_valid, gid_reason = validate_gid_for_setgid(gid)
+        if not gid_valid:
+            log_uid_operation("create_demote_fn", uid, session_uid, success=False, reason=gid_reason)
+            raise UIDValidationError(f"GID validation failed: {gid_reason}")
+
+        log_uid_operation("create_demote_fn", uid, session_uid, success=True)
 
     def demote():
         try:
@@ -452,18 +510,18 @@ async def execute_sandboxed_command(
     logger.info(f"SANDBOX EXEC: {' '.join(bwrap_cmd[:10])}...")
     logger.debug(f"SANDBOX FULL CMD: {' '.join(bwrap_cmd)}")
 
-    # Create privilege-dropping function if UID/GID are set
-    preexec_fn = None
+    # Note: UID/GID dropping is now handled by bwrap --uid/--gid flags
+    # (configured in build_bwrap_command). This requires bwrap to run via sudo
+    # (bwrap_path: "sudo bwrap" in permissions.yaml), which has NOPASSWD access
+    # configured in the Dockerfile sudoers rules.
     if executor.linux_uid is not None and executor.linux_gid is not None:
-        preexec_fn = _create_demote_fn(executor.linux_uid, executor.linux_gid)
-        logger.debug(f"Will drop privileges to UID={executor.linux_uid}, GID={executor.linux_gid}")
+        logger.debug(f"Bwrap will drop privileges to UID={executor.linux_uid}, GID={executor.linux_gid}")
 
     try:
         process = await asyncio.create_subprocess_exec(
             *bwrap_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            preexec_fn=preexec_fn,
         )
 
         stdout_bytes, stderr_bytes = await asyncio.wait_for(

@@ -25,9 +25,11 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
+from ...db.models import User
 from ...services.session_service import session_service, InvalidSessionIdError
 from ...security import scan_and_redact, is_scanner_enabled
 from ...services.mount_service import (
@@ -372,6 +374,8 @@ def validate_path_security(
 def validate_and_resolve_path_for_session(
     session_id: str,
     sandbox_path: str,
+    workspace_docker: Optional[str] = None,
+    username: Optional[str] = None,
 ) -> tuple[Path, bool, str]:
     """
     Validate and resolve a sandbox path using the session's SandboxPathResolver.
@@ -383,6 +387,8 @@ def validate_and_resolve_path_for_session(
     Args:
         session_id: The session ID
         sandbox_path: Path in sandbox format (e.g., 'external/persistent/file.png')
+        workspace_docker: Optional Docker workspace path for on-demand resolver config
+        username: Optional username for on-demand resolver config
 
     Returns:
         Tuple of (docker_path, is_external, mount_type):
@@ -393,11 +399,19 @@ def validate_and_resolve_path_for_session(
     Raises:
         HTTPException: If path is invalid or cannot be resolved
     """
+    from ..deps import configure_sandbox_path_resolver_if_needed
+
     if not has_sandbox_path_resolver(session_id):
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Session path resolver not configured",
-        )
+        # Try to configure on-demand if we have the required info
+        if workspace_docker and username:
+            configure_sandbox_path_resolver_if_needed(
+                session_id, username, workspace_docker
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Session path resolver not configured",
+            )
 
     try:
         docker_path, is_external, mount_type = resolve_file_path_for_session(
@@ -813,9 +827,23 @@ async def get_file_content(
             detail=f"Session not found: {session_id}",
         )
 
+    # Get workspace directory
+    if not session.working_dir:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Session working directory not configured",
+        )
+
+    workspace_docker = str(Path(session.working_dir) / "workspace")
+
+    # Get username for on-demand resolver configuration
+    result = await db.execute(select(User).where(User.id == session.user_id))
+    user = result.scalar_one_or_none()
+    username = user.username if user else None
+
     # Validate and resolve path using session-aware resolver
     actual_file, is_external, mount_type = validate_and_resolve_path_for_session(
-        session_id, path
+        session_id, path, workspace_docker=workspace_docker, username=username
     )
 
     if not actual_file.exists():
@@ -921,12 +949,17 @@ async def download_file(
             detail="Session working directory not configured",
         )
 
-    workspace_root = Path(session.working_dir) / "workspace"
+    workspace_docker = str(Path(session.working_dir) / "workspace")
+
+    # Get username for on-demand resolver configuration
+    result = await db.execute(select(User).where(User.id == session.user_id))
+    user = result.scalar_one_or_none()
+    username = user.username if user else None
 
     # Validate and resolve path using session-aware resolver
     # This uses SandboxPathResolver for consistent path handling
     actual_file, is_external, mount_type = validate_and_resolve_path_for_session(
-        session_id, path, workspace_root
+        session_id, path, workspace_docker=workspace_docker, username=username
     )
 
     if not actual_file.exists():
@@ -1286,9 +1319,22 @@ async def delete_file(
             detail=f"Session not found: {session_id}",
         )
 
+    # Get workspace and username for on-demand resolver configuration
+    if not session.working_dir:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Session working directory not configured",
+        )
+
+    workspace_docker = str(Path(session.working_dir) / "workspace")
+
+    result = await db.execute(select(User).where(User.id == session.user_id))
+    user = result.scalar_one_or_none()
+    username = user.username if user else None
+
     # Validate and resolve path using session-aware resolver
     actual_file, is_external, mount_type = validate_and_resolve_path_for_session(
-        session_id, path
+        session_id, path, workspace_docker=workspace_docker, username=username
     )
 
     # Prevent deletion of files in read-only external mounts

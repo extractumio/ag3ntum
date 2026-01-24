@@ -356,7 +356,7 @@ const STATUS_ALIASES: Record<string, string> = {
 
 function normalizeStatus(value: string): string {
   const statusValue = value.toLowerCase();
-  return STATUS_ALIASES[statusValue] ?? statusValue || 'idle';
+  return (STATUS_ALIASES[statusValue] ?? statusValue) || 'idle';
 }
 
 /**

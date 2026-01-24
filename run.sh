@@ -37,8 +37,14 @@ Commands:
   rebuild            Full cleanup + build (equivalent to: cleanup && build)
   test               Run tests inside the Docker container
   shell              Open a shell inside the API container
-  create-user        Create a new user account
+  create-user        Create a new user account (uses AG3NTUM_UID_MODE setting)
+  delete-user        Delete a user account
   cleanup-test-users Remove test users created during testing
+
+UID Security Modes:
+  AG3NTUM_UID_MODE=isolated  (default) UIDs 50000-60000, multi-tenant safe
+  AG3NTUM_UID_MODE=direct    UIDs map to host (1000-65533), dev/single-tenant
+  See docs/UID-SECURITY.md for details
 
 Options:
   --mount-rw=PATH:NAME  Mount host PATH as read-write (accessible at ./external/rw/NAME)
@@ -308,7 +314,7 @@ NO_CACHE=""
 TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup|restart|rebuild|test|shell|create-user|cleanup-test-users)
+    build|cleanup|restart|rebuild|test|shell|create-user|delete-user|cleanup-test-users)
       ACTION="$1"
       shift
       # For test command, collect remaining args
@@ -320,6 +326,13 @@ while [[ $# -gt 0 ]]; do
       fi
       # For create-user command, collect remaining args
       if [[ "${ACTION}" == "create-user" ]]; then
+        while [[ $# -gt 0 ]]; do
+          TEST_ARGS+=("$1")
+          shift
+        done
+      fi
+      # For delete-user command, collect remaining args
+      if [[ "${ACTION}" == "delete-user" ]]; then
         while [[ $# -gt 0 ]]; do
           TEST_ARGS+=("$1")
           shift
@@ -728,6 +741,10 @@ function create_user() {
   if [[ -z "$USERNAME" || -z "$EMAIL" || -z "$PASSWORD" ]]; then
     echo "Error: Missing required arguments"
     echo "Usage: ./run.sh create-user --username=USER --email=EMAIL --password=PASS [--admin]"
+    echo ""
+    echo "UID Security Mode (set via environment or docker-compose.yml):"
+    echo "  AG3NTUM_UID_MODE=isolated  (default) UIDs 50000-60000, multi-tenant safe"
+    echo "  AG3NTUM_UID_MODE=direct    UIDs map to host (1000-65533), dev/single-tenant"
     exit 1
   fi
 
@@ -738,15 +755,67 @@ function create_user() {
     exit 1
   fi
 
-  echo "=== Creating user: $USERNAME ==="
+  # Get current UID mode from container
+  local uid_mode
+  uid_mode=$(docker compose exec ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
 
-  # Run create_user.py inside container
-  docker compose exec ag3ntum-api \
+  echo "=== Creating user: $USERNAME ==="
+  echo "  UID Security Mode: ${uid_mode:-isolated}"
+
+  # Run create_user.py inside container as root (avoids sudo prompts)
+  docker compose exec -u root ag3ntum-api \
     python3 src/cli/create_user.py \
     --username="$USERNAME" \
     --email="$EMAIL" \
     --password="$PASSWORD" \
     $ADMIN
+}
+
+# Function to delete a user
+function delete_user() {
+  USERNAME=""
+  FORCE=""
+
+  # Parse arguments
+  for arg in "$@"; do
+    case "$arg" in
+      --username=*) USERNAME="${arg#--username=}" ;;
+      --force) FORCE="--force" ;;
+    esac
+  done
+
+  # Validate required arguments
+  if [[ -z "$USERNAME" ]]; then
+    echo "Error: Missing required argument --username"
+    echo "Usage: ./run.sh delete-user --username=USER [--force]"
+    echo ""
+    echo "Options:"
+    echo "  --username=USER   Username to delete (required)"
+    echo "  --force           Confirm deletion (required to actually delete)"
+    echo ""
+    echo "Note: This removes the user from Ag3ntum database and cleans up their"
+    echo "      user directory. The Linux user account is preserved."
+    exit 1
+  fi
+
+  # Check if container is running
+  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    echo "Error: ag3ntum-api container is not running."
+    echo "Start it first with: ./run.sh build"
+    exit 1
+  fi
+
+  if [[ -z "$FORCE" ]]; then
+    echo "=== User deletion preview ==="
+  else
+    echo "=== Deleting user: $USERNAME ==="
+  fi
+
+  # Run delete_user.py inside container as root (needs elevated permissions)
+  docker compose exec -u root ag3ntum-api \
+    python3 src/cli/delete_user.py \
+    --username="$USERNAME" \
+    $FORCE
 }
 
 # Handle cleanup action
@@ -795,6 +864,17 @@ run_ui_tests() {
       npm install --no-fund --no-audit
     '
   fi
+
+  # Run vite build first to catch Babel transpilation errors
+  # (Vitest uses esbuild which is more permissive than Babel)
+  echo "Running vite build to verify transpilation..."
+  if ! docker compose exec ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+    echo ""
+    echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
+    return 1
+  fi
+  echo "Build successful."
+  echo ""
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
@@ -1159,6 +1239,12 @@ if [[ "${ACTION}" == "create-user" ]]; then
   exit 0
 fi
 
+# Handle delete-user action
+if [[ "${ACTION}" == "delete-user" ]]; then
+  delete_user ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
+  exit 0
+fi
+
 # Handle cleanup-test-users action
 if [[ "${ACTION}" == "cleanup-test-users" ]]; then
   echo "=== Cleaning up test users ==="
@@ -1263,6 +1349,16 @@ if ! check_services; then
 fi
 
 ROLLBACK_ENV=0
+
+# Build the web frontend (catches Babel transpilation errors early)
+echo ""
+echo "=== Building Web Frontend ==="
+if ! docker compose exec ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+  echo ""
+  echo "ERROR: Vite build failed. Check for transpilation errors."
+  exit 1
+fi
+echo "Frontend build successful."
 
 # Verify fresh containers
 echo ""

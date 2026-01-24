@@ -1,5 +1,25 @@
-"""User management service."""
+"""User management service.
+
+This module handles user creation, deletion, and management with support for
+two UID mapping modes:
+
+Mode A: Isolated Range (Default)
+    - UIDs allocated from dedicated range (legacy: 2000-49999, new: 50000-60000)
+    - Safer for multi-tenant deployments
+    - Set AG3NTUM_UID_MODE=isolated (default)
+
+Mode B: Direct Host Mapping (Opt-in)
+    - UIDs map to host system UIDs (1000-65533)
+    - Set AG3NTUM_UID_MODE=direct
+    - WARNING: Requires understanding of security implications
+
+Security invariants enforced regardless of mode:
+    - UID 0 (root) is NEVER allocated
+    - System UIDs (1-999) are never used
+    - Each user gets a unique UID validated against seccomp policies
+"""
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -14,6 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import USERS_DIR, CONFIG_DIR
 from ..db.models import User
+from ..core.uid_security import (
+    UIDMode,
+    UIDSecurityConfig,
+    get_uid_security_config,
+    validate_uid_for_setuid,
+    log_uid_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +52,25 @@ DEFAULT_USER_SECRETS_TEMPLATE = CONFIG_DIR / "user_secrets.yaml.template"
 
 
 class UserService:
-    """Service for user management and Linux user creation."""
+    """Service for user management and Linux user creation.
+
+    Supports two UID allocation modes:
+    - ISOLATED (default): UIDs from dedicated range, safer for multi-tenant
+    - DIRECT: UIDs map to host UIDs, simpler for dev/single-tenant
+
+    Set AG3NTUM_UID_MODE environment variable to select mode.
+    """
+
+    def __init__(self):
+        """Initialize the user service with UID security configuration."""
+        self._uid_config: Optional[UIDSecurityConfig] = None
+
+    @property
+    def uid_config(self) -> UIDSecurityConfig:
+        """Get the UID security configuration (lazy loaded)."""
+        if self._uid_config is None:
+            self._uid_config = get_uid_security_config()
+        return self._uid_config
 
     async def create_user(
         self,
@@ -34,6 +79,7 @@ class UserService:
         email: str,
         password: str,
         role: str = "user",
+        uid_mode: Optional[UIDMode] = None,
     ) -> User:
         """
         Create a new user with Linux account.
@@ -42,12 +88,22 @@ class UserService:
         1. Validate username/email uniqueness
         2. Hash password with bcrypt
         3. Generate per-user JWT secret
-        4. Create Linux user with sudo useradd
-        5. Store linux_uid in database
-        6. Create user directories
+        4. Generate UID based on current mode (isolated or direct)
+        5. Validate UID against security policies
+        6. Create Linux user with sudo useradd
+        7. Store linux_uid in database
+        8. Create user directories
+
+        Args:
+            db: Database session
+            username: Unique username (3-32 chars, alphanumeric)
+            email: User email address
+            password: User password (will be hashed)
+            role: User role (default: "user")
+            uid_mode: Override UID mode for this user (default: use global config)
 
         Raises:
-            ValueError: If user already exists or creation fails
+            ValueError: If user already exists, creation fails, or UID validation fails
         """
         # Validate username format (Linux username constraints)
         if not self._validate_username(username):
@@ -70,8 +126,21 @@ class UserService:
         # Generate per-user JWT secret
         jwt_secret = secrets.token_urlsafe(32)
 
-        # Generate UID (start from 2000 to avoid system users)
-        linux_uid = await self._generate_next_uid(db)
+        # Determine UID mode and generate UID
+        effective_mode = uid_mode or self.uid_config.mode
+        linux_uid = await self._generate_next_uid(db, effective_mode)
+
+        # SECURITY: Validate the generated UID
+        uid_valid, uid_reason = validate_uid_for_setuid(linux_uid, self.uid_config)
+        if not uid_valid:
+            log_uid_operation("create_user", linux_uid, success=False, reason=uid_reason)
+            raise ValueError(f"Generated UID {linux_uid} failed security validation: {uid_reason}")
+
+        log_uid_operation("create_user", linux_uid, success=True)
+        logger.info(
+            f"Creating user {username} with UID {linux_uid} "
+            f"(mode: {effective_mode.value})"
+        )
 
         # Create Linux user with sudo
         try:
@@ -105,13 +174,71 @@ class UserService:
         pattern = r"^[a-z_][a-z0-9_]{2,31}$"
         return bool(re.match(pattern, username))
 
-    async def _generate_next_uid(self, db: AsyncSession) -> int:
-        """Generate next available UID (starting from 2000)."""
+    async def _generate_next_uid(
+        self,
+        db: AsyncSession,
+        mode: Optional[UIDMode] = None,
+    ) -> int:
+        """Generate next available UID based on the configured mode.
+
+        For ISOLATED mode:
+            - New users: UIDs from 50000-60000
+            - Legacy users: UIDs from 2000-49999 (still valid)
+
+        For DIRECT mode:
+            - UIDs from 1000-65533 (maps to host users)
+
+        Args:
+            db: Database session
+            mode: UID mode to use (default: use global config)
+
+        Returns:
+            Next available UID in the valid range
+
+        Raises:
+            ValueError: If no valid UIDs are available in the range
+        """
+        effective_mode = mode or self.uid_config.mode
+
+        # Get the starting UID for new allocations based on mode
+        if effective_mode == UIDMode.ISOLATED:
+            # For isolated mode, prefer the new range (50000+) for new users
+            # Legacy users (2000-49999) are still valid but we don't allocate there
+            min_uid = self.uid_config.isolated_uid_min
+            max_uid = self.uid_config.isolated_uid_max
+        else:
+            # For direct mode, use host user range
+            min_uid = self.uid_config.direct_uid_min
+            max_uid = self.uid_config.direct_uid_max
+
+        # Check for existing users in the target range
         result = await db.execute(
-            select(User.linux_uid).order_by(User.linux_uid.desc()).limit(1)
+            select(User.linux_uid)
+            .where(User.linux_uid >= min_uid)
+            .where(User.linux_uid <= max_uid)
+            .order_by(User.linux_uid.desc())
+            .limit(1)
         )
-        max_uid = result.scalar_one_or_none()
-        return (max_uid + 1) if max_uid and max_uid >= 2000 else 2000
+        max_existing = result.scalar_one_or_none()
+
+        if max_existing is not None:
+            next_uid = max_existing + 1
+        else:
+            next_uid = min_uid
+
+        # Verify we haven't exceeded the range
+        if next_uid > max_uid:
+            raise ValueError(
+                f"UID range exhausted for mode {effective_mode.value}. "
+                f"Range [{min_uid}, {max_uid}] is full."
+            )
+
+        logger.debug(
+            f"Generated UID {next_uid} for mode {effective_mode.value} "
+            f"(range: {min_uid}-{max_uid})"
+        )
+
+        return next_uid
 
     def _create_linux_user(self, username: str, uid: int) -> None:
         """

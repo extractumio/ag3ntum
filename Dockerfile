@@ -103,5 +103,11 @@ ENV AG3NTUM_ROOT=/
 ENV PYTHONPATH=/
 ENV PYTHONUNBUFFERED=1
 
+# UID Security Mode Configuration
+# ISOLATED (default): UIDs from 50000-60000, safer for multi-tenant
+# DIRECT: UIDs map to host UIDs (1000-65533), simpler for dev
+# Set via docker-compose environment or CLI: -e AG3NTUM_UID_MODE=direct
+ENV AG3NTUM_UID_MODE=isolated
+
 # Switch to non-root user
 USER ag3ntum_api
