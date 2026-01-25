@@ -83,6 +83,7 @@ services:
       - ./config:/config
       - ./logs:/logs
       - ./src:/src
+      - ./tests:/tests:ro
     ports:
       - "${AG3NTUM_WEB_PORT:-50080}:50080"
     depends_on:

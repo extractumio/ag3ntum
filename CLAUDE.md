@@ -1,407 +1,560 @@
-# CLAUDE.md
+# CLAUDE.md - Ag3ntum Reference Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository. Use this as your primary reference for project structure, common tasks, and avoiding pitfalls.
 
-## Project Overview
+## Quick Reference
 
-**Ag3ntum** is a secure AI agent framework built on the Claude Agent SDK with security-first architecture. It provides both CLI and Web UI modes for executing AI agent tasks with a 5-layer defense-in-depth protection model.
-
-- **Language**: Python 3.13+
-- **License**: AGPL-3.0 (commercial license available)
-- **Core SDK**: claude-agent-sdk 0.1.20
-- **Architecture**: Dual-mode (CLI direct + FastAPI web server)
-
-### Available python modules
-See @requirements.txt
-
-IMPORTANT: Study the available modules before you start implementing a code so to use available API and not inventing a wheel.
-
-
-## Deployment & Development (Docker-First)
-
-**Important**: The project is always deployed and tested locally via Docker. The `./run.sh` script is the main entry point for all operations.
-
-### run.sh Commands
-
+### Most Common Commands
 ```bash
-# Build and start containers (primary command)
-./run.sh build
-
-# Force rebuild without Docker cache (for significant changes)
-./run.sh build --no-cache
-
-# Full cleanup + rebuild (for major changes or troubleshooting)
-./run.sh cleanup && ./run.sh build --no-cache
-# Or use the shorthand:
-./run.sh rebuild --no-cache
-
-# Restart containers to reload code (preserves data, for small Python changes)
-./run.sh restart
-
-# Stop containers and remove images (full cleanup)
-./run.sh cleanup
-
-# Open shell in API container
-./run.sh shell
-
-# Create a new user
-./run.sh create-user --username=USER --email=EMAIL --password=PASS [--admin]
+./run.sh build              # Build and start containers
+./run.sh restart            # Restart containers (for code changes)
+./run.sh test               # Run backend tests
+./run.sh test --all         # Run all tests (backend + security + sandboxing)
+./run.sh shell              # Open shell in API container
+./run.sh cleanup            # Stop and remove containers
 ```
 
-### Running Tests via Docker
-
-```bash
-# Run all backend tests (default)
-./run.sh test
-
-# Run all tests (backend + core-tests + security)
-./run.sh test --all
-
-# Run specific test suites
-./run.sh test --backend          # Backend tests only
-./run.sh test --security         # Security/command filtering tests
-./run.sh test --sandboxing       # Sandboxing tests
-
-# Pattern matching for test files
-./run.sh test "session*"         # Matches test_sessions.py, test_session_service.py
-./run.sh test "auth|health"      # OR matching: test_auth.py and test_health.py
-./run.sh test "session*|streaming"
-
-# Pytest options
-./run.sh test -k "ps_command"    # Filter by test name pattern
-./run.sh test --security -x      # Stop on first failure
-./run.sh test -v                 # Verbose output (default)
-```
-
-### When to Use Which Command
-
-| Scenario | Command |
-|----------|---------|
-| First time setup | `./run.sh build` |
-| Small Python code change | `./run.sh restart` |
-| Config file changes | `./run.sh restart` |
-| Dockerfile/requirements.txt changes | `./run.sh build --no-cache` |
-| Major refactoring | `./run.sh cleanup && ./run.sh build --no-cache` |
-| Troubleshooting build issues | `./run.sh rebuild --no-cache` |
-| Running tests | `./run.sh test` |
-
-### Local Development Setup (Optional)
-
-For local development without Docker (limited use):
-```bash
-python3.13 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# CLI mode only (no sandboxing)
-./venv/bin/python scripts/agent_cli.py --task "Your task here"
-```
-
-### Services & Ports
-
-After `./run.sh build`:
-- **API**: http://localhost:40080
+### Key URLs (after `./run.sh build`)
 - **Web UI**: http://localhost:50080
+- **API**: http://localhost:40080
 - **API Docs**: http://localhost:40080/api/docs
-- **Redis**: localhost:46379 (internal)
 
-## Architecture
+### Project Identity
+- **Name**: Ag3ntum
+- **Language**: Python 3.13+
+- **License**: AGPL-3.0
+- **Core SDK**: claude-agent-sdk 0.1.20
+- **Security Model**: 6-layer defense-in-depth with UID isolation
 
-### Entry Points
+---
+
+## Project Structure Overview
+
 ```
-agent_cli.py → src/core/agent.py → execute_agent_task() → ClaudeAgent.run()
-                                          ↓
-Web UI (React) → FastAPI → agent_runner.py → execute_agent_task() → ClaudeAgent.run()
+Project/
+├── config/                  # All configuration files
+│   ├── agent.yaml           # Agent settings (model, max_turns, timeout)
+│   ├── api.yaml             # API server config (host, port, CORS)
+│   ├── secrets.yaml         # API keys (ANTHROPIC_API_KEY)
+│   └── security/            # Security configurations
+│       ├── permissions.yaml       # Tool enablement, sandbox config
+│       ├── tools-security.yaml    # PathValidator, secrets scanning
+│       ├── command-filtering.yaml # 140+ regex patterns (16 categories)
+│       ├── upload-filtering.yaml  # File upload filters
+│       ├── seccomp-isolated.json  # Seccomp profile (UID 50000-60000)
+│       └── seccomp-direct.json    # Seccomp profile (direct UID mode)
+├── src/
+│   ├── core/                # Core agent logic (25+ files)
+│   ├── api/                 # FastAPI application
+│   ├── services/            # Business logic services
+│   ├── security/            # Security utilities (secrets scanner)
+│   └── web_terminal_client/ # React Web UI
+├── tools/ag3ntum/           # Custom MCP tools (9 tools)
+├── prompts/                 # Jinja2 prompt templates
+├── tests/                   # Test suites
+├── scripts/                 # CLI tools
+├── docs/                    # Documentation
+└── skills/                  # Skill definitions
 ```
+
+---
+
+## Source Code Index
 
 ### Core Components (`src/core/`)
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| **ClaudeAgent** | `agent_core.py` | Main agent orchestrator, SDK integration, session lifecycle |
-| **execute_agent_task** | `task_runner.py` | Unified entry point for CLI and API |
-| **TaskExecutionParams** | `schemas.py` | Execution parameters dataclass |
-| **PermissionManager** | `permission_profiles.py` | Tool access control, session context |
-| **SessionManager** | `sessions.py` | File-based session CRUD, checkpoints |
-| **TraceProcessor** | `trace_processor.py` | SDK message processing for tracing |
-| **TracerBase** | `tracer.py` | Output tracing (ExecutionTracer for CLI, EventingTracer for SSE) |
-
-### Security Components
-
-| Layer | Component | File | Scope |
-|-------|-----------|------|-------|
-| 0 | Inbound WAF | `api/waf_filter.py` | Request size limits (API only) |
-| 1 | Docker | `docker-compose.yml` | Host isolation |
-| 2 | Bubblewrap | `sandbox.py` | Subprocess isolation (Ag3ntumBash) |
-| 3 | PathValidator | `path_validator.py` | Python file tools validation |
-| 4 | CommandSecurityFilter | `command_security.py` | Regex-based command blocking |
-
-### Ag3ntum MCP Tools (`tools/ag3ntum/`)
-
-Native Claude Code tools are **blocked**. All operations use Ag3ntum tools with built-in security:
-
-| Tool | Security | Replaces |
-|------|----------|----------|
-| `mcp__ag3ntum__Read` | PathValidator | Read |
-| `mcp__ag3ntum__Write` | PathValidator | Write |
-| `mcp__ag3ntum__Edit` | PathValidator | Edit |
-| `mcp__ag3ntum__Bash` | CommandFilter + Bubblewrap | Bash |
-| `mcp__ag3ntum__Glob` | PathValidator | Glob |
-| `mcp__ag3ntum__Grep` | PathValidator | Grep |
-| `mcp__ag3ntum__LS` | PathValidator | LS |
-| `mcp__ag3ntum__WebFetch` | Domain blocklist | WebFetch |
+| File | Class/Function | Purpose | When to Modify |
+|------|----------------|---------|----------------|
+| `agent_core.py` | `ClaudeAgent` | Main agent orchestrator, SDK integration | Agent lifecycle changes |
+| `task_runner.py` | `execute_agent_task()` | **Unified entry point** for CLI and API | Execution flow changes |
+| `schemas.py` | `TaskExecutionParams` | Execution parameters dataclass | Adding execution params |
+| `permission_profiles.py` | `PermissionManager` | Tool access control, session context | Permission logic |
+| `sessions.py` | `SessionManager` | File-based session CRUD, checkpoints | Session handling |
+| `sandbox.py` | `SandboxExecutor`, `SandboxConfig` | Bubblewrap sandbox + UID dropping | Sandbox changes |
+| `uid_security.py` | `UIDSecurityConfig` | UID/GID validation, seccomp generation | UID isolation logic |
+| `path_validator.py` | `Ag3ntumPathValidator` | File path validation for tools | Path security |
+| `command_security.py` | `CommandSecurityFilter` | Regex-based command blocking | Command filtering |
+| `tracer.py` | `TracerBase`, `ExecutionTracer` | Output tracing for CLI/API | Output formatting |
+| `trace_processor.py` | `TraceProcessor` | SDK message processing | Event processing |
 
 ### API Layer (`src/api/`)
 
-- **main.py**: FastAPI app with CORS, WAF middleware
-- **routes/sessions.py**: Session management, task execution, SSE streaming
-- **routes/auth.py**: JWT authentication
-- **models.py**: Pydantic request/response models with WAF validators
+| File | Purpose | When to Modify |
+|------|---------|----------------|
+| `main.py` | FastAPI app factory, middleware setup | Adding middleware |
+| `routes/sessions.py` | Session CRUD, task execution, SSE streaming | Session endpoints |
+| `routes/auth.py` | JWT authentication | Auth flow |
+| `routes/files.py` | File explorer endpoints | File operations |
+| `routes/health.py` | Health check, config endpoint | Status endpoints |
+| `security_middleware.py` | HTTP headers, CSP, host validation | Web security |
+| `waf_filter.py` | Request size limits, DoS prevention | Input validation |
+| `models.py` | Pydantic request/response models | API contracts |
+| `deps.py` | Dependency injection (JWT, DB) | DI setup |
+
+### Security Components (`src/security/`)
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `sensitive_data_scanner.py` | `SensitiveDataScanner` | Secrets scanning and redaction |
+| `scanner_config.py` | | Scanner configuration loading |
 
 ### Services (`src/services/`)
 
-- **agent_runner.py**: Background task execution via `execute_agent_task()`
-- **session_service.py**: Session lifecycle (SQLite + file-based)
-- **event_service.py**: SSE event streaming via asyncio queues
+| File | Class | Purpose |
+|------|-------|---------|
+| `agent_runner.py` | `AgentRunner` | Background task execution |
+| `session_service.py` | `SessionService` | Session lifecycle (SQLite + files) |
+| `event_service.py` | `EventService` | SSE event persistence |
+| `redis_event_hub.py` | `RedisEventHub` | Redis Pub/Sub for real-time events |
+| `auth_service.py` | `AuthService` | JWT authentication |
+| `user_service.py` | `UserService` | User CRUD operations |
 
-## Configuration Files
+### MCP Tools (`tools/ag3ntum/`)
 
-| File | Purpose |
-|------|---------|
-| `config/agent.yaml` | Agent settings (model, max_turns, timeout, skills) |
-| `config/secrets.yaml` | API keys (ANTHROPIC_API_KEY) |
-| `config/api.yaml` | API server config (host, port, CORS) |
-| `config/security/permissions.yaml` | Tool enablement, sandbox config, session mounts |
-| `config/security/tools-security.yaml` | PathValidator blocklists, network settings |
-| `config/security/command-filtering.yaml` | 140+ regex patterns for command blocking |
-| `config/security/upload-filtering.yaml` | File upload extension/MIME type whitelist/blacklist |
+| Tool | File | Security | Replaces |
+|------|------|----------|----------|
+| `mcp__ag3ntum__Read` | `ag3ntum_read/tool.py` | PathValidator | Read |
+| `mcp__ag3ntum__Write` | `ag3ntum_write/tool.py` | PathValidator | Write |
+| `mcp__ag3ntum__Edit` | `ag3ntum_edit/tool.py` | PathValidator | Edit |
+| `mcp__ag3ntum__Bash` | `ag3ntum_bash/tool.py` | CommandFilter + Bubblewrap + UID | Bash |
+| `mcp__ag3ntum__Glob` | `ag3ntum_glob/tool.py` | PathValidator | Glob |
+| `mcp__ag3ntum__Grep` | `ag3ntum_grep/tool.py` | PathValidator | Grep |
+| `mcp__ag3ntum__LS` | `ag3ntum_ls/tool.py` | PathValidator | LS |
+| `mcp__ag3ntum__WebFetch` | `ag3ntum_webfetch/tool.py` | Domain blocklist | WebFetch |
+| `mcp__ag3ntum__ReadDocument` | `ag3ntum_read_document/tool.py` | Size limits | *New* |
+
+**IMPORTANT**: Native Claude Code tools are **BLOCKED** via `tools.disabled` in `permissions.yaml`. All operations must go through `mcp__ag3ntum__*` tools.
+
+### Web Terminal Client (`src/web_terminal_client/`)
+
+React 18 + TypeScript 5.6 application with Vite 5.4 build system (~10,278 lines, 47 files).
+
+| File/Directory | Purpose | When to Modify |
+|----------------|---------|----------------|
+| `src/App.tsx` | Main orchestrator (~1200 lines), session state, SSE | Core UI flow changes |
+| `src/api.ts` | API client (100+ functions) | Adding API calls |
+| `src/apiCache.ts` | TTL cache with stale-while-revalidate | Cache behavior |
+| `src/sse.ts` | SSE connection, polling fallback | Event streaming |
+| `src/AuthContext.tsx` | JWT authentication context | Auth flow |
+| `src/ConnectionManager.ts` | Connection state machine | Connection resilience |
+| `src/hooks/` | Custom hooks (6 files) | State logic extraction |
+| `src/components/messages/` | Message rendering (12 files) | Chat display |
+| `src/FileExplorer.tsx` | File browser widget | File management UI |
+| `src/FileViewer.tsx` | File preview modal | File preview |
+| `src/MarkdownRenderer.tsx` | Markdown rendering | Markdown display |
+| `src/styles.css` | CSS variables (dark theme) | Styling |
+
+**Key Hooks:**
+- `useSSEConnection` - SSE streaming, reconnection, event deduplication
+- `useSessionManager` - Session CRUD, history, statistics
+- `useUIState` - Local UI state (collapse, modals)
+- `useFileOperations` - File upload, download, delete
+
+**Connection States:** `connected` → `reconnecting` → `polling` → `degraded`
+
+**SSE Events:** `agent_start`, `tool_start`, `tool_complete`, `message`, `thinking`, `subagent_*`, `agent_complete`, `error`, `cancelled`
+
+**Frontend Commands:**
+```bash
+cd src/web_terminal_client
+npm run dev       # Dev server (port 50080)
+npm run build     # Production build
+npm run test      # Run tests
+```
+
+---
+
+## Configuration Files Index
+
+### Agent Configuration (`config/agent.yaml`)
+```yaml
+model: claude-sonnet-4-20250514  # Model to use
+max_turns: 100                    # Max conversation turns
+timeout_seconds: 1800             # Global timeout
+role: default                     # Role from prompts/roles/
+```
+
+### Security Configuration (`config/security/`)
+
+| File | Purpose | Key Settings |
+|------|---------|--------------|
+| `permissions.yaml` | Tool enablement, sandbox | `tools.enabled`, `tools.disabled`, `sandbox.*` |
+| `tools-security.yaml` | PathValidator, secrets | `path_validator.blocklist`, `sensitive_data.*` |
+| `command-filtering.yaml` | Command blocking | 140+ patterns in 16 categories |
+| `upload-filtering.yaml` | File uploads | Blocked extensions, MIME types |
+
+### Secrets Configuration (`config/secrets.yaml`)
+```yaml
+ANTHROPIC_API_KEY: "sk-ant-..."
+sandboxed_envs:              # Per-user API keys (visible only in sandbox)
+  OPENAI_API_KEY: "sk-..."
+```
+
+---
+
+## Security Architecture (6-Layer Model)
+
+Understanding the security layers is critical for correct modifications:
+
+| Layer | Component | File(s) | Scope |
+|-------|-----------|---------|-------|
+| **0** | Inbound WAF | `api/waf_filter.py` | API requests only |
+| **1** | Docker | `docker-compose.yml` | Container isolation |
+| **2** | Bubblewrap + UID | `core/sandbox.py`, `core/uid_security.py` | Subprocess only (Bash) |
+| **3** | Ag3ntum Tools | `tools/ag3ntum/*`, `core/path_validator.py` | File/command ops |
+| **4** | Command Filter | `core/command_security.py` | Bash commands |
+| **5** | Security Middleware | `api/security_middleware.py` | HTTP responses |
+| **6** | Prompts | `prompts/modules/security.j2` | LLM guidance |
+
+### UID Security (Layer 2)
+
+Each user runs under their own UID. This is OS-enforced, not prompt-based.
+
+**UID/GID Range Definitions:**
+| Range | Purpose | Notes |
+|-------|---------|-------|
+| 1-999 | System accounts | Reserved for OS services |
+| 2000-49999 | Legacy users | Still valid, no new allocations |
+| 45045 | API user | Special UID for API process (in legacy range) |
+| 50000-60000 | Isolated users | **New allocations** - sandbox user UIDs |
+
+**Key files**:
+- `src/core/uid_security.py` - UID validation, seccomp profile generation
+- `config/security/seccomp-isolated.json` - Kernel-level UID restrictions
+- `tools/ag3ntum/ag3ntum_bash/tool.py` - Applies `--uid`/`--gid` flags
+
+**Modes**:
+- `ISOLATED` (default): UIDs 50000-60000, no host mapping
+- `DIRECT`: UIDs 1000-65533, maps to host users
+
+### Secrets Scanning (Layer 5)
+
+File Explorer automatically redacts sensitive data:
+- **File**: `src/security/sensitive_data_scanner.py`
+- **Config**: `config/security/tools-security.yaml` → `sensitive_data.*`
+- **Patterns**: API keys, tokens, passwords, private keys
+
+---
+
+## Testing Guide
+
+### Running Tests
+
+```bash
+# All backend tests (default)
+./run.sh test
+
+# All tests (backend + security + sandboxing)
+./run.sh test --all
+
+# Specific suites
+./run.sh test --backend          # Backend only
+./run.sh test --security         # Command filtering (101 tests)
+./run.sh test --sandboxing       # Sandboxing tests
+
+# Pattern matching
+./run.sh test "session*"         # Matches session-related tests
+./run.sh test "auth|health"      # OR matching
+./run.sh test -k "ps_command"    # Pytest filter by test name
+```
+
+### Test File Locations
+
+| Suite | Location | Purpose |
+|-------|----------|---------|
+| Backend | `tests/backend/` | API, services, routes |
+| Core | `tests/core-tests/` | Core components |
+| Security | `tests/security/` | Command filtering, path validation |
+| Sandboxing | `tests/sandboxing/` | Bubblewrap tests |
+| E2E | `tests/backend/test_z_e2e_server.py` | Full integration |
+
+### Test Fixtures
+
+- `tests/backend/conftest.py` - API test fixtures, mock clients
+- `tests/core-tests/conftest.py` - Core test fixtures
+- All tests use `asyncio_mode = auto`
+
+---
+
+## Common Tasks & How-To
+
+### Adding a New API Endpoint
+
+1. Create route function in `src/api/routes/{module}.py`
+2. Add Pydantic models to `src/api/models.py`
+3. Register route in `src/api/main.py` → `create_app()`
+4. Add tests in `tests/backend/test_{module}.py`
+
+### Adding a New Ag3ntum Tool
+
+1. Create directory: `tools/ag3ntum/ag3ntum_{name}/`
+2. Create `__init__.py` and `tool.py`
+3. Implement tool class inheriting from appropriate base
+4. Add PathValidator integration if file-based
+5. Register in `tools/ag3ntum/__init__.py`
+6. Add to `config/security/permissions.yaml` → `tools.enabled`
+
+### Modifying Security Rules
+
+**Command filtering**: Edit `config/security/command-filtering.yaml`
+- Each rule has: `pattern`, `action` (block/record), `exploit` (test case)
+- Run `./run.sh test --security` to validate
+
+**Path validation**: Edit `config/security/tools-security.yaml`
+- `path_validator.blocklist` - Blocked patterns
+- `path_validator.readonly_paths` - Read-only paths
+
+### Adding a New Secret Type for Scanning
+
+1. Edit `config/security/tools-security.yaml`
+2. Add pattern to `sensitive_data.custom_patterns`
+3. Or add detect-secrets plugin to `sensitive_data.detect_secrets_plugins`
+
+### Debugging Agent Execution
+
+```bash
+# Basic request
+./venv/bin/python scripts/ag3ntum_debug.py -r "your task" \
+  --user "email@example.com" --password "pass"
+
+# Verbose (all events)
+./venv/bin/python scripts/ag3ntum_debug.py -r "task" -v
+
+# Security only (blocked operations)
+./venv/bin/python scripts/ag3ntum_debug.py -r "task" -s
+
+# Dump session files
+./venv/bin/python scripts/ag3ntum_debug.py -r "task" -d
+```
+
+### Checking Logs
+
+```bash
+# API container logs
+docker logs project-ag3ntum-api-1 --tail 100
+
+# Permission denials
+docker logs project-ag3ntum-api-1 2>&1 | grep -i "denied\|blocked"
+
+# Inside container
+./run.sh shell
+tail -f /logs/backend.log
+```
+
+---
+
+## Gotchas & Common Confusions
+
+### 1. Native Tools are BLOCKED
+
+**Wrong**: Trying to use `Bash`, `Read`, `Write` directly
+**Right**: Use `mcp__ag3ntum__Bash`, `mcp__ag3ntum__Read`, etc.
+
+Native Claude Code tools are disabled in `permissions.yaml` → `tools.disabled`.
+
+### 2. Sandbox Only Applies to Bash
+
+**Confusion**: "Why doesn't PathValidator use Bubblewrap?"
+
+Bubblewrap (`sandbox.py`) only wraps `mcp__ag3ntum__Bash` subprocess execution. Python file tools (`Read`, `Write`, `Edit`) use `Ag3ntumPathValidator` instead - they run in the main Python process.
+
+### 3. UID Security Requires Bubblewrap
+
+UID dropping (`--uid`, `--gid` flags) happens inside Bubblewrap. It doesn't affect Python file tools. The UID security layer is specifically for subprocess isolation.
+
+### 4. Two Event Systems (Redis + SQLite)
+
+- **Redis Pub/Sub**: Real-time delivery (~1ms), ephemeral
+- **SQLite**: Permanent storage, replay capability
+
+Events are published to Redis first, then persisted to SQLite. If you're debugging and Redis shows 0 events, that's normal - it's ephemeral. Check SQLite for history.
+
+### 5. Session Files vs Database
+
+Sessions have **dual storage**:
+- **Files**: `users/{username}/sessions/{session_id}/` - SDK compatibility
+- **SQLite**: `data/ag3ntum.db` → `sessions` table - Fast queries
+
+Both must stay in sync. `SessionService` handles this.
+
+### 6. Skills are Symlinked
+
+Skills in `workspace/.claude/skills/` are symlinks to actual skill directories. The workspace doesn't contain copies - it links to:
+- Global: `/skills/.claude/skills/`
+- User: `/users/{username}/.claude/skills/`
+
+### 7. Fail-Closed Design
+
+Security components fail-closed:
+- If `CommandSecurityFilter` fails to load rules → ALL commands blocked
+- If `PathValidator` fails to validate → Operation denied
+- If sandbox fails to initialize → Execution blocked
+
+Never catch security exceptions silently.
+
+### 8. Config Changes Need Restart
+
+After editing `config/*.yaml`:
+```bash
+./run.sh restart  # Reloads configuration
+```
+
+For `Dockerfile` or `requirements.txt` changes:
+```bash
+./run.sh build --no-cache
+```
+
+### 9. Prompt Templates Use Jinja2
+
+Files in `prompts/` are Jinja2 templates:
+- `{{ variable }}` - Variable substitution
+- `{% for item in list %}` - Loops
+- `{% include 'module.j2' %}` - Includes
+
+Variables are injected by `ClaudeAgent` during prompt rendering.
+
+### 10. The "ag3ntum" MCP Server
+
+All Ag3ntum tools are registered under a single MCP server named `ag3ntum`. Tool names follow the pattern:
+```
+mcp__ag3ntum__ToolName
+```
+
+This is configured in `tools/ag3ntum/__init__.py`.
+
+### 11. Web Terminal: SSE vs Polling
+
+The frontend uses SSE (Server-Sent Events) by default but falls back to polling:
+- SSE preferred → exponential backoff on failure → polling fallback after 3+ failures
+- Polling: fetches `/events/history` every 4s
+- SSE upgrade attempts continue every 60s from polling mode
+
+**Debugging**: If events aren't appearing, check:
+1. Browser console for SSE connection errors
+2. Network tab for `/events` endpoint status
+3. `ConnectionManager` state in React DevTools
+
+### 12. Web Terminal: API Cache Invalidation
+
+`apiCache.ts` uses TTL-based caching (1 min default, 5 min for skills):
+- Cache keys are based on URL + method
+- Manual invalidation: `apiCache.invalidate(key)` or `apiCache.invalidateAll()`
+- Stale-while-revalidate: serves stale data while refreshing in background
+
+**Gotcha**: After backend changes, frontend may show stale data until cache expires or user refreshes.
+
+### 13. Web Terminal: Event Deduplication
+
+Events have sequence numbers. The frontend deduplicates using a `Set<number>`:
+```typescript
+if (seenSequences.has(event.sequence)) return; // Skip duplicate
+```
+
+**Gotcha**: If you see duplicate messages, check that the backend is assigning unique sequence numbers.
+
+### 14. Web Terminal: CSS Variables
+
+All styling uses CSS variables in `styles.css`. Never use hardcoded colors:
+```css
+/* Wrong */
+color: #7ec8d4;
+
+/* Right */
+color: var(--color-cyan);
+```
+
+---
+
+## Documentation Index
+
+| Document | Location | Purpose |
+|----------|----------|---------|
+| Architecture | `docs/current_architecture.md` | System design, component diagrams |
+| Security Layers | `docs/layers_of_security_for_filesystem.md` | 6-layer security model details |
+| Path Resolver | `docs/sandbox_path_resolver.md` | Sandbox path translation |
+| Web Terminal Client | `../DOCUMENTS/TECHNICAL/web_terminal_client.md` | Frontend architecture & design |
+| Debugging | `docs/how-to-debug-agent-with-ag3ntum_debug.md` | ag3ntum_debug.py usage |
+| Product Overview | `docs/product_management/01_product_overview.md` | Business summary |
+| Features | `docs/product_management/features.md` | Complete feature list |
+
+---
+
+## Development Workflow
+
+### For Small Code Changes
+```bash
+# Edit Python files
+./run.sh restart    # Reload code
+./run.sh test       # Verify
+```
+
+### For Configuration Changes
+```bash
+# Edit config/*.yaml
+./run.sh restart    # Reload config
+```
+
+### For Dependency Changes
+```bash
+# Edit requirements.txt
+./run.sh build --no-cache
+./run.sh test --all
+```
+
+### For Major Refactoring
+```bash
+./run.sh cleanup
+./run.sh build --no-cache
+./run.sh test --all
+```
+
+---
 
 ## Key Patterns
 
 ### Unified Task Execution
-Both CLI and API use `execute_agent_task()` from `task_runner.py`:
+Both CLI and API use `execute_agent_task()`:
 ```python
+from src.core.task_runner import execute_agent_task
+from src.core.schemas import TaskExecutionParams
+
 params = TaskExecutionParams(
     task="Your task",
     working_dir=Path("/path"),
-    tracer=ExecutionTracer(),  # or BackendConsoleTracer()
+    tracer=ExecutionTracer(),
 )
 result = await execute_agent_task(params)
 ```
 
-### Permission Profiles
-Permission configuration is loaded from `config/security/permissions.yaml`:
-- `tools.enabled`: Allowed tools (Ag3ntum MCP tools)
-- `tools.disabled`: Blocked tools (native Claude Code tools)
-- `sandbox.*`: Bubblewrap configuration
-
 ### Tracer Pattern
-Different tracers for different output modes:
-- `ExecutionTracer`: Rich CLI output with spinners, boxes
-- `BackendConsoleTracer`: Timestamped logging for API
-- `EventingTracer`: Wraps tracer, emits SSE events to queue
-- `NullTracer`: Silent (for testing)
+Different output modes use different tracers:
+- `ExecutionTracer` - Rich CLI with spinners
+- `BackendConsoleTracer` - Timestamped logging
+- `EventingTracer` - SSE event emission
+- `NullTracer` - Silent (testing)
 
 ### Session Structure
 ```
-sessions/{session_id}/
-├── session_info.json    # Metadata
-├── agent.jsonl          # SDK message log
+users/{username}/sessions/{session_id}/
+├── session_info.json    # Metadata, resume_id
+├── agent.jsonl          # Complete SDK log
 └── workspace/
     ├── output.yaml      # Agent output
     └── .claude/skills/  # Symlinks to skills
 ```
 
-## Prompt Templates (`prompts/`)
+---
 
-- **system.j2**: Base system prompt
-- **user.j2**: User prompt template
-- **modules/**: Composable prompt components (identity, security, tools, skills)
-- **roles/default.md**: Default agent role definition
+## Available Python Modules
 
-## Web UI (`src/web_terminal_client/`)
+See `requirements.txt` for the full list. Key packages:
+- `anthropic` - Claude API client
+- `claude-agent-sdk` - Agent SDK
+- `fastapi` - Web framework
+- `pydantic` - Data validation
+- `sqlalchemy` - Database ORM
+- `redis` - Event streaming
+- `detect-secrets` - Secrets scanning
+- `pypandoc`, `PyMuPDF`, `pillow` - Document processing
 
-React 18 + TypeScript + Vite terminal interface:
-- **App.tsx**: Main component with routing
-- **api.ts**: REST client for backend
-- **sse.ts**: Server-Sent Events client
-- **LoginPage.tsx**: JWT authentication
-
-URLs:
-- Web UI: http://localhost:50080
-- API: http://localhost:40080
-- API Docs: http://localhost:40080/api/docs
-
-## Testing Notes
-
-- Backend tests use pytest with `asyncio_mode = auto`
-- E2E tests (`test_z_e2e_server.py`) require running server and API key
-- Security tests validate command filtering (101 test cases)
-- Test fixtures in `tests/backend/conftest.py` and `tests/core-tests/conftest.py`
-
-## Important Implementation Details
-
-1. **Fail-Closed Security**: If PathValidator or CommandSecurityFilter fails, operations are denied
-2. **Filtered /proc**: Bubblewrap sandbox hides other processes (agents can't enumerate PIDs)
-3. **Skills via Symlinks**: Skills in `workspace/.claude/skills/` symlink to actual directories
-4. **Auto-Checkpointing**: Write/Edit tools trigger automatic file checkpoints
-5. **Session-Scoped PathValidator**: Each session gets its own PathValidator instance
-
-## Debugging & Testing Agent Execution
-
-### ag3ntum_debug.py - Interactive Agent Testing
-
-The `scripts/ag3ntum_debug.py` script is the primary tool for testing agent execution against the running Docker API. See `docs/how-to-debug-agent-with-ag3ntum_debug.md` for full documentation.
-
-**Prerequisites**: Docker containers must be running (`./run.sh build`)
-
-```bash
-# Basic agent request
-./venv/bin/python scripts/ag3ntum_debug.py -r "your task here" \
-  --user "email@example.com" --password "yourpassword"
-
-# With verbose output (shows all SSE events)
-./venv/bin/python scripts/ag3ntum_debug.py -r "list files in workspace" \
-  --user "email@example.com" --password "pass" --verbose
-
-# Security-focused (shows only blocked operations)
-./venv/bin/python scripts/ag3ntum_debug.py -r "read /etc/passwd" \
-  --user "email@example.com" --password "pass" --security-only
-
-# Dump session files after execution
-./venv/bin/python scripts/ag3ntum_debug.py -r "create test.txt" \
-  --user "email@example.com" --password "pass" --dump-session
-```
-
-**Options**:
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--request` | `-r` | Request to send (required) |
-| `--user` | `-u` | User email for auth |
-| `--password` | | Password for auth |
-| `--host` | | API host (default: localhost) |
-| `--port` | `-p` | API port (default: 40080) |
-| `--verbose` | `-v` | Show all SSE events |
-| `--security-only` | `-s` | Show only security events |
-| `--dump-session` | `-d` | Dump session files after run |
-
-**Exit Codes**: 0=success, 1=error, 2=security blocks detected
-
-### Finding Session Artifacts
-
-After running ag3ntum_debug.py, artifacts are at:
-```
-users/{username}/sessions/{session_id}/
-├── agent.jsonl          # Complete event log
-├── workspace/           # Files created by agent
-└── output.md            # Agent's final response
-```
-
-### Docker Logs & Diagnostics
-
-```bash
-# View API container logs
-docker logs project-ag3ntum-api-1 --tail 50
-
-# Check permission denials
-docker logs project-ag3ntum-api-1 2>&1 | grep -i "permission\|denied"
-
-# Check security blocks
-docker logs project-ag3ntum-api-1 2>&1 | grep -E "PathValidationError|BLOCKED|SANDBOX"
-
-# View backend logs (inside container)
-./run.sh shell
-tail -f /logs/backend.log
-```
-
-### Analyzing Events (Redis & SQLite)
-
-The system uses a **hybrid event architecture**:
-- **Redis Pub/Sub**: Real-time event delivery to SSE subscribers (ephemeral, no persistence)
-- **SQLite**: Permanent event storage for replay and history
-
-**Key files**:
-- `src/services/redis_event_hub.py` - Redis Pub/Sub implementation
-- `src/services/event_service.py` - SQLite event persistence
-- `src/api/routes/sessions.py:541-656` - SSE streaming with replay logic
-
-#### SQLite Event Analysis
-
-```bash
-# Database location
-Project/data/ag3ntum.db
-
-# List tables
-sqlite3 Project/data/ag3ntum.db ".tables"
-# Output: events    sessions    tokens    users
-
-# Check event schema
-sqlite3 Project/data/ag3ntum.db ".schema events"
-
-# Count events for a session
-sqlite3 Project/data/ag3ntum.db \
-  "SELECT COUNT(*) FROM events WHERE session_id = 'SESSION_ID';"
-
-# Event breakdown by type
-sqlite3 Project/data/ag3ntum.db \
-  "SELECT event_type, COUNT(*) as count FROM events
-   WHERE session_id = 'SESSION_ID'
-   GROUP BY event_type ORDER BY count DESC;"
-
-# List events with truncated data
-sqlite3 Project/data/ag3ntum.db \
-  "SELECT id, sequence, event_type, substr(data, 1, 60) as data_preview, timestamp
-   FROM events WHERE session_id = 'SESSION_ID' ORDER BY sequence;"
-
-# Full event data (JSON)
-sqlite3 Project/data/ag3ntum.db \
-  "SELECT data FROM events WHERE session_id = 'SESSION_ID' AND event_type = 'message';"
-```
-
-#### Redis Event Analysis
-
-Redis uses Pub/Sub (ephemeral) - events are only delivered to connected subscribers.
-
-```bash
-# Find Redis container
-docker ps --format "{{.Names}} {{.Image}}" | grep redis
-# Output: project-redis-1 redis:7-alpine
-
-# Check if Redis is responding
-docker exec project-redis-1 redis-cli PING
-
-# Check active Pub/Sub channels
-docker exec project-redis-1 redis-cli PUBSUB CHANNELS "session:*"
-
-# Check subscriber count for a session channel
-docker exec project-redis-1 redis-cli PUBSUB NUMSUB "session:SESSION_ID:events"
-
-# Scan for any ag3ntum keys (if using Lists instead of Pub/Sub)
-docker exec project-redis-1 redis-cli SCAN 0 MATCH "ag3ntum:*" COUNT 100
-```
-
-#### Event Flow Architecture
-
-```
-Agent Execution → EventingTracer.emit_event()
-                       ↓
-              1. Publish to Redis Pub/Sub (~1ms)
-                       ↓
-              2. Persist to SQLite (~5-50ms)
-
-SSE Client Connects → subscribe to Redis Pub/Sub
-                           ↓
-                      Replay from SQLite (with 10-event overlap buffer)
-                           ↓
-                      Stream live events from Redis
-                           ↓
-                      Deduplicate by sequence number
-```
-
-**Why Redis shows 0 events**: Redis Pub/Sub is ephemeral. Once events are delivered to subscribers, they're gone. If no subscribers are connected, events are published but not stored. SQLite is the source of truth for event history.
-
-**Late-joining clients**: The SSE endpoint (`GET /sessions/{id}/events`) handles this by:
-1. Subscribing to Redis first (catches future events)
-2. Replaying all events from SQLite (with 10-event overlap buffer)
-3. Deduplicating by sequence number
-4. All clients see identical content regardless of when they connect
+**IMPORTANT**: Study `requirements.txt` before implementing new features to use existing APIs rather than reinventing.
