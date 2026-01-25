@@ -1,11 +1,11 @@
 ---
-name: create-image
+name: create_image
 description: |
-  Generate images from text prompts or edit existing images using AI. Supports
-  multiple vendors (Google Gemini, OpenAI) with a unified interface. Configurable
-  aspect ratios, quality tiers, and optional mask-based editing. Prompts can be
-  provided inline or from external files. Returns a PIL Image object and optionally
-  saves to disk. Requires GEMINI_API_KEY or OPENAI_API_KEY environment variable.
+  Creates image from user prompt. Use when the user wants to generate, create, or edit images using AI. Triggers: "create an image
+  of", "generate a picture", "draw", "make an illustration", "visualize", "edit this image", "modify
+  the photo", "change the background". Supports text-to-image generation and image editing with
+  masks. NOT for image analysis or description—only
+  for creating or modifying visual content.
 ---
 
 # Create Image
