@@ -451,13 +451,13 @@ export function renderInlineMarkdown(
     } else if (bold) {
       result.push(
         <strong key={key++} className={`${classPrefix}-bold`}>
-          {bold}
+          {renderInlineMarkdown(bold, classPrefix)}
         </strong>
       );
     } else if (italic) {
       result.push(
         <em key={key++} className={`${classPrefix}-italic`}>
-          {italic}
+          {renderInlineMarkdown(italic, classPrefix)}
         </em>
       );
     } else if (code) {
@@ -475,7 +475,7 @@ export function renderInlineMarkdown(
           target="_blank"
           rel="noopener noreferrer"
         >
-          {linkText}
+          {renderInlineMarkdown(linkText, classPrefix)}
         </a>
       );
     }

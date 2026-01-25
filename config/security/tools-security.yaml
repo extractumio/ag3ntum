@@ -35,6 +35,7 @@ path_validator:
   # Read-only path prefixes (relative to workspace)
   readonly_prefixes:
     - "skills/"
+    - ".claude/"
 
 # Network tool configuration
 network:

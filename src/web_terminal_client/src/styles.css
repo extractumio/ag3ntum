@@ -1480,6 +1480,20 @@ body,
   font-size: inherit;
 }
 
+/* Pulsing circle spinner for structured elements */
+.pulsing-circle-spinner {
+  display: inline-block;
+  width: 20px;
+  text-align: center;
+  color: var(--color-accent-primary);
+  animation: pulsing-circle-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulsing-circle-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
 /* =============================================================================
  * TOOL CALLS
  * ============================================================================= */
@@ -1644,6 +1658,25 @@ body,
 }
 
 .subagent-status-running .subagent-status-icon {
+  color: var(--color-accent-primary);
+}
+
+/* Tool status icons - checkmarks and crosses for tool completion */
+.tool-status-icon {
+  font-size: var(--font-sm);
+  width: 16px;
+  text-align: center;
+}
+
+.tool-status-success .tool-status-icon {
+  color: var(--color-success);
+}
+
+.tool-status-error .tool-status-icon {
+  color: var(--color-error);
+}
+
+.tool-status-running .tool-status-icon {
   color: var(--color-accent-primary);
 }
 
@@ -3007,7 +3040,7 @@ resume-context {
   font-size: var(--font-base);
 }
 
-.todo-icon {
+.todo-bullet {
   flex-shrink: 0;
   width: 20px;
   text-align: center;
@@ -3017,21 +3050,25 @@ resume-context {
   color: var(--color-text-primary);
 }
 
-.todo-item.completed .todo-icon {
+.todo-item.todo-completed .todo-bullet {
   color: var(--color-success);
 }
 
-.todo-item.completed .todo-text {
+.todo-item.todo-completed .todo-text {
   color: var(--color-text-muted);
   text-decoration: line-through;
 }
 
-.todo-item.in-progress .todo-icon {
+.todo-item.todo-in_progress .todo-bullet {
   color: var(--color-accent-primary);
 }
 
-.todo-item.pending .todo-icon {
+.todo-item.todo-pending .todo-bullet {
   color: var(--color-text-muted);
+}
+
+.todo-item.todo-cancelled .todo-bullet {
+  color: var(--color-error);
 }
 
 /* =============================================================================
