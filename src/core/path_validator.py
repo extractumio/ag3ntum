@@ -68,6 +68,27 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Security Constants - Single source of truth for path validation defaults
+# =============================================================================
+
+# Default blocklist patterns for sensitive files (matched against relative paths)
+DEFAULT_BLOCKLIST: list[str] = [
+    "*.env", "*.key", ".git/**", "__pycache__/**", "*.pyc",
+    ".secrets/**", "*.pem", "*.p12", "*.pfx",
+    "**/node_modules/**",  # Prevent massive directory traversal
+]
+
+# Default read-only path prefixes (relative to workspace)
+# These paths can be read but not written/edited/deleted by the agent
+DEFAULT_READONLY_PREFIXES: list[str] = [
+    "skills/",           # Legacy skills location
+    ".claude/",          # SDK configuration and skills (SECURITY: prevents skill tampering)
+    "external/ro/",      # Read-only external mounts
+    "external/user-ro/", # Per-user read-only mounts
+]
+
+
+# =============================================================================
 # Path Sanitizer - Security hardening for external mount filenames
 # =============================================================================
 
@@ -277,20 +298,14 @@ class PathValidatorConfig(BaseModel):
         default=True, description="Log all path access attempts"
     )
     blocklist: list[str] = Field(
-        default_factory=lambda: [
-            "*.env", "*.key", ".git/**", "__pycache__/**", "*.pyc",
-            ".secrets/**", "*.pem", "*.p12", "*.pfx",
-            # Security: block common sensitive patterns in external mounts
-            "**/node_modules/**",  # Prevent massive directory traversal
-        ],
+        default_factory=lambda: DEFAULT_BLOCKLIST.copy(),
         description="Glob patterns to block even within workspace",
     )
     allowlist: list[str] | None = Field(
         default=None, description="If set, only these patterns are allowed"
     )
-    # Skills are read-only (path prefixes relative to workspace)
     readonly_prefixes: list[str] = Field(
-        default_factory=lambda: ["skills/", "external/ro/", "external/user-ro/"],
+        default_factory=lambda: DEFAULT_READONLY_PREFIXES.copy(),
         description="Path prefixes (relative to workspace) that are read-only",
     )
 
@@ -993,12 +1008,8 @@ def configure_path_validator(
         persistent_path=persistent_path,
         user_mounts_ro=user_mounts_ro or {},
         user_mounts_rw=user_mounts_rw or {},
-        blocklist=blocklist or [
-            "*.env", "*.key", ".git/**", "__pycache__/**", "*.pyc",
-            ".secrets/**", "*.pem", "*.p12", "*.pfx",
-            "**/node_modules/**",
-        ],
-        readonly_prefixes=readonly_prefixes or ["skills/", "external/ro/", "external/user-ro/"],
+        blocklist=blocklist or DEFAULT_BLOCKLIST.copy(),
+        readonly_prefixes=readonly_prefixes or DEFAULT_READONLY_PREFIXES.copy(),
     )
     validator = Ag3ntumPathValidator(config)
     _session_validators[session_id] = validator

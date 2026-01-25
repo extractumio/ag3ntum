@@ -1,577 +1,616 @@
 ---
 name: deep-research
-description: Enables systematic research (deep research, topic exploration) on any topic through web exploration, with intermediate result preservation and structured document output. 
+description: Enables systematic research (deep research, topic exploration, data gathering) on any topic through web exploration, with intermediate result preservation and structured document output.
 ---
-# SKILL: Deep Research
+# Deep Research Agent Skill
 
 ## Overview
 
-This skill enables systematic research on any topic through web exploration, with intermediate result preservation and structured document output. The workflow adapts based on topic type.
+This skill enables Claude to conduct exhaustive, graduate-level research on complex topics using an agentic, multi-phase approach. It transforms Claude from a passive responder into an autonomous research architect capable of planning investigations, executing recursive searches, resolving conflicts, and synthesizing comprehensive reports.
+
+## When to Use This Skill
+
+- Complex research queries requiring multi-source synthesis
+- Topics needing exploration from multiple perspectives
+- Requests for comprehensive reports, analyses, or literature reviews
+- Questions with "unknown unknowns" requiring iterative discovery
+- Tasks requiring fact verification and conflict resolution
 
 ---
 
-## Execution
+## Tool Reference Quick Guide
 
-1. You can use mcp__ag3ntum__AskUserQuestion or open questions to clarify 3-4 ambiguous or broad options or questions before start.
-2. You can use Task tool to plan the exploration.
-3. You can run concurrent subajects for research to optimize the performance.
-
----
-
-## PHASE 1: INTAKE AND CLASSIFICATION
-
-### 1.1 Initial User Clarification
-
-Ask a maximum of **3 targeted questions** based on detected topic type. Do not ask generic questions—tailor to the specific research need.
-
-**Universal questions (pick 1-2 relevant):**
-- What decision or action will this research support?
-- What is the single most important question to answer?
-- Any constraints? (geography, budget, timeframe, industry)
-
-### 1.2 Topic Type Detection
-
-Analyze the user's request and classify into one of the following types. This determines the entire downstream workflow.
-
-| Topic Type | Detection Signals | Example Requests |
-|------------|-------------------|------------------|
-| `COMPANY` | Company names, "competitor analysis", business terms | "Research Stripe", "Compare Notion vs Coda" |
-| `PRODUCT` | Product names, "should I buy", "best X for Y" | "Best project management tool for startups" |
-| `PERSON` | Names, "who is", biographical intent | "Research Jensen Huang's background" |
-| `TECHNOLOGY` | Tech terms, "how does X work", implementation focus | "How does RAG work in LLMs" |
-| `MARKET` | Industry terms, "market size", trends, forecasts | "AI chip market outlook 2025" |
-| `EVENT` | Dates, "what happened", news focus | "CES 2025 announcements" |
-| `HOW_TO` | "How to", process, tutorial intent | "How to set up CI/CD for Python" |
-| `COMPARISON` | "vs", "compare", "difference between" | "PostgreSQL vs MySQL for analytics" |
-| `GENERAL` | Does not fit above categories | Default fallback |
-
-**Implementation:**
-```
-1. Parse user request for keywords and intent
-2. Assign primary topic type
-3. If ambiguous, ask ONE clarifying question
-4. Log classification to research_log.md
-```
+| Task | Tool | Notes |
+|------|------|-------|
+| Web search | `WebSearch` | Primary discovery tool |
+| Fetch webpage content | `mcp__ag3ntum__WebFetch` | Extract specific data from URLs |
+| Ask user for clarification | `AskUserQuestion` | Use structured options when possible |
+| Track research progress | `TodoWrite` | **Required** - maintain throughout |
+| Parallel research threads | `Task` | Launch concurrent subagents |
+| Save intermediate results | `mcp__ag3ntum__Write` | Preserve findings to files |
+| Read saved research | `mcp__ag3ntum__Read` | Resume from checkpoints |
+| Search local files | `mcp__ag3ntum__Grep` | Find in accumulated research |
 
 ---
 
-## PHASE 2: RESEARCH EXECUTION
+## Core Architecture: The Cognitive Triad
 
-### 2.1 Directory Setup
+### 1. Planner Role
+- Decomposes complex queries into hierarchical, searchable sub-questions
+- Generates structured research plans with clear dependencies
+- Identifies diverse perspectives to avoid filter bubbles
+- Creates a Directed Acyclic Graph (DAG) of research tasks
 
-**Always create this structure before starting research:**
+### 2. Executor Role
+- Executes search queries and retrieves content
+- Applies Chain of Density summarization to compress findings
+- Maintains isolation between parallel research threads
+- Tracks sources with full citation metadata
+
+### 3. Critic Role
+- Validates findings against original requirements
+- Detects contradictions and triggers verification
+- Enforces quality standards and citation fidelity
+- Triggers re-search loops when information is insufficient
+
+---
+
+## Task Management with TodoWrite
+
+**CRITICAL**: Use `TodoWrite` to track all research phases and provide visibility into progress.
+
+### Initial Setup (Immediately After Receiving Request)
 
 ```
-/home/claude/research_[topic_slug]/
-├── research_log.md          # Running log of all actions
-├── sources/                  # Raw scraped content
-│   ├── source_01.md
-│   ├── source_02.md
-│   └── ...
-├── intermediate/             # Extracted data, notes
-│   ├── findings.md
-│   └── [topic-specific files]
-└── output/                   # Final deliverables
-    └── [final_report].md
+TodoWrite with todos:
+1. "Clarify research requirements with user" - status: in_progress
+2. "Create research plan with perspectives" - status: pending
+3. "Execute research for Section 1: [topic]" - status: pending
+4. "Execute research for Section 2: [topic]" - status: pending
+5. "Resolve conflicts and verify sources" - status: pending
+6. "Synthesize final report" - status: pending
 ```
 
-**File naming convention:**
-- `topic_slug`: lowercase, underscores, max 30 chars (e.g., `stripe_vs_paddle`)
-- `source_XX.md`: numbered sequentially
-- Timestamps: `YYYYMMDD_HHMMSS` when needed
+### TodoWrite Rules for Research
 
-### 2.2 Research Log Protocol
+1. **One task `in_progress` at a time** - Mark current phase as active
+2. **Mark completed immediately** - Don't batch completions
+3. **Add discovered tasks dynamically** - If research reveals new sections, add them
+4. **Use descriptive names** - Include section topics in task names
+5. **Track parallel threads** - Each Task subagent should have its own todo item
 
-**Maintain `research_log.md` throughout execution:**
+### Dynamic Task Addition Example
+
+When Phase 2 planning identifies 4 research sections:
+```
+TodoWrite - add new todos:
+- "Research: Economic Impact Analysis" - pending
+- "Research: Technical Implementation" - pending
+- "Research: Policy & Regulation" - pending
+- "Research: Case Studies & Examples" - pending
+```
+
+---
+
+## Parallelization with Task Tool
+
+Use the `Task` tool to launch concurrent research threads for **independent** sections.
+
+### When to Parallelize
+
+| Scenario | Parallelize? | Reason |
+|----------|--------------|--------|
+| Multiple independent sections | ✅ Yes | No dependencies between sections |
+| Fact verification across sources | ✅ Yes | Sources don't depend on each other |
+| Sequential discoveries | ❌ No | Later searches depend on earlier findings |
+| Conflict resolution | ❌ No | Need all facts before resolving |
+| Final synthesis | ❌ No | Requires all research complete |
+
+### Parallel Research Pattern
+
+Launch multiple research threads in a **single message** with multiple Task tool calls:
+
+```
+// In ONE message, call Task multiple times:
+
+Task 1:
+  subagent_type: "general-purpose"
+  description: "Research economic impact"
+  prompt: |
+    Research the economic impact of [topic]. Focus on:
+    - Market size and growth projections
+    - Cost-benefit analyses
+    - Economic stakeholder perspectives
+
+    Save findings to: workspace/research/economic_impact.md
+    Include all source URLs with citations.
+
+Task 2:
+  subagent_type: "general-purpose"
+  description: "Research technical aspects"
+  prompt: |
+    Research the technical implementation of [topic]. Focus on:
+    - Current technologies and approaches
+    - Technical challenges and limitations
+    - Expert technical opinions
+
+    Save findings to: workspace/research/technical_aspects.md
+    Include all source URLs with citations.
+
+Task 3:
+  subagent_type: "general-purpose"
+  description: "Research policy landscape"
+  prompt: |
+    Research policy and regulation for [topic]. Focus on:
+    - Current regulatory frameworks
+    - Proposed legislation
+    - International comparisons
+
+    Save findings to: workspace/research/policy_landscape.md
+    Include all source URLs with citations.
+```
+
+### Subagent Prompt Template
+
+When launching research subagents, include:
 
 ```markdown
-# Research Log: [Topic]
-Started: [timestamp]
-Type: [COMPANY|PRODUCT|PERSON|...]
-Core Question: [user's main question]
+## Research Task: [Section Title]
 
-## Search History
-| # | Query | Results Summary | Sources Scraped |
-|---|-------|-----------------|-----------------|
-| 1 | [query] | [2-3 word summary] | source_01.md |
+### Objective
+[Specific research goal from the plan]
 
-## Key Decisions
-- [Any judgment calls made during research]
+### Questions to Answer
+1. [Sub-question 1]
+2. [Sub-question 2]
+3. [Sub-question 3]
 
-## Gaps Identified
-- [Questions that couldn't be answered]
+### Search Strategy
+- Start with: [broad query]
+- Then narrow to: [specific queries]
+- Verify with: [authoritative source types]
+
+### Output Requirements
+- Save to: workspace/research/[section_name].md
+- Format: Structured markdown with headers
+- Citations: Include URL, title, date for every claim
+- Confidence: Note uncertainty levels
+
+### Tools Available
+- WebSearch: For discovering sources
+- mcp__ag3ntum__WebFetch: For extracting content from URLs
+- mcp__ag3ntum__Write: For saving intermediate findings
 ```
 
-### 2.3 Search Constraints
+### Collecting Parallel Results
 
-| Research Depth | Searches | Articles Scraped | Use When |
-|----------------|----------|------------------|----------|
-| Quick | 2-3 | 2-3 | Simple factual questions |
-| Standard | 4-6 | 4-5 | Most requests (DEFAULT) |
-| Deep | 7-10 | 6-8 | Complex comparisons, market analysis |
+After launching parallel tasks:
 
-**Source selection priority:**
-1. Official sources (company sites, government, documentation)
-2. Industry publications (TechCrunch, Wired, industry-specific)
-3. Major news outlets (Reuters, AP, BBC)
-4. Reputable analysis (established blogs, expert commentary)
+1. **Wait for completion** - Task tool returns when subagent finishes
+2. **Read saved files** - Use `mcp__ag3ntum__Read` to load each section's findings
+3. **Update TodoWrite** - Mark each section as completed
+4. **Proceed to synthesis** - Only after ALL parallel tasks complete
 
-**Never scrape:** Forums, social media, content farms, paywalled content, aggregators
+```
+// After parallel tasks complete:
+mcp__ag3ntum__Read workspace/research/economic_impact.md
+mcp__ag3ntum__Read workspace/research/technical_aspects.md
+mcp__ag3ntum__Read workspace/research/policy_landscape.md
 
-### 2.4 Source File Format
-
-**Save each scraped source as `/sources/source_XX.md`:**
-
-```markdown
-# Source [XX]: [Article Title]
-
-**URL:** [full URL]
-**Scraped:** [timestamp]
-**Type:** [official|news|analysis|documentation]
-**Relevance:** [high|medium|low]
-
----
-
-## Extracted Content
-
-[Relevant excerpts only—not full article. Max 500 words per source.]
-
-## Key Data Points
-
-- [Specific facts, figures, quotes extracted]
-- [...]
-
-## Notes
-
-[Any context about reliability, bias, or gaps]
+// Then synthesize in the main agent context
 ```
 
 ---
 
-## PHASE 3: TOPIC-SPECIFIC WORKFLOWS
+## State Management
 
-### 3.1 COMPANY Research
-
-**Clarification questions:**
-- Are you evaluating them as a vendor, competitor, investment, or employer?
-- What specific aspects matter most? (pricing, reliability, market position)
-
-**Required searches:**
-1. `[company name] official site` → Extract: products, pricing, positioning
-2. `[company name] funding OR revenue 2024` → Extract: financials, scale
-3. `[company name] reviews OR problems` → Extract: real-world issues
-4. `[company name] competitors` → Extract: market context
-
-**Intermediate file (`/intermediate/company_profile.md`):**
-```markdown
-# Company Profile: [Name]
-
-## Basic Info
-- Founded: 
-- HQ: 
-- Employees: 
-- Funding/Revenue: 
-
-## Product/Service
-- Core offering: 
-- Pricing model: 
-- Key customers: 
-
-## Market Position
-- Main competitors: 
-- Differentiation: 
-- Market share (if available): 
-
-## Red Flags / Concerns
-- [Any issues found]
-
-## Data Gaps
-- [What couldn't be verified]
+Maintain a mental model of research state throughout the process:
+```json
+{
+  "task": "Original user query",
+  "research_brief": "Clarified goals, scope, and constraints",
+  "plan": {
+    "sections": [
+      {
+        "id": 1,
+        "topic": "Section topic",
+        "status": "pending|in_progress|complete",
+        "sub_questions": ["Question 1", "Question 2"],
+        "knowledge_gaps": []
+      }
+    ]
+  },
+  "knowledge_graph": [
+    {
+      "fact": "Specific finding",
+      "source": "URL or citation",
+      "confidence": 0.9,
+      "perspective": "economic|technical|policy|etc"
+    }
+  ],
+  "conflicts": [
+    {
+      "claim": "Disputed fact",
+      "source_a": {"position": "X", "url": "..."},
+      "source_b": {"position": "Y", "url": "..."},
+      "resolution": "pending|resolved|irreconcilable"
+    }
+  ],
+  "reflexion_log": ["Observation 1", "Adjustment 2"]
+}
 ```
 
-**Output format:** Company brief (1-2 pages) with recommendation based on user's evaluation context.
+## Research Workflow
 
----
+### Phase 1: Contextual Scoping
 
-### 3.2 PRODUCT Research
+Before researching, analyze the query for clarity and scope.
 
-**Clarification questions:**
-- What's your primary use case?
-- What's your budget range?
-- Any must-have features or dealbreakers?
+**Tools for Phase 1:**
+| Action | Tool | Purpose |
+|--------|------|---------|
+| Clarify requirements | `AskUserQuestion` | Structured user input |
+| Initial topic discovery | `WebSearch` | Understand landscape |
+| Record research brief | `mcp__ag3ntum__Write` | Save to workspace/research_brief.md |
+| Track progress | `TodoWrite` | Mark scoping as in_progress |
 
-**Required searches:**
-1. `best [product category] [year]` → Identify top options
-2. `[product] review` → Real-world assessments
-3. `[product] vs [alternative]` → Direct comparisons
-4. `[product] problems OR issues` → Known limitations
+**Actions:**
+1. **Mark TodoWrite** - Set "Clarify research requirements" to `in_progress`
+2. Identify the core intent behind the request
+3. Detect ambiguities requiring clarification
+4. Determine appropriate depth, breadth, and time horizon (defaults shall include the latest information available, so consider the current year or current date as default)
+5. Generate a Research Brief
+6. **Mark TodoWrite** - Set "Clarify research requirements" to `completed`
 
-**Intermediate file (`/intermediate/product_comparison.md`):**
-```markdown
-# Product Comparison: [Category]
+#### Using AskUserQuestion for Clarification
 
-## Options Evaluated
-| Product | Price | Best For | Key Limitation |
-|---------|-------|----------|----------------|
-| | | | |
+When the research request is ambiguous, use `AskUserQuestion` with structured options:
 
-## Feature Matrix
-| Feature | Product A | Product B | Product C |
-|---------|-----------|-----------|-----------|
-| | | | |
+```
+AskUserQuestion:
+  questions:
+    - question: "What depth of research do you need?"
+      header: "Depth"
+      multiSelect: false
+      options:
+        - label: "Quick Overview (Recommended)"
+          description: "3-5 sources, executive summary format"
+        - label: "Standard Analysis"
+          description: "8-12 sources, structured report with sections"
+        - label: "Comprehensive Deep-Dive"
+          description: "15+ sources, academic-level with full citations"
 
-## User Sentiment Summary
-- [Product A]: [positive/mixed/negative] — [1-line summary]
-- [Product B]: ...
+    - question: "What is the primary purpose of this research?"
+      header: "Purpose"
+      multiSelect: false
+      options:
+        - label: "Decision Support"
+          description: "Actionable insights for making a choice"
+        - label: "Learning & Understanding"
+          description: "Educational overview of the topic"
+        - label: "Competitive Analysis"
+          description: "Compare alternatives or competitors"
+        - label: "Technical Evaluation"
+          description: "Assess feasibility or implementation"
+
+    - question: "What output format do you prefer?"
+      header: "Format"
+      multiSelect: false
+      options:
+        - label: "Structured Report (Recommended)"
+          description: "Sections with headers, detailed prose"
+        - label: "Executive Summary"
+          description: "Concise bullets, key findings only"
+        - label: "Comparison Table"
+          description: "Side-by-side analysis format"
 ```
 
-**Output format:** Comparison table + recommendation with clear reasoning tied to user's stated needs.
+#### When to Skip Clarification
 
----
+Skip `AskUserQuestion` if the request already specifies:
+- Clear scope and depth
+- Specific output format
+- Time constraints
+- Target audience
 
-### 3.3 PERSON Research
+**Clarifying Questions Template (for complex cases):**
+- What is the primary purpose? (Decision-making, learning, comparison)
+- What time period is relevant? (Historical, current, future projections)
+- What depth is needed? (Executive summary, technical deep-dive, comprehensive analysis)
+- Are there specific regions, industries, or constraints?
+- What format is preferred? (Report, bullet points, comparative table)
 
-**Clarification questions:**
-- What context? (hiring, partnership, investment, general knowledge)
-- Any specific aspects? (career history, expertise, reputation)
+**Output:** A Research Brief that serves as the "North Star" for all subsequent work and the best output format: whether it should be wordy and explanatory or compressed and information dense.
 
-**Required searches:**
-1. `[name] [role/company]` → Verify identity, current position
-2. `[name] LinkedIn OR bio` → Career history
-3. `[name] interview OR talk` → Perspectives, expertise
-4. `[name] news [year]` → Recent activities
+#### Saving the Research Brief
 
-**Intermediate file (`/intermediate/person_profile.md`):**
-```markdown
-# Person Profile: [Name]
+After clarification, persist the research brief:
 
-## Current Role
-- Title: 
-- Organization: 
-- Since: 
+```
+mcp__ag3ntum__Write:
+  file_path: workspace/research/research_brief.md
+  content: |
+    # Research Brief: [Topic]
 
-## Background
-- Previous roles: 
-- Education: 
-- Notable achievements: 
+    ## Original Request
+    [User's original query]
 
-## Public Perspectives
-- Key topics they discuss: 
-- Notable quotes/positions: 
+    ## Clarified Scope
+    - **Purpose**: [Decision/Learning/Analysis]
+    - **Depth**: [Quick/Standard/Comprehensive]
+    - **Time Horizon**: [Historical/Current/Projections]
+    - **Constraints**: [Region/Industry/Budget]
 
-## Verification Notes
-- [What could/couldn't be verified]
+    ## Output Specifications
+    - **Format**: [Report/Summary/Table]
+    - **Audience**: [Technical/Executive/General]
+    - **Length**: [Approximate target]
+
+    ## Key Questions to Answer
+    1. [Primary question]
+    2. [Secondary question]
+    3. [Tertiary question]
 ```
 
-**Output format:** Executive bio (0.5-1 page) focused on user's context.
+### Phase 2: Perspective-Guided Planning
 
----
+Generate a multi-perspective research plan.
 
-### 3.4 TECHNOLOGY Research
+**Tools for Phase 2:**
+| Action | Tool | Purpose |
+|--------|------|---------|
+| Discover perspectives | `WebSearch` | Find expert viewpoints |
+| Track planning progress | `TodoWrite` | Mark planning as in_progress |
+| Save research plan | `mcp__ag3ntum__Write` | Persist to workspace/research/plan.md |
+| Add section tasks | `TodoWrite` | Create tasks for each section |
 
-**Clarification questions:**
-- What's your technical level? (beginner/intermediate/expert)
-- Are you evaluating, implementing, or learning?
+**Algorithm:**
+1. **Mark TodoWrite** - Set "Create research plan" to `in_progress`
 
-**Required searches:**
-1. `[technology] explained` → Core concepts
-2. `[technology] architecture OR how it works` → Technical details
-3. `[technology] use cases` → Practical applications
-4. `[technology] limitations OR challenges` → Realistic assessment
+2. **Perspective Discovery**: Identify 3-5 distinct expert viewpoints relevant to the topic
+   - Example for "AI Regulation": Legal Scholar, Tech Entrepreneur, Ethics Researcher, Policy Maker, Consumer Advocate
+   - Use `WebSearch` to discover stakeholder groups if unfamiliar
 
-**Intermediate file (`/intermediate/tech_overview.md`):**
-```markdown
-# Technology Overview: [Name]
+3. **Question Generation**: For each perspective, generate research questions
+   - What would a [Perspective] want to know about this topic?
+   - What concerns would a [Perspective] raise?
+   - What evidence would convince a [Perspective]?
 
-## What It Is
-[2-3 sentence plain-language explanation]
+4. **Synthesis**: Merge questions into a hierarchical outline
+   - Group by theme, not by perspective
+   - Identify dependencies (what must be researched first)
+   - Estimate complexity and allocate effort accordingly
 
-## How It Works
-[Core mechanism, appropriate to user's technical level]
+5. **Update TodoWrite** - Add tasks for each research section:
+   ```
+   TodoWrite - add new todos dynamically:
+   - "Research: [Section 1 Topic]" - pending
+   - "Research: [Section 2 Topic]" - pending
+   - "Research: [Section 3 Topic]" - pending
+   - "Conflict resolution and verification" - pending
+   - "Final synthesis and report" - pending
+   ```
 
-## Key Components
-- [Component 1]: [role]
-- [Component 2]: [role]
+6. **Mark TodoWrite** - Set "Create research plan" to `completed`
 
-## Use Cases
-| Use Case | How It Applies | Example |
-|----------|----------------|---------|
-| | | |
+**Output:** A structured research plan with sections, sub-questions, and dependencies.
 
-## Limitations
-- [Limitation 1]
-- [Limitation 2]
+#### Saving the Research Plan
 
-## Implementation Considerations
-- [If user is implementing]
+```
+mcp__ag3ntum__Write:
+  file_path: workspace/research/plan.md
+  content: |
+    # Research Plan: [Topic]
+
+    ## Perspectives Considered
+    1. [Perspective 1] - [Why relevant]
+    2. [Perspective 2] - [Why relevant]
+    3. [Perspective 3] - [Why relevant]
+
+    ## Research Sections
+
+    ### Section 1: [Topic]
+    **Dependencies**: None (can start immediately)
+    **Parallelizable**: Yes
+    **Questions**:
+    - Q1.1: [Specific question]
+    - Q1.2: [Specific question]
+
+    ### Section 2: [Topic]
+    **Dependencies**: None
+    **Parallelizable**: Yes
+    **Questions**:
+    - Q2.1: [Specific question]
+    - Q2.2: [Specific question]
+
+    ### Section 3: [Topic]
+    **Dependencies**: Section 1 (builds on findings)
+    **Parallelizable**: No - wait for Section 1
+    **Questions**:
+    - Q3.1: [Specific question]
+
+    ## Execution Order
+    1. Parallel: Sections 1, 2
+    2. Sequential: Section 3 (after Section 1)
+    3. Final: Conflict resolution, synthesis
 ```
 
-**Output format:** Technical brief calibrated to user's stated level. Include diagram descriptions if helpful.
+### Phase 3: Recursive Execution
 
----
+Execute the plan using depth-first, recursive search logic.
 
-### 3.5 MARKET Research
+**For Each Section:**
 
-**Clarification questions:**
-- What's the business context? (entering market, investing, strategic planning)
-- Geographic scope? (global, specific regions)
+1. **Query Formulation**
+   - Generate 3-5 distinct search queries
+   - Vary query structure: broad overview, specific data points, expert opinions
+   - Use advanced operators when appropriate: `site:edu`, `filetype:pdf`, date ranges
 
-**Required searches:**
-1. `[market] market size [year]` → Quantitative data
-2. `[market] trends [year]` → Direction and drivers
-3. `[market] major players` → Competitive landscape
-4. `[market] forecast OR outlook` → Future projections
+2. **Content Retrieval**
+   - Search and retrieve content from top results, make sure the content is relevant. If not -- repeat. 
+   - Prioritize authoritative sources (.gov, .edu, well-known scientific or business sources, primary sources, peer-reviewed, community-driven resources)
+   - Track all URLs visited to avoid redundancy (e.g. use external temporary file for it)
 
-**Intermediate file (`/intermediate/market_analysis.md`):**
-```markdown
-# Market Analysis: [Market Name]
-
-## Market Size
-- Current: $[X] ([year])
-- Projected: $[Y] by [year]
-- CAGR: [X]%
-
-## Key Segments
-| Segment | Size/Share | Growth | Notes |
-|---------|------------|--------|-------|
-| | | | |
-
-## Major Players
-| Company | Est. Share | Positioning |
-|---------|------------|-------------|
-| | | |
-
-## Trends
-1. [Trend]: [Impact]
-2. [Trend]: [Impact]
-
-## Data Quality Notes
-- [Source reliability assessment]
-- [Conflicting data points]
+3. **Chain of Density Processing**
+   Apply iterative data compaction and compression to maximize information density:
+```
+   Pass 1: Generate standard summary of source
+   Pass 2: Identify 1-3 missing entities (facts, numbers, names) from source
+   Pass 3: Rewrite summary to include missing entities WITHOUT increasing length
+   Pass 4: Repeat until summary is maximally dense
 ```
 
-**Output format:** Market brief (1-2 pages) with data tables and sourced projections.
+4. **Reflexion Check**
+   After each search cycle, ask:
+   - Does this answer the section's core question?
+   - What specific information is still missing?
+   - Did I encounter new concepts requiring deeper investigation?
+   - Is it practical and actionable?
+   
+   **If incomplete:** Generate refined queries and recurse (max depth: 3)
+   **If complete:** Mark section done and proceed
 
----
+5. **Stopping Criteria**
+   - Information Gain < Threshold (new sources overlap >90% with existing knowledge)
+   - All required "slots" filled (specific data points identified in plan)
+   - Maximum recursion depth reached
+   - Logical completeness achieved
 
-### 3.6 COMPARISON Research
+### Phase 4: Synthesis & Conflict Resolution
 
-**Clarification questions:**
-- What's the decision you're making?
-- What factors matter most to you?
+**Conflict Detection:**
+- Monitor for semantic contradictions between sources
+- Flag numerical discrepancies, opposing conclusions, or timeline conflicts
 
-**Required searches:**
-1. `[option A] vs [option B] [year]` → Direct comparisons
-2. `[option A] review` → Individual assessment
-3. `[option B] review` → Individual assessment
-4. `[option A] [option B] migration OR switching` → Transition considerations
+**Conflict Resolution Protocol:**
+1. **Verify**: Search specifically for the disputed claim using authoritative sources
+2. **Contextualize**: Check if sources are from different time periods or contexts
+3. **Adjudicate**: If conflict is genuine, report it transparently:
+   > "Sources disagree on [topic]. Source A (2024) reports X, while Source B (2023) claims Y. The discrepancy may be due to [methodological differences/time lag/regional variation]."
 
-**Intermediate file (`/intermediate/comparison_matrix.md`):**
-```markdown
-# Comparison: [A] vs [B]
+**Report Assembly:**
+- Organize findings according to the research plan
+- Ensure every claim has citation support
+- Maintain consistent voice and academic tone
+- Include appropriate hedging for uncertain claims
 
-## Quick Verdict
-[1-2 sentences: who should choose what]
+## Prompting Techniques
 
-## Comparison Matrix
-| Factor | [A] | [B] | Winner |
-|--------|-----|-----|--------|
-| Price | | | |
-| [Factor 2] | | | |
-| [Factor 3] | | | |
+### Chain of Density Prompt
+```
+Summarize the following content in exactly 3 sentences.
 
-## Detailed Breakdown
+Then, identify 2 specific facts (names, numbers, dates, technical terms) that were 
+omitted but are important.
 
-### [Factor 1]
-- **[A]:** [specifics]
-- **[B]:** [specifics]
-- **Verdict:** [which wins and why]
-
-## Edge Cases
-- Choose [A] if: [specific scenario]
-- Choose [B] if: [specific scenario]
+Finally, rewrite your summary to include these facts while keeping it to 3 sentences.
 ```
 
-**Output format:** Decision-focused comparison with clear recommendation tied to user's stated priorities.
+### Reflexion Prompt
+```
+I just searched for [query] and found [summary of results].
 
----
+Critique: Did I find what I needed for [section goal]?
+- What specific information is still missing?
+- Was my query too broad or too narrow?
+- What alternative search terms might yield better results?
 
-### 3.7 HOW_TO Research
-
-**Clarification questions:**
-- What's your starting point? (complete beginner, some experience)
-- What's the end goal? (learning, implementing specific thing)
-
-**Required searches:**
-1. `how to [task] guide` → Overview approaches
-2. `[task] step by step` → Detailed instructions
-3. `[task] common mistakes` → Pitfalls to avoid
-4. `[task] tools OR software` → Required resources
-
-**Intermediate file (`/intermediate/procedure_draft.md`):**
-```markdown
-# How To: [Task]
-
-## Prerequisites
-- [What user needs before starting]
-
-## Tools/Resources Needed
-- [Tool 1]: [purpose]
-- [Tool 2]: [purpose]
-
-## Steps
-1. **[Step name]:** [Details]
-2. **[Step name]:** [Details]
-
-## Common Mistakes
-- [Mistake]: [How to avoid]
-
-## Verification
-[How to confirm success]
+Next action: [Continue/Refine query/Move to next section]
 ```
 
-**Output format:** Step-by-step guide calibrated to user's experience level.
+### Verification Prompt
+```
+I have conflicting information:
+- Source A claims: [claim]
+- Source B claims: [claim]
 
----
+Search specifically for authoritative sources on this disputed point.
+Prioritize: government data, academic papers, primary source documents.
+Report findings with confidence assessment.
+```
 
-### 3.8 EVENT Research
+## Quality Standards
 
-**Clarification questions:**
-- What aspect interests you? (announcements, analysis, specific topics)
+### Citation Requirements
+- Every factual claim must have a source
+- Include URL, title, and publication date when available
+- Distinguish between primary and secondary sources
+- Note when information could not be independently verified
 
-**Required searches:**
-1. `[event] [year] announcements` → What happened
-2. `[event] highlights OR recap` → Curated summaries
-3. `[event] [specific topic]` → If user has focus area
+### Prohibited Behaviors
+- Never invent or fabricate sources
+- Never use vague attributions ("some experts say") without citation
+- Never present disputed claims as settled facts
+- Never stop research prematurely without documenting gaps
+- Never ignore contradictory evidence
 
-**Output format:** Event summary with key announcements/outcomes organized by relevance to user's interest.
-
----
-
-### 3.9 GENERAL Research (Fallback)
-
-Use when topic doesn't fit other categories.
-
-**Standard search pattern:**
-1. `[topic] overview` → Establish basics
-2. `[topic] [year]` → Recent developments
-3. `[topic] [specific aspect from user question]` → Targeted answer
-
-**Output format:** Direct answer to user's question with supporting context.
-
----
-
-## PHASE 4: OUTPUT GENERATION
-
-### 4.1 Standard Report Structure
-
+### Report Structure
 ```markdown
-# [Topic]: Research Summary
+# [Title]
 
-**Prepared:** [date]
-**Research Type:** [topic type]
-**Core Question:** [user's main question]
+## Executive Summary
+[2-3 paragraph overview of key findings]
 
----
+## 1. [Section Title]
+### 1.1 [Subsection]
+[Content with inline citations]
 
-## Bottom Line
+## 2. [Section Title]
+...
 
-[2-4 sentences: Direct answer to user's question + primary recommendation. No hedging.]
-
-## Key Findings
-
-### [Finding 1 Title]
-[2-3 sentences with specific data. Source reference.]
-
-### [Finding 2 Title]
-[2-3 sentences with specific data. Source reference.]
-
-### [Finding 3 Title]
-[2-3 sentences with specific data. Source reference.]
-
-## [Topic-Specific Section]
-[Use appropriate section from topic type: comparison table, company profile, step-by-step guide, etc.]
-
-## Practical Next Steps
-
-1. [Actionable step 1]
-2. [Actionable step 2]
-3. [Actionable step 3]
+## Key Findings & Implications
+[Synthesis of most important discoveries]
 
 ## Limitations & Gaps
-
-- [What couldn't be verified]
-- [Areas needing deeper research]
-
----
+[Acknowledge what could not be determined]
 
 ## Sources
-
-| # | Title | URL | Type |
-|---|-------|-----|------|
-| 1 | | | |
-| 2 | | | |
-
----
-
-*Research conducted [date]. For methodology and raw sources, see /research_[topic]/sources/*
+[Full citation list]
 ```
 
-### 4.2 Output Quality Rules
+## Implementation Patterns
 
-1. **Lead with the answer** — First paragraph must directly address user's question
-2. **Data density** — Every paragraph contains at least one fact, figure, or actionable insight
-3. **No filler** — Delete any sentence that doesn't help user decide or act
-4. **Source everything** — All claims must trace to a saved source file
-5. **Acknowledge gaps** — Explicitly state what couldn't be verified
+### For Simple Research (1-3 sources needed)
+1. Skip extensive planning
+2. Direct search → summarize → cite
+3. Brief reflexion check
 
-### 4.3 File Delivery
+### For Medium Research (5-10 sources)
+1. Quick scoping (identify 2-3 perspectives)
+2. Generate focused plan (3-5 sections)
+3. Execute with 1 level of recursion
+4. Synthesize with conflict check
 
-**Final steps:**
-1. Save final report to `/research_[topic]/output/[topic]_report.md`
-2. Copy final report to `/mnt/user-data/outputs/[topic]_report.md`
-3. Optionally convert to .docx if user prefers (use docx skill)
-4. Present file to user with brief summary
+### For Deep Research (10+ sources, complex topic)
+1. Full contextual scoping with clarification
+2. Perspective-guided planning (3-5 perspectives)
+3. Recursive execution with full reflexion loops
+4. Comprehensive conflict resolution
+5. Multi-section report with limitations analysis
 
----
+## Tool Integration
 
-## PHASE 5: EXECUTION CHECKLIST
+When using web search and browsing tools:
 
-Use this checklist for every research task:
+1. **Search Strategy**
+   - Start broad, then narrow based on findings
+   - Use multiple query formulations for the same concept
+   - Search for counterarguments explicitly
 
-```
-□ 1. Classify topic type
-□ 2. Ask clarification questions (max 3)
-□ 3. Create directory structure
-□ 4. Initialize research_log.md
-□ 5. Execute searches (respect depth limits)
-□ 6. Save sources to /sources/source_XX.md
-□ 7. Create topic-specific intermediate file
-□ 8. Update research_log.md with search history
-□ 9. Generate final report using standard structure
-□ 10. Save to output directory
-□ 11. Copy to /mnt/user-data/outputs/
-□ 12. Present file to user
-```
+2. **Source Evaluation**
+   - Prefer recent sources for rapidly evolving topics
+   - Prefer authoritative domains for factual claims
+   - Cross-reference claims across multiple sources
 
----
+3. **Content Extraction**
+   - Focus on extracting specific facts, not general summaries
+   - Note methodology and sample sizes for studies
+   - Capture direct quotes sparingly but accurately
 
-## ERROR HANDLING
+## Adaptation Notes
 
-| Situation | Action |
-|-----------|--------|
-| Search returns no useful results | Try alternative query terms; log in research_log.md; note gap in output |
-| Conflicting information found | Note both versions in intermediate file; present strongest-sourced version in output; mention conflict in Limitations |
-| User question too broad | Ask ONE focusing question; if no response, research most common interpretation |
-| Topic type ambiguous | Default to GENERAL workflow; adapt as information emerges |
-| Cannot verify critical claim | Do not include in Key Findings; mention in Limitations section |
-
----
-
-## INTEGRATION WITH OTHER SKILLS
-
-- **docx skill:** Use for final document formatting if user requests Word format
-- **xlsx skill:** Use for complex comparison matrices or data tables
-- **pdf skill:** Use if user requests PDF output
-
-**To invoke:** Read the relevant SKILL.md before generating output in that format.
+- Scale depth to user needs and time constraints
+- Explicitly state when comprehensive research would require more resources
+- Offer to continue research in follow-up if initial scope is insufficient
+- Maintain transparency about confidence levels throughout

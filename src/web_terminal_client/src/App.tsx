@@ -315,8 +315,9 @@ function TodoProgressList({
       {todos.map((todo, index) => {
         const status = todo.status?.toLowerCase?.() ?? 'pending';
         const isActive = status === 'in_progress' && isRunning;
-        const isCompleted = isDone || status === 'completed';
+        const isCompleted = status === 'completed';
         const label = isActive && todo.activeForm ? todo.activeForm : todo.content;
+        // Show cancel icon for in_progress items when session was cancelled/failed
         const showCancel = (isCancelled || isFailed) && status === 'in_progress';
         const bullet = showCancel
           ? '✗'

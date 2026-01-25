@@ -22,6 +22,8 @@ from src.core.path_validator import (
     get_path_validator,
     cleanup_path_validator,
     has_path_validator,
+    DEFAULT_READONLY_PREFIXES,
+    DEFAULT_BLOCKLIST,
 )
 
 
@@ -342,6 +344,139 @@ class TestReadOnlyPaths:
         (workspace / "main.py").touch()
         result = validator.validate_path("main.py", "write")
         assert result.is_readonly is False
+
+
+class TestClaudeFolderProtection:
+    """Test .claude/ folder is protected as read-only.
+
+    Security: The .claude/skills/ folder contains skill symlinks set up by
+    infrastructure. Agents should not be able to modify it (e.g., delete
+    symlinks and create malicious skill replacements).
+    """
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> Path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".claude" / "skills").mkdir(parents=True)
+        return workspace
+
+    @pytest.fixture
+    def validator(self, workspace: Path) -> Ag3ntumPathValidator:
+        # Use DEFAULT_READONLY_PREFIXES to validate DRY constant is correct
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            blocklist=[],
+            readonly_prefixes=DEFAULT_READONLY_PREFIXES.copy()
+        )
+        return Ag3ntumPathValidator(config)
+
+    def test_claude_in_default_readonly_prefixes(self) -> None:
+        """Verify .claude/ is in the default readonly prefixes constant."""
+        assert ".claude/" in DEFAULT_READONLY_PREFIXES, (
+            "SECURITY: .claude/ must be in DEFAULT_READONLY_PREFIXES to prevent "
+            "agents from tampering with skills"
+        )
+
+    def test_read_allowed_on_claude_folder(
+        self, validator: Ag3ntumPathValidator, workspace: Path
+    ) -> None:
+        """Read operations are allowed on .claude/ paths."""
+        (workspace / ".claude" / "skills" / "my-skill").mkdir()
+        (workspace / ".claude" / "skills" / "my-skill" / "SKILL.md").touch()
+        result = validator.validate_path(".claude/skills/my-skill/SKILL.md", "read")
+        assert result.is_readonly is True
+
+    def test_write_blocked_on_claude_folder(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Write operations are blocked on .claude/ paths."""
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/skills/malicious/SKILL.md", "write")
+
+    def test_delete_blocked_on_claude_folder(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Delete operations are blocked on .claude/ paths (prevents symlink deletion)."""
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/skills/existing-skill", "delete")
+
+    def test_edit_blocked_on_claude_folder(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Edit operations are blocked on .claude/ paths."""
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/skills/my-skill/SKILL.md", "edit")
+
+    def test_claude_settings_file_readonly(
+        self, validator: Ag3ntumPathValidator, workspace: Path
+    ) -> None:
+        """Settings files in .claude/ are also read-only."""
+        (workspace / ".claude" / "settings.json").touch()
+        result = validator.validate_path(".claude/settings.json", "read")
+        assert result.is_readonly is True
+
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/settings.json", "write")
+
+
+class TestClaudeFolderIntegration:
+    """Integration tests for .claude/ protection using configure_path_validator.
+
+    These tests validate that the protection works end-to-end when using the
+    standard configuration flow that real sessions use.
+    """
+
+    @pytest.fixture(autouse=True)
+    def cleanup_validators(self):
+        """Clean up validators after each test."""
+        yield
+        from src.core.path_validator import _session_validators
+        _session_validators.clear()
+
+    def test_configure_path_validator_protects_claude_folder(self, tmp_path: Path) -> None:
+        """configure_path_validator with defaults protects .claude/ folder."""
+        workspace = tmp_path / "users" / "testuser" / "sessions" / "test123" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / ".claude" / "skills" / "my-skill").mkdir(parents=True)
+
+        # Configure validator using the standard function (as real sessions do)
+        validator = configure_path_validator(
+            session_id="test123",
+            workspace_path=workspace,
+            username="testuser",
+        )
+
+        # Read should work
+        (workspace / ".claude" / "skills" / "my-skill" / "SKILL.md").touch()
+        result = validator.validate_path(".claude/skills/my-skill/SKILL.md", "read")
+        assert result.is_readonly is True
+
+        # Write should be blocked
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/skills/malicious/SKILL.md", "write")
+
+        # Delete should be blocked (prevents symlink tampering)
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/skills/my-skill", "delete")
+
+    def test_session_validator_inherits_claude_protection(self, tmp_path: Path) -> None:
+        """Validators retrieved via get_path_validator have .claude/ protection."""
+        workspace = tmp_path / "users" / "testuser" / "sessions" / "sess456" / "workspace"
+        workspace.mkdir(parents=True)
+
+        configure_path_validator(
+            session_id="sess456",
+            workspace_path=workspace,
+            username="testuser",
+        )
+
+        # Get validator as tools would
+        validator = get_path_validator("sess456")
+
+        # Verify protection is active
+        with pytest.raises(PathValidationError, match="read-only"):
+            validator.validate_path(".claude/anything", "write")
 
 
 class TestSessionScopedValidators:

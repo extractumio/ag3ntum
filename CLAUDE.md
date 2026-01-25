@@ -14,6 +14,9 @@ This file provides guidance to Claude Code when working with this repository. Us
 ./run.sh cleanup            # Stop and remove containers
 ```
 
+### Documentation and specs
+Consult the architectural documentation in @DOCUMENTS/TECHNICAL whenever you need to fix bugs or design a new feature.
+
 ### Key URLs (after `./run.sh build`)
 - **Web UI**: http://localhost:50080
 - **API**: http://localhost:40080
@@ -339,6 +342,198 @@ docker logs project-ag3ntum-api-1 2>&1 | grep -i "denied\|blocked"
 # Inside container
 ./run.sh shell
 tail -f /logs/backend.log
+```
+
+---
+
+## Diagnostics & Troubleshooting
+
+### Session Storage
+
+Sessions are stored as files on disk for SDK compatibility and in SQLite for fast queries.
+
+**File Location**: `users/{username}/sessions/{session_id}/`
+
+```bash
+# List all sessions for a user
+ls users/greg/sessions/
+
+# Session directory structure
+users/greg/sessions/20260125_150542_1c4fce4f/
+├── session_info.json    # Metadata, resume_id, cumulative stats
+├── agent.jsonl          # Complete SDK event log (JSONL format)
+└── workspace/
+    ├── output.yaml      # Agent execution output
+    └── external/        # External mount symlinks
+```
+
+**Inspecting Sessions**:
+```bash
+# View session metadata (status, cost, turns, resume_id)
+cat users/greg/sessions/20260125_150542_1c4fce4f/session_info.json | jq .
+
+# Watch SDK events in real-time during execution
+tail -f users/greg/sessions/20260125_150542_1c4fce4f/agent.jsonl
+
+# Search for tool errors across all sessions
+grep -r "error" users/greg/sessions/*/agent.jsonl
+```
+
+**Key Fields in `session_info.json`**:
+| Field | Purpose |
+|-------|---------|
+| `status` | `COMPLETE`, `PARTIAL`, `FAILED`, `ERROR` |
+| `resume_id` | Claude session ID for resuming |
+| `total_cost_usd` | Cost for this execution |
+| `cumulative_cost_usd` | Total cost across all runs |
+| `num_turns` | API round-trips this execution |
+
+### Log Files
+
+**Location**: `logs/` directory
+
+| File | Content | Use Case |
+|------|---------|----------|
+| `backend.log` | API server, routes, services | API/backend debugging |
+| `agent_cli.log` | CLI agent execution | CLI debugging |
+
+**Log Rotation**: 10MB max, 5 backup files (`.1`, `.2`, etc.)
+
+**Viewing Logs**:
+```bash
+# Real-time backend log (inside container)
+./run.sh shell
+tail -f /logs/backend.log
+
+# From host via Docker
+docker logs project-ag3ntum-api-1 --tail 100 -f
+
+# Filter for specific patterns
+grep "ERROR\|Exception" logs/backend.log
+grep "session_id.*20260125" logs/backend.log
+grep -i "denied\|blocked" logs/backend.log  # Security denials
+```
+
+**Configured Loggers**: `src.api`, `src.services`, `src.core`, `src.db`, `ag3ntum`, `tools.ag3ntum`, `uvicorn`, `fastapi`
+
+### Database (SQLite)
+
+**Location**: `data/ag3ntum.db`
+
+**Tables**:
+| Table | Purpose |
+|-------|---------|
+| `users` | User accounts, `linux_uid` for sandbox isolation |
+| `sessions` | Session metadata, status, task, timestamps |
+| `events` | SSE events (persistent storage for replay) |
+| `tokens` | Encrypted user tokens/credentials |
+
+**Querying the Database**:
+```bash
+# Open database (inside container or with sqlite3 installed)
+sqlite3 data/ag3ntum.db
+
+# List sessions for a user
+SELECT id, status, task, created_at FROM sessions
+WHERE user_id = (SELECT id FROM users WHERE username = 'greg')
+ORDER BY created_at DESC LIMIT 10;
+
+# Check session status
+SELECT status, num_turns, total_cost_usd, duration_ms
+FROM sessions WHERE id = '20260125_150542_1c4fce4f';
+
+# Count events per session
+SELECT session_id, COUNT(*) as event_count
+FROM events GROUP BY session_id ORDER BY event_count DESC;
+
+# View recent events for a session
+SELECT sequence, event_type, timestamp, substr(data, 1, 100) as preview
+FROM events WHERE session_id = '20260125_150542_1c4fce4f'
+ORDER BY sequence DESC LIMIT 20;
+
+# Find error events
+SELECT session_id, data FROM events
+WHERE event_type = 'error' ORDER BY timestamp DESC LIMIT 5;
+```
+
+**User UID lookup** (for sandbox debugging):
+```sql
+SELECT username, linux_uid FROM users WHERE linux_uid BETWEEN 50000 AND 60000;
+```
+
+### SSE Event System
+
+Events flow through a dual system for real-time delivery and persistence:
+
+```
+Agent Execution → Redis Stream (real-time) → SSE to Browser
+                ↘ SQLite events table (persistent) ↗ Polling fallback
+```
+
+**Event Types**:
+| Type | Meaning |
+|------|---------|
+| `agent_start` | Session initialized |
+| `message` | Agent text output |
+| `thinking` | Extended thinking content |
+| `tool_start` / `tool_complete` | Tool execution |
+| `agent_complete` | Agent finished |
+| `error` | Execution error |
+| `cancelled` | User cancelled |
+
+**Debugging Events**:
+```bash
+# Check Redis connection (inside container)
+redis-cli ping
+
+# View Redis stream for a session
+redis-cli XREAD STREAMS session:20260125_150542_1c4fce4f 0
+
+# Count persisted events
+sqlite3 data/ag3ntum.db "SELECT COUNT(*) FROM events WHERE session_id = '20260125_150542_1c4fce4f';"
+
+# Check for terminal event (did session complete?)
+sqlite3 data/ag3ntum.db "SELECT event_type FROM events WHERE session_id = '20260125_150542_1c4fce4f' AND event_type IN ('agent_complete', 'error', 'cancelled');"
+```
+
+**SSE Endpoint**: `GET /sessions/{session_id}/events`
+- Query param `after=N` to resume from sequence N
+- Supports `Last-Event-ID` header for browser reconnection
+- Falls back to `/sessions/{session_id}/events/history` for polling
+
+**Sequence Numbers**:
+- Positive: Real events (1, 2, 3...)
+- `-1`: Heartbeat (keep-alive)
+- `9998`: SSE streaming error
+- `9999`: Fallback event from SQLite
+
+### Common Diagnostic Scenarios
+
+**Session stuck in "running" status**:
+```bash
+# Check if agent process is alive
+ps aux | grep "session_id"
+
+# Check for stale session in database
+sqlite3 data/ag3ntum.db "SELECT status, updated_at FROM sessions WHERE id = 'SESSION_ID';"
+
+# Force cleanup (API restart cleans stale sessions)
+./run.sh restart
+```
+
+**Events not appearing in UI**:
+1. Check Redis connection: `redis-cli ping`
+2. Check SQLite has events: `SELECT COUNT(*) FROM events WHERE session_id = '...'`
+3. Check browser console for SSE errors
+4. Verify JWT token is valid
+
+**Agent execution failing silently**:
+```bash
+# Check agent.jsonl for SDK errors
+tail -50 users/USERNAME/sessions/SESSION_ID/agent.jsonl | grep -i error
+
+# Check backend.log for exceptions
+grep -A5 "Exception\|Traceback" logs/backend.log | tail -30
 ```
 
 ---
