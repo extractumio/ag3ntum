@@ -3,14 +3,19 @@ Security Tests for User Isolation and UID/GID Management.
 
 Tests cover:
 - API process runs as ag3ntum_api user (UID 45045), never root
-- Sandbox commands run as user-specific UID (2000+), not as API user
-- Privilege dropping works correctly in SandboxExecutor
+- Sandbox commands run as user-specific UID (50000+), not as API user
+- Privilege dropping works correctly via bwrap --uid/--gid flags
 - No process ever runs as root (UID 0)
+- System UIDs (1-999) are always blocked
 
 These tests validate the multi-layered user isolation security model:
 1. Container level: API runs as ag3ntum_api (UID 45045)
-2. Sandbox level: Commands run as the actual user (UID 2000+)
-3. Security invariant: No process ever runs as root
+2. Sandbox level: Commands run as the actual user (UID 50000+)
+3. Security invariant: No process ever runs as root or system UID
+
+UID Allocation Modes:
+- ISOLATED (default): UIDs from 50000-60000 (safe for multi-tenant)
+- DIRECT (opt-in): UIDs from 1000-65533 (maps to host users)
 
 Run with:
     pytest tests/security/test_user_isolation.py -v
@@ -40,6 +45,7 @@ from src.core.sandbox import (
     SandboxEnvConfig,
     create_demote_fn,
     _create_demote_fn,  # Alias for backward compatibility
+    UIDValidationError,
 )
 
 
@@ -50,9 +56,16 @@ from src.core.sandbox import (
 # API user UID (ag3ntum_api in Docker)
 API_USER_UID = 45045
 
-# User UID range (users created by user_service start at 2000)
-MIN_USER_UID = 2000
-MAX_USER_UID = 65534  # Maximum standard UID
+# User UID range for ISOLATED mode (default)
+# New allocations start at 50000, legacy users may have UIDs 2000-49999
+MIN_USER_UID_ISOLATED = 50000
+MAX_USER_UID_ISOLATED = 60000
+
+# Legacy UID range (still valid but no new allocations)
+MIN_USER_UID_LEGACY = 2000
+
+# System UID max (UIDs 0-999 are blocked)
+SYSTEM_UID_MAX = 999
 
 # Root UID (must never be used)
 ROOT_UID = 0
@@ -145,20 +158,26 @@ class TestAPIProcessUID:
                 f"SECURITY VIOLATION: Process running as root!"
             )
 
-    def test_api_user_well_above_user_allocation_start(self) -> None:
-        """API user UID (45045) should be well above user allocation start (2000).
+    def test_api_user_separated_from_user_allocation_range(self) -> None:
+        """API user UID (45045) is separated from user allocation ranges.
 
-        User UIDs are generated starting at 2000 and increment. The API user
-        UID is chosen to be sufficiently high (45045) that normal user
-        allocation won't reach it for thousands of users.
+        In isolated mode (default), user UIDs are allocated from 50000-60000.
+        The API UID (45045) is below this range, preventing any collision.
+
+        In legacy mode, user UIDs started at 2000. The API UID was chosen
+        to be high enough (45045) to provide a buffer of 43000+ users.
         """
-        # API user should be significantly above the starting user UID
-        # to avoid collision during normal operation
-        SAFE_MARGIN = 40000  # Allow for 40000+ users before collision risk
+        # API user should be below isolated range (50000-60000)
+        assert API_USER_UID < MIN_USER_UID_ISOLATED, (
+            f"API user UID {API_USER_UID} should be below isolated range start "
+            f"({MIN_USER_UID_ISOLATED}) to avoid collision"
+        )
 
-        assert API_USER_UID >= MIN_USER_UID + SAFE_MARGIN, (
-            f"API user UID {API_USER_UID} should be at least {SAFE_MARGIN} "
-            f"above MIN_USER_UID ({MIN_USER_UID}) for safe separation"
+        # API user should be significantly above legacy starting UID (2000)
+        SAFE_MARGIN_LEGACY = 40000  # Allow for 40000+ legacy users before collision
+        assert API_USER_UID >= MIN_USER_UID_LEGACY + SAFE_MARGIN_LEGACY, (
+            f"API user UID {API_USER_UID} should be at least {SAFE_MARGIN_LEGACY} "
+            f"above legacy MIN_USER_UID ({MIN_USER_UID_LEGACY}) for safe separation"
         )
 
 
@@ -171,14 +190,15 @@ class TestSandboxExecutorUIDs:
 
     def test_executor_accepts_uid_gid(self, basic_sandbox_config: SandboxConfig) -> None:
         """SandboxExecutor accepts linux_uid and linux_gid parameters."""
+        # Use UID in valid isolated range (50000-60000)
         executor = SandboxExecutor(
             basic_sandbox_config,
-            linux_uid=2000,
-            linux_gid=2000,
+            linux_uid=50000,
+            linux_gid=50000,
         )
 
-        assert executor.linux_uid == 2000
-        assert executor.linux_gid == 2000
+        assert executor.linux_uid == 50000
+        assert executor.linux_gid == 50000
 
     def test_executor_uid_gid_default_none(self, basic_sandbox_config: SandboxConfig) -> None:
         """SandboxExecutor defaults to None for UID/GID (no privilege drop)."""
@@ -187,33 +207,49 @@ class TestSandboxExecutorUIDs:
         assert executor.linux_uid is None
         assert executor.linux_gid is None
 
-    def test_executor_rejects_root_uid(self, basic_sandbox_config: SandboxConfig) -> None:
-        """Creating executor with root UID should be flagged (test documents intent).
+    def test_executor_accepts_root_uid_but_validation_catches_it(self, basic_sandbox_config: SandboxConfig) -> None:
+        """Executor accepts root UID but validation catches it later.
 
-        Note: The executor currently accepts any UID. This test documents that
-        using ROOT_UID (0) for privilege dropping would be a security issue.
+        The SandboxExecutor stores the UID without validation. Validation
+        happens in create_demote_fn() which raises UIDValidationError.
+        This is by design - the executor is a data container.
         """
-        # Currently executor accepts any UID - this test documents the risk
+        # Executor accepts any UID - validation happens in create_demote_fn
         executor = SandboxExecutor(
             basic_sandbox_config,
             linux_uid=ROOT_UID,
             linux_gid=ROOT_UID,
         )
 
-        # Document that this is dangerous
+        # Executor stores the value
         assert executor.linux_uid == ROOT_UID, (
-            "If executor accepts ROOT_UID, caller must validate UID before passing"
+            "Executor stores UID - validation happens in create_demote_fn"
         )
 
-    def test_user_uid_in_valid_range(self) -> None:
-        """User UIDs should be in the valid range (2000+)."""
-        # Test UIDs that should be valid for users
-        valid_uids = [2000, 2001, 5000, 10000, 65534]
+        # But create_demote_fn will reject it
+        with pytest.raises(UIDValidationError):
+            create_demote_fn(uid=ROOT_UID, gid=ROOT_UID)
 
-        for uid in valid_uids:
-            assert uid >= MIN_USER_UID, f"UID {uid} should be >= {MIN_USER_UID}"
+    def test_user_uid_in_valid_isolated_range(self) -> None:
+        """User UIDs in isolated mode should be in range 50000-60000."""
+        # Test UIDs that are valid for isolated mode
+        valid_isolated_uids = [50000, 50001, 55000, 59999, 60000]
+
+        for uid in valid_isolated_uids:
+            assert uid >= MIN_USER_UID_ISOLATED, f"UID {uid} should be >= {MIN_USER_UID_ISOLATED}"
+            assert uid <= MAX_USER_UID_ISOLATED, f"UID {uid} should be <= {MAX_USER_UID_ISOLATED}"
             assert uid != ROOT_UID, f"UID {uid} should not be root"
             assert uid != API_USER_UID, f"UID {uid} should not be API user"
+
+    def test_legacy_uid_still_valid(self) -> None:
+        """Legacy UIDs (2000-49999) are still valid but no longer allocated."""
+        # Legacy UIDs are valid (existing users may have them)
+        legacy_uids = [2000, 5000, 10000, 45000]
+
+        for uid in legacy_uids:
+            assert uid >= MIN_USER_UID_LEGACY, f"UID {uid} should be >= {MIN_USER_UID_LEGACY}"
+            assert uid != ROOT_UID, f"UID {uid} should not be root"
+            assert uid > SYSTEM_UID_MAX, f"UID {uid} should be above system range"
 
 
 # =============================================================================
@@ -221,27 +257,73 @@ class TestSandboxExecutorUIDs:
 # =============================================================================
 
 class TestPrivilegeDropping:
-    """Test the privilege dropping mechanism."""
+    """Test the privilege dropping mechanism.
+
+    The create_demote_fn() function performs security validation and raises
+    UIDValidationError for blocked UIDs:
+    - UID 0 (root)
+    - System UIDs (1-999)
+    - UIDs outside the configured range
+    """
 
     def test_demote_fn_created_for_valid_uid_gid(self) -> None:
         """_create_demote_fn creates a callable for valid UID/GID."""
-        demote_fn = _create_demote_fn(uid=2000, gid=2000)
+        # Use a UID in the valid isolated range (50000-60000)
+        demote_fn = _create_demote_fn(uid=50000, gid=50000)
 
         assert callable(demote_fn), "Demote function should be callable"
 
-    def test_demote_fn_not_created_with_root(self) -> None:
-        """Using root UID for demote would be a security issue.
+    def test_demote_fn_raises_for_root_uid(self) -> None:
+        """create_demote_fn raises UIDValidationError for root UID (0).
 
-        Note: The function currently accepts any UID. This test documents
-        that the caller must validate UIDs.
+        SECURITY: Root UID is unconditionally blocked to prevent
+        privilege escalation attacks.
         """
-        # Function accepts any UID - caller must validate
-        demote_fn = _create_demote_fn(uid=ROOT_UID, gid=ROOT_UID)
+        with pytest.raises(UIDValidationError) as exc_info:
+            _create_demote_fn(uid=ROOT_UID, gid=ROOT_UID)
 
-        # Document that this would be dangerous if actually executed
-        assert callable(demote_fn), (
-            "Demote function accepts root UID - caller must validate"
+        assert "root" in str(exc_info.value).lower(), (
+            "Error message should mention root"
         )
+
+    def test_demote_fn_raises_for_system_uid(self) -> None:
+        """create_demote_fn raises UIDValidationError for system UIDs (1-999).
+
+        SECURITY: System UIDs are blocked to prevent impersonation of
+        system services.
+        """
+        # Test several system UIDs
+        system_uids = [1, 100, 500, 999]
+
+        for uid in system_uids:
+            with pytest.raises(UIDValidationError) as exc_info:
+                _create_demote_fn(uid=uid, gid=uid)
+
+            assert "system" in str(exc_info.value).lower() or str(uid) in str(exc_info.value), (
+                f"Error for UID {uid} should mention 'system' or the UID"
+            )
+
+    def test_demote_fn_raises_for_root_gid(self) -> None:
+        """create_demote_fn raises UIDValidationError for root GID (0).
+
+        SECURITY: Root GID is also blocked.
+        """
+        with pytest.raises(UIDValidationError) as exc_info:
+            _create_demote_fn(uid=50000, gid=ROOT_UID)
+
+        assert "root" in str(exc_info.value).lower() or "gid" in str(exc_info.value).lower(), (
+            "Error message should mention root or GID"
+        )
+
+    def test_demote_fn_can_skip_validation(self) -> None:
+        """create_demote_fn with validate=False skips security checks.
+
+        NOTE: This is only for testing purposes. Production code should
+        never use validate=False.
+        """
+        # With validation disabled, even root UID returns a callable
+        demote_fn = create_demote_fn(uid=ROOT_UID, gid=ROOT_UID, validate=False)
+        assert callable(demote_fn), "With validate=False, function should be created"
 
 
 # =============================================================================
@@ -249,11 +331,16 @@ class TestPrivilegeDropping:
 # =============================================================================
 
 class TestSandboxCommandExecution:
-    """Test that sandbox commands can run with different UIDs."""
+    """Test that sandbox commands can run with different UIDs.
+
+    Privilege dropping is now handled by bwrap's --uid and --gid flags
+    instead of preexec_fn. This is more secure as bwrap runs via sudo
+    and handles the privilege dropping in a controlled manner.
+    """
 
     @pytest.mark.asyncio
     async def test_execute_sandboxed_command_with_uid(self, workspace: Path) -> None:
-        """execute_sandboxed_command uses preexec_fn when UID/GID set."""
+        """execute_sandboxed_command uses bwrap --uid/--gid when UID/GID set."""
         from src.core.sandbox import execute_sandboxed_command
 
         config = SandboxConfig(
@@ -265,29 +352,40 @@ class TestSandboxCommandExecution:
                 ),
             },
         )
-        executor = SandboxExecutor(config, linux_uid=2000, linux_gid=2000)
+        test_uid = 50000
+        test_gid = 50000
+        executor = SandboxExecutor(config, linux_uid=test_uid, linux_gid=test_gid)
 
-        # Mock subprocess execution to verify preexec_fn is passed
-        with patch('asyncio.create_subprocess_exec') as mock_exec:
+        # Mock subprocess execution to capture the bwrap command
+        captured_args = None
+
+        async def capture_exec(*args, **kwargs):
+            nonlocal captured_args
+            captured_args = args
             mock_process = AsyncMock()
-            mock_process.communicate.return_value = (b"2000\n", b"")
+            mock_process.communicate.return_value = (b"50000\n", b"")
             mock_process.returncode = 0
-            mock_exec.return_value = mock_process
+            return mock_process
 
+        with patch('asyncio.create_subprocess_exec', side_effect=capture_exec):
             await execute_sandboxed_command(
                 executor, "id -u", allow_network=False, timeout=10
             )
 
-            # Verify preexec_fn was passed (for privilege dropping)
-            call_kwargs = mock_exec.call_args.kwargs
-            assert "preexec_fn" in call_kwargs, (
-                "preexec_fn should be passed for privilege dropping"
-            )
-            assert call_kwargs["preexec_fn"] is not None
+        # Verify bwrap command includes --uid and --gid flags
+        assert captured_args is not None, "subprocess should have been called"
+        cmd_str = " ".join(str(arg) for arg in captured_args)
+
+        assert f"--uid {test_uid}" in cmd_str or f"--uid\n{test_uid}" in cmd_str.replace(" ", "\n"), (
+            f"bwrap command should include --uid {test_uid}, got: {cmd_str[:200]}"
+        )
+        assert f"--gid {test_gid}" in cmd_str or f"--gid\n{test_gid}" in cmd_str.replace(" ", "\n"), (
+            f"bwrap command should include --gid {test_gid}, got: {cmd_str[:200]}"
+        )
 
     @pytest.mark.asyncio
     async def test_execute_sandboxed_command_without_uid(self, workspace: Path) -> None:
-        """execute_sandboxed_command without UID/GID has no preexec_fn."""
+        """execute_sandboxed_command without UID/GID has no --uid/--gid flags."""
         from src.core.sandbox import execute_sandboxed_command
 
         config = SandboxConfig(
@@ -301,19 +399,31 @@ class TestSandboxCommandExecution:
         )
         executor = SandboxExecutor(config)  # No UID/GID
 
-        with patch('asyncio.create_subprocess_exec') as mock_exec:
+        captured_args = None
+
+        async def capture_exec(*args, **kwargs):
+            nonlocal captured_args
+            captured_args = args
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (b"45045\n", b"")
             mock_process.returncode = 0
-            mock_exec.return_value = mock_process
+            return mock_process
 
+        with patch('asyncio.create_subprocess_exec', side_effect=capture_exec):
             await execute_sandboxed_command(
                 executor, "id -u", allow_network=False, timeout=10
             )
 
-            # Without UID/GID, preexec_fn should be None
-            call_kwargs = mock_exec.call_args.kwargs
-            assert call_kwargs.get("preexec_fn") is None
+        # Without UID/GID, bwrap command should NOT include --uid/--gid flags
+        assert captured_args is not None, "subprocess should have been called"
+        cmd_str = " ".join(str(arg) for arg in captured_args)
+
+        assert "--uid" not in cmd_str, (
+            f"bwrap command should NOT include --uid without UID set, got: {cmd_str[:200]}"
+        )
+        assert "--gid" not in cmd_str, (
+            f"bwrap command should NOT include --gid without GID set, got: {cmd_str[:200]}"
+        )
 
 
 # =============================================================================
@@ -321,43 +431,66 @@ class TestSandboxCommandExecution:
 # =============================================================================
 
 class TestUserServiceUIDs:
-    """Test that user service generates valid UIDs."""
+    """Test that user service generates valid UIDs.
 
-    def test_user_uid_starts_at_2000(self) -> None:
-        """User UIDs should start at 2000 per user_service.py."""
-        # This is a documentation test - the actual logic is in user_service.py
-        # _generate_next_uid() returns 2000 for first user
-        MIN_GENERATED_UID = 2000
+    UID allocation modes:
+    - ISOLATED (default): UIDs 50000-60000 (safe for multi-tenant)
+    - DIRECT (opt-in): UIDs 1000-65533 (maps to host users)
 
-        assert MIN_USER_UID == MIN_GENERATED_UID, (
-            f"Test constant MIN_USER_UID ({MIN_USER_UID}) should match "
-            f"user_service starting UID ({MIN_GENERATED_UID})"
+    Legacy UIDs (2000-49999) are still valid but no longer allocated.
+    """
+
+    def test_user_uid_starts_at_50000_isolated_mode(self) -> None:
+        """User UIDs start at 50000 in isolated mode (default)."""
+        # In isolated mode, UIDs are allocated from 50000-60000
+        assert MIN_USER_UID_ISOLATED == 50000, (
+            f"MIN_USER_UID_ISOLATED should be 50000, got {MIN_USER_UID_ISOLATED}"
         )
 
-    def test_user_uid_allocation_wont_reach_api_uid(self) -> None:
-        """Generated user UIDs should not collide with API UID during normal operation.
+    def test_user_uid_range_isolated_is_bounded(self) -> None:
+        """Isolated mode UID range is bounded to prevent collisions."""
+        assert MIN_USER_UID_ISOLATED < MAX_USER_UID_ISOLATED, (
+            "MIN should be less than MAX in isolated range"
+        )
+        assert MAX_USER_UID_ISOLATED == 60000, (
+            f"MAX_USER_UID_ISOLATED should be 60000, got {MAX_USER_UID_ISOLATED}"
+        )
+        # Range provides 10000 UIDs which is plenty for most deployments
+        uid_capacity = MAX_USER_UID_ISOLATED - MIN_USER_UID_ISOLATED
+        assert uid_capacity == 10000, (
+            f"Isolated range should provide 10000 UIDs, got {uid_capacity}"
+        )
 
-        User UIDs start at 2000 and increment. The API UID (45045) is
-        chosen to be well above typical allocations, providing a buffer
-        of 43000+ users before any collision risk.
+    def test_api_uid_above_isolated_range(self) -> None:
+        """API UID (45045) is below isolated range to prevent collision.
+
+        The API UID was chosen when allocations started at 2000.
+        Now with isolated mode starting at 50000, the API UID is
+        safely below the allocation range.
         """
-        # Verify there's significant headroom before API UID
-        HEADROOM = API_USER_UID - MIN_USER_UID
-
-        assert HEADROOM > 40000, (
-            f"Headroom between user allocation start ({MIN_USER_UID}) and "
-            f"API UID ({API_USER_UID}) should be substantial"
-        )
-
-        # Generated UIDs start at MIN_USER_UID (2000)
-        assert API_USER_UID != MIN_USER_UID, (
-            "API UID should not equal the starting user UID"
+        assert API_USER_UID < MIN_USER_UID_ISOLATED, (
+            f"API UID ({API_USER_UID}) should be below isolated range start "
+            f"({MIN_USER_UID_ISOLATED})"
         )
 
     def test_user_uid_never_root(self) -> None:
-        """User UIDs (2000+) should never be root (0)."""
-        assert ROOT_UID < MIN_USER_UID, (
-            f"Root UID ({ROOT_UID}) should be below MIN_USER_UID ({MIN_USER_UID})"
+        """User UIDs should never be root (0)."""
+        assert ROOT_UID < MIN_USER_UID_ISOLATED, (
+            f"Root UID ({ROOT_UID}) should be below MIN_USER_UID_ISOLATED"
+        )
+        assert ROOT_UID < MIN_USER_UID_LEGACY, (
+            f"Root UID ({ROOT_UID}) should be below MIN_USER_UID_LEGACY"
+        )
+
+    def test_user_uid_never_system_uid(self) -> None:
+        """User UIDs should never be in system UID range (1-999)."""
+        assert SYSTEM_UID_MAX < MIN_USER_UID_LEGACY, (
+            f"SYSTEM_UID_MAX ({SYSTEM_UID_MAX}) should be below "
+            f"MIN_USER_UID_LEGACY ({MIN_USER_UID_LEGACY})"
+        )
+        assert SYSTEM_UID_MAX < MIN_USER_UID_ISOLATED, (
+            f"SYSTEM_UID_MAX ({SYSTEM_UID_MAX}) should be below "
+            f"MIN_USER_UID_ISOLATED ({MIN_USER_UID_ISOLATED})"
         )
 
 
@@ -469,14 +602,23 @@ class TestSecurityInvariants:
     def test_uid_ranges_dont_overlap(self) -> None:
         """UID ranges should not overlap to ensure clear separation."""
         # Root: 0
-        # Regular users: 2000-65534
-        # API user: 45045 (outside regular range by design)
+        # System: 1-999
+        # Legacy users: 2000-49999 (still valid, no new allocations)
+        # API user: 45045 (in legacy range but chosen for separation)
+        # Isolated users: 50000-60000 (new allocations)
 
-        assert ROOT_UID < MIN_USER_UID, "Root should be below user range"
+        # Root should be below all user ranges
+        assert ROOT_UID < MIN_USER_UID_LEGACY, "Root should be below legacy user range"
+        assert ROOT_UID < MIN_USER_UID_ISOLATED, "Root should be below isolated user range"
 
-        # Note: API_USER_UID (45045) is technically in the valid range
-        # but is chosen to be well above typical user allocations
-        # and is not generated by user_service
+        # System UIDs should be below all user ranges
+        assert SYSTEM_UID_MAX < MIN_USER_UID_LEGACY, "System UIDs should be below legacy range"
+        assert SYSTEM_UID_MAX < MIN_USER_UID_ISOLATED, "System UIDs should be below isolated range"
+
+        # API user should be below isolated range to avoid collision
+        assert API_USER_UID < MIN_USER_UID_ISOLATED, (
+            "API_USER_UID should be below isolated range"
+        )
 
     def test_no_hardcoded_root_in_sandbox(self, workspace: Path) -> None:
         """SandboxExecutor should not have hardcoded root UID."""
@@ -571,17 +713,20 @@ class TestUIDPassingChain:
         from src.core.permission_profiles import PermissionManager
 
         pm = PermissionManager()
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50100
+        test_gid = 50100
 
         agent = ClaudeAgent(
             config=minimal_agent_config,
             permission_manager=pm,
-            linux_uid=2000,
-            linux_gid=2000,
+            linux_uid=test_uid,
+            linux_gid=test_gid,
             tracer=False,
         )
 
-        assert agent._linux_uid == 2000
-        assert agent._linux_gid == 2000
+        assert agent._linux_uid == test_uid
+        assert agent._linux_gid == test_gid
 
     def test_claude_agent_uid_default_none(self, minimal_agent_config) -> None:
         """ClaudeAgent defaults to None for UID/GID."""
@@ -601,15 +746,18 @@ class TestUIDPassingChain:
     def test_task_execution_params_has_uid_fields(self) -> None:
         """TaskExecutionParams schema has linux_uid and linux_gid fields."""
         from src.core.schemas import TaskExecutionParams
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50200
+        test_gid = 50200
 
         params = TaskExecutionParams(
             task="test",
-            linux_uid=2000,
-            linux_gid=2000,
+            linux_uid=test_uid,
+            linux_gid=test_gid,
         )
 
-        assert params.linux_uid == 2000
-        assert params.linux_gid == 2000
+        assert params.linux_uid == test_uid
+        assert params.linux_gid == test_gid
 
 
 # =============================================================================
@@ -743,10 +891,13 @@ class TestUIDChainIntegration:
     """Integration tests that verify UID flows through the entire chain.
 
     These tests mock at the subprocess level to verify that UID is correctly
-    passed from task_runner → agent_core → executor → ag3ntum_bash → subprocess.
+    passed from task_runner → agent_core → executor → bwrap → subprocess.
 
     CRITICAL: These tests should catch regressions where UID is dropped
     at any point in the chain.
+
+    Note: Privilege dropping is now handled by bwrap's --uid/--gid flags
+    instead of preexec_fn for improved security.
     """
 
     @pytest.mark.asyncio
@@ -763,8 +914,9 @@ class TestUIDChainIntegration:
         from src.core.sandbox import SandboxConfig, SandboxMount
 
         pm = PermissionManager()
-        test_uid = 2500
-        test_gid = 2500
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50500
+        test_gid = 50500
 
         agent = ClaudeAgent(
             config=minimal_agent_config,
@@ -801,16 +953,17 @@ class TestUIDChainIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_uid_flows_to_subprocess_preexec_fn(self, workspace: Path) -> None:
-        """Verify UID flows all the way to subprocess preexec_fn.
+    async def test_uid_flows_to_bwrap_command(self, workspace: Path) -> None:
+        """Verify UID flows all the way to bwrap --uid/--gid flags.
 
-        This tests the full chain: executor → ag3ntum_bash → subprocess.
-        The preexec_fn should use the correct UID for privilege dropping.
+        This tests the full chain: executor → bwrap command.
+        Bwrap should include --uid and --gid flags for privilege dropping.
         """
         from src.core.sandbox import execute_sandboxed_command, SandboxConfig, SandboxMount, SandboxExecutor
 
-        test_uid = 2600
-        test_gid = 2600
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50600
+        test_gid = 50600
 
         config = SandboxConfig(
             enabled=True,
@@ -824,16 +977,16 @@ class TestUIDChainIntegration:
         )
         executor = SandboxExecutor(config, linux_uid=test_uid, linux_gid=test_gid)
 
-        captured_preexec_fn = None
+        captured_args = None
 
         async def capture_subprocess_call(*args, **kwargs):
-            """Capture the preexec_fn passed to subprocess."""
-            nonlocal captured_preexec_fn
-            captured_preexec_fn = kwargs.get("preexec_fn")
+            """Capture the bwrap command args."""
+            nonlocal captured_args
+            captured_args = args
 
             # Return a mock process
             mock_process = AsyncMock()
-            mock_process.communicate.return_value = (b"2600\n", b"")
+            mock_process.communicate.return_value = (f"{test_uid}\n".encode(), b"")
             mock_process.returncode = 0
             return mock_process
 
@@ -842,16 +995,25 @@ class TestUIDChainIntegration:
                 executor, "id -u", allow_network=False, timeout=10
             )
 
-        # CRITICAL ASSERTION: preexec_fn must be set (privilege dropping enabled)
-        assert captured_preexec_fn is not None, (
-            "UID chain broken: preexec_fn is None but executor has linux_uid. "
-            "This indicates execute_sandboxed_command is not creating demote function."
-        )
+        # CRITICAL ASSERTION: bwrap command must include --uid and --gid
+        assert captured_args is not None, "subprocess should have been called"
+        cmd_str = " ".join(str(arg) for arg in captured_args)
 
-        # Verify the preexec_fn would drop to correct UID
-        # We can't actually call it (requires root), but we verify it was created
-        assert callable(captured_preexec_fn), (
-            "preexec_fn should be a callable demote function"
+        assert f"--uid" in cmd_str, (
+            "UID chain broken: bwrap command missing --uid flag. "
+            "This indicates execute_sandboxed_command is not setting UID."
+        )
+        assert str(test_uid) in cmd_str, (
+            f"UID chain broken: bwrap command missing UID value {test_uid}. "
+            f"Command: {cmd_str[:200]}"
+        )
+        assert f"--gid" in cmd_str, (
+            "GID chain broken: bwrap command missing --gid flag. "
+            "This indicates execute_sandboxed_command is not setting GID."
+        )
+        assert str(test_gid) in cmd_str, (
+            f"GID chain broken: bwrap command missing GID value {test_gid}. "
+            f"Command: {cmd_str[:200]}"
         )
 
     def test_ag3ntum_bash_tool_binds_sandbox_executor(self, workspace: Path) -> None:
@@ -859,13 +1021,14 @@ class TestUIDChainIntegration:
 
         This verifies the tool factory correctly accepts the executor parameter.
         The actual UID flow through to subprocess is tested by
-        test_uid_flows_to_subprocess_preexec_fn which uses execute_sandboxed_command.
+        test_uid_flows_to_bwrap_command which uses execute_sandboxed_command.
         """
         from tools.ag3ntum.ag3ntum_bash.tool import create_bash_tool
         from src.core.sandbox import SandboxConfig, SandboxMount, SandboxExecutor
 
-        test_uid = 2700
-        test_gid = 2700
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50700
+        test_gid = 50700
 
         config = SandboxConfig(
             enabled=True,
@@ -908,13 +1071,16 @@ class TestUIDChainIntegration:
         from src.core.permission_profiles import PermissionManager
 
         pm = PermissionManager()
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50800
+        test_gid = 50800
 
         # Agent created with UID
         agent = ClaudeAgent(
             config=minimal_agent_config,
             permission_manager=pm,
-            linux_uid=2000,
-            linux_gid=2000,
+            linux_uid=test_uid,
+            linux_gid=test_gid,
             tracer=False,
         )
 
@@ -933,6 +1099,9 @@ class TestUIDChainIntegration:
         """
         from src.core.schemas import TaskExecutionParams
         import inspect
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 50900
+        test_gid = 50900
 
         # Verify the schema has linux_uid and linux_gid fields
         sig = inspect.signature(TaskExecutionParams)
@@ -948,15 +1117,18 @@ class TestUIDChainIntegration:
         # Verify they can hold integer values
         test_params = TaskExecutionParams(
             task="test",
-            linux_uid=2000,
-            linux_gid=2000,
+            linux_uid=test_uid,
+            linux_gid=test_gid,
         )
-        assert test_params.linux_uid == 2000
-        assert test_params.linux_gid == 2000
+        assert test_params.linux_uid == test_uid
+        assert test_params.linux_gid == test_gid
 
     def test_regression_detection_sandbox_executor_uid_fields(self, workspace: Path) -> None:
         """Regression test: Detect if SandboxExecutor loses UID fields."""
         from src.core.sandbox import SandboxConfig, SandboxMount, SandboxExecutor
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 51000
+        test_gid = 51000
 
         config = SandboxConfig(
             enabled=True,
@@ -970,7 +1142,7 @@ class TestUIDChainIntegration:
         )
 
         # Verify SandboxExecutor accepts and stores UID/GID
-        executor = SandboxExecutor(config, linux_uid=2000, linux_gid=2000)
+        executor = SandboxExecutor(config, linux_uid=test_uid, linux_gid=test_gid)
 
         assert hasattr(executor, 'linux_uid'), (
             "REGRESSION: SandboxExecutor missing linux_uid attribute"
@@ -978,10 +1150,10 @@ class TestUIDChainIntegration:
         assert hasattr(executor, 'linux_gid'), (
             "REGRESSION: SandboxExecutor missing linux_gid attribute"
         )
-        assert executor.linux_uid == 2000, (
+        assert executor.linux_uid == test_uid, (
             "REGRESSION: SandboxExecutor not storing linux_uid correctly"
         )
-        assert executor.linux_gid == 2000, (
+        assert executor.linux_gid == test_gid, (
             "REGRESSION: SandboxExecutor not storing linux_gid correctly"
         )
 
@@ -995,8 +1167,12 @@ class TestUIDChainIntegration:
                 "This function is required by ag3ntum_bash for privilege dropping."
             )
 
+        # Use UID in valid isolated range (50000-60000)
+        test_uid = 51100
+        test_gid = 51100
+
         # Verify it creates callable
-        fn = create_demote_fn(2000, 2000)
+        fn = create_demote_fn(test_uid, test_gid)
         assert callable(fn), "create_demote_fn should return a callable"
 
     @pytest.mark.asyncio

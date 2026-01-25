@@ -79,44 +79,59 @@ class TestUsernameValidation:
 
 
 class TestUIDGeneration:
-    """Test Linux UID generation."""
+    """Test Linux UID generation.
+
+    UIDs are allocated based on the configured mode:
+    - ISOLATED mode (default): UIDs from 50000-60000
+    - DIRECT mode: UIDs from 1000-65533
+
+    Legacy UIDs (2000-49999) from older installations are still valid
+    but new allocations start at 50000 in isolated mode.
+    """
 
     @pytest.fixture
     def user_service(self) -> UserService:
         return UserService()
 
     @pytest.mark.asyncio
-    async def test_first_uid_is_2000(self, user_service: UserService) -> None:
-        """First generated UID should be 2000."""
+    async def test_first_uid_is_50000_isolated_mode(self, user_service: UserService) -> None:
+        """First generated UID should be 50000 in isolated mode (default)."""
         mock_session = AsyncMock(spec=AsyncSession)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
 
         uid = await user_service._generate_next_uid(mock_session)
-        assert uid == 2000
+        # Default isolated mode starts at 50000
+        assert uid == 50000
 
     @pytest.mark.asyncio
     async def test_uid_increments_from_existing(self, user_service: UserService) -> None:
-        """UID increments from highest existing UID."""
+        """UID increments from highest existing UID in range."""
         mock_session = AsyncMock(spec=AsyncSession)
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = 2005
+        mock_result.scalar_one_or_none.return_value = 50005
         mock_session.execute.return_value = mock_result
 
         uid = await user_service._generate_next_uid(mock_session)
-        assert uid == 2006
+        assert uid == 50006
 
     @pytest.mark.asyncio
-    async def test_uid_starts_at_2000_if_legacy_low_uid(self, user_service: UserService) -> None:
-        """UID starts at 2000 if existing UIDs are below 2000 (legacy)."""
+    async def test_uid_starts_at_range_min_if_no_existing_in_range(self, user_service: UserService) -> None:
+        """UID starts at range minimum if no existing UIDs in current range.
+
+        Even if legacy UIDs exist below the range, new allocations start
+        at the configured minimum (50000 for isolated mode).
+        """
         mock_session = AsyncMock(spec=AsyncSession)
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = 1500  # Legacy UID
+        # Query for UIDs in 50000-60000 range returns None (no existing users in range)
+        mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
 
         uid = await user_service._generate_next_uid(mock_session)
-        assert uid == 2000
+        # Should start at range minimum regardless of legacy UIDs
+        assert uid == 50000
 
 
 class TestCreateUser:
