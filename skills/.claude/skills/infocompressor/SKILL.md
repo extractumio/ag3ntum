@@ -1,6 +1,10 @@
 ---
 name: infocompressor
-description: Use information compressor when transforming lengthy material—docs, reports, transcripts—into compact reference formats preserving all critical data. Ideal for quick-lookup summaries, knowledge bases, or constrained contexts where completeness matters as much as brevity.
+description: |
+  Use when the user needs to compress, condense, or summarize lengthy content while preserving ALL
+  critical details. Triggers: "compress this", "make it shorter but keep everything", "create a
+  cheat sheet", "dense summary", "reference format", "compact version", "information-dense". NOT
+  for casual summaries—only when user explicitly wants maximum density with zero data loss.
 ---
 # Information Compression Framework
 
