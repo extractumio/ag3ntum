@@ -35,6 +35,11 @@ The SDK provides a native `Skill` tool that:
 
 To see available skills, use the Skill tool or list `.claude/skills/`.
 
+**IMPORTANT: Skills vs Subagents**
+- Skills are invoked using the `Skill` tool with `skill: "<skill-name>"`
+- Skills are NOT subagent types - do NOT use skill names with the `Task` tool
+- Example: To run deep research, use `Skill` tool with `skill: "deep-research"`, NOT `Task` tool with `subagent_type: "deep-research"`
+
 ## Slash Commands
 
 Skills can be invoked using slash command syntax:

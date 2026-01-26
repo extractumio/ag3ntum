@@ -192,6 +192,7 @@ async def execute_agent_task(
         fork_session=params.fork_session,
         session_id=params.session_id,  # Use pre-generated session ID if provided
         username=params.username,  # For sandbox mount path substitution
+        session_context=params.session_context,  # Pass session context if provided
     )
 
     return result

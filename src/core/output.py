@@ -286,9 +286,7 @@ def format_result(result: Any, session_id: Optional[str] = None) -> str:
         comments = result.comments
         output = result.output
         result_files = result.result_files or []
-        sid = session_id
-        if result.session_info:
-            sid = result.session_info.session_id
+        sid = session_id or result.session_id
 
     lines = [f"Status: {status}"]
 
@@ -557,16 +555,8 @@ def print_result_box(result: Any, session_id: Optional[str] = None) -> None:
                 cache_line = " • " + " | ".join(cache_parts)
                 _print_box_line(cache_line, inner_width, status_color, C.GRAY)
 
-    # Session ID
-    session_info = _get_result_attr(result, "session_info")
-    if session_info:
-        sid = (
-            session_info.session_id
-            if hasattr(session_info, "session_id")
-            else session_info.get("session_id")
-        )
-    else:
-        sid = session_id or _get_result_attr(result, "session_id")
+    # Session ID - check session_id directly (session_info was removed)
+    sid = session_id or _get_result_attr(result, "session_id")
 
     if sid:
         session_line = f" Session: {sid}"
@@ -604,7 +594,7 @@ def print_sessions_table(sessions: list[Any]) -> None:
     """
     Print a formatted table of sessions.
 
-    Handles both SessionInfo objects and dictionaries from API responses.
+    Handles both database Session models and dictionaries from API responses.
 
     Args:
         sessions: List of session objects or dicts with id, status, created_at, working_dir.
@@ -623,7 +613,7 @@ def print_sessions_table(sessions: list[Any]) -> None:
     print("-" * 100)
 
     for session in sessions:
-        # Handle both SessionInfo objects and dicts
+        # Handle both database Session models and dicts
         if isinstance(session, dict):
             session_id = session.get("id", session.get("session_id", ""))
             status = session.get("status", "")
@@ -632,10 +622,16 @@ def print_sessions_table(sessions: list[Any]) -> None:
                 created = created[:19].replace("T", " ")
             working_dir = session.get("working_dir", "") or ""
         else:
-            session_id = session.session_id
+            # Database Session model has 'id', SessionContext has 'session_id'
+            session_id = getattr(session, "id", None) or getattr(session, "session_id", "")
             status = str(session.status)
-            created = session.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            working_dir = session.working_dir
+            created_at = session.created_at
+            created = (
+                created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if hasattr(created_at, "strftime")
+                else str(created_at)[:19].replace("T", " ")
+            )
+            working_dir = getattr(session, "working_dir", "") or ""
 
         # Truncate long working directory paths
         if len(working_dir) > WORKING_DIR_TRUNCATE_LENGTH:

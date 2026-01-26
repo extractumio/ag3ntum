@@ -1,17 +1,18 @@
 """
 Session service for Ag3ntum API.
 
-Handles session CRUD operations and synchronization between
-the database and file-based SessionManager.
+Handles session CRUD operations using the SQLite database as the
+authoritative source for all session metadata.
 
 Implements robustness features:
 - Error handling with proper rollback
 - Retry logic for transient database failures
-- Atomic session creation (database + file system)
+- Atomic session creation (database + file system directory)
 - Session ID format validation
 - Cancellation flag persistence
 """
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -135,7 +136,8 @@ class SessionService:
     Service for session management.
 
     Provides methods for creating, querying, and updating sessions.
-    Synchronizes between SQLite database and file-based session storage.
+    All session metadata is stored in the SQLite database.
+    File system is only used for session directories (agent.jsonl, workspace/).
 
     Features:
     - Atomic session creation with rollback on failure
@@ -168,7 +170,7 @@ class SessionService:
         """
         Create a new session atomically.
 
-        Creates both a database record and the file-based session folder.
+        Creates both a database record and the session directory.
         If either operation fails, both are rolled back.
 
         Args:
@@ -192,12 +194,9 @@ class SessionService:
         try:
             # Create SessionManager for this user's sessions directory
             session_manager = SessionManager(sessions_dir)
-            
-            # Create file-based session first (creates folder structure)
-            session_manager.create_session(
-                working_dir=str(sessions_dir),
-                session_id=session_id
-            )
+
+            # Create session directory
+            session_manager.create_session_directory(session_id)
             file_session_created = True
 
             # Extract username from sessions_dir (/users/{username}/sessions)
@@ -206,7 +205,7 @@ class SessionService:
             # Set up external mount symlinks (for File Browser UI and agent tools)
             session_manager.setup_external_mounts(session_id, username)
 
-            # Create database record
+            # Create database record (authoritative source for all metadata)
             db_session = Session(
                 id=session_id,
                 user_id=user_id,
@@ -224,7 +223,7 @@ class SessionService:
                 # Database commit failed - rollback file-based session
                 logger.error(
                     f"Database commit failed for session {session_id}, "
-                    f"rolling back file-based session: {db_error}"
+                    f"rolling back session directory: {db_error}"
                 )
                 await db.rollback()
                 raise SessionCreationError(
@@ -235,12 +234,12 @@ class SessionService:
             return db_session
 
         except SessionCreationError:
-            # Clean up file-based session on database failure
+            # Clean up session directory on database failure
             if file_session_created:
                 self._cleanup_file_session(session_id, sessions_dir)
             raise
         except Exception as e:
-            # Clean up file-based session on any other failure
+            # Clean up session directory on any other failure
             if file_session_created:
                 self._cleanup_file_session(session_id, sessions_dir)
             logger.error(f"Session creation failed: {e}")
@@ -248,7 +247,7 @@ class SessionService:
 
     def _cleanup_file_session(self, session_id: str, sessions_dir: Path) -> None:
         """
-        Clean up a file-based session on creation failure.
+        Clean up a session directory on creation failure.
 
         Args:
             session_id: The session ID to clean up.
@@ -256,7 +255,7 @@ class SessionService:
         """
         try:
             session_dir = sessions_dir / session_id
-            
+
             if session_dir.exists():
                 shutil.rmtree(session_dir)
                 logger.info(f"Cleaned up orphaned session directory: {session_id}")
@@ -392,6 +391,257 @@ class SessionService:
 
         return session
 
+    async def delete_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+        sessions_dir: Optional[Path] = None,
+    ) -> bool:
+        """
+        Delete a session completely (database + files).
+
+        Only allows deletion of non-running sessions (pending, queued, cancelled, etc.).
+        Running sessions must be cancelled first.
+
+        Args:
+            db: Database session.
+            session_id: The session ID to delete.
+            user_id: User ID for authorization check.
+            sessions_dir: Path to sessions directory. If None, uses config default.
+
+        Returns:
+            True if deleted successfully.
+
+        Raises:
+            SessionNotFoundError: If session doesn't exist or doesn't belong to user.
+            SessionServiceError: If session is running (must cancel first).
+        """
+        validate_session_id(session_id)
+
+        # Fetch the session
+        session = await self.get_session(db, session_id, user_id)
+        if not session:
+            raise SessionNotFoundError(f"Session not found: {session_id}")
+
+        # Don't allow deleting running sessions
+        if session.status == "running":
+            raise SessionServiceError(
+                "Cannot delete running session. Cancel it first."
+            )
+
+        # Delete from events table first (foreign key constraint)
+        from ..db.models import Event
+        await db.execute(
+            select(Event).where(Event.session_id == session_id)
+        )
+        # Actually delete events
+        from sqlalchemy import delete as sa_delete
+        await db.execute(
+            sa_delete(Event).where(Event.session_id == session_id)
+        )
+
+        # Delete from sessions table
+        await db.delete(session)
+        await db.commit()
+
+        # Clean up in-memory cancellation flag
+        self._cancellation_flags.pop(session_id, None)
+
+        # Delete session directory from filesystem
+        if sessions_dir is None:
+            sessions_dir = SESSIONS_DIR
+        session_dir = sessions_dir / session_id
+        if session_dir.exists():
+            try:
+                shutil.rmtree(session_dir)
+                logger.info(f"Deleted session directory: {session_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to delete session directory {session_dir}: {e}")
+                # Don't fail the operation - DB is already cleaned up
+
+        logger.info(f"Deleted session {session_id} for user {user_id}")
+        return True
+
+    @with_db_retry()
+    async def update_completion_stats(
+        self,
+        db: AsyncSession,
+        session: Session,
+        status: str,
+        num_turns: int,
+        duration_ms: int,
+        cost_usd: float,
+        usage: dict,
+        model: Optional[str] = None,
+    ) -> Session:
+        """
+        Update session with completion stats and add to cumulative totals.
+
+        Called when an agent execution completes to record the run stats
+        and update cumulative totals across resumptions.
+
+        Args:
+            db: Database session.
+            session: The session to update.
+            status: Final status (complete, failed, etc.)
+            num_turns: Number of turns in this run.
+            duration_ms: Duration of this run in milliseconds.
+            cost_usd: Cost of this run in USD.
+            usage: Token usage dict with input_tokens, output_tokens, etc.
+            model: Model used in this run.
+
+        Returns:
+            The updated session.
+        """
+        # Current run stats
+        session.status = status
+        session.num_turns = num_turns
+        session.duration_ms = duration_ms
+        session.total_cost_usd = cost_usd
+        session.completed_at = datetime.now(timezone.utc)
+
+        if model:
+            session.model = model
+
+        # Add to cumulative totals
+        session.cumulative_turns += num_turns
+        session.cumulative_duration_ms += duration_ms
+        session.cumulative_cost_usd += cost_usd
+        session.cumulative_input_tokens += usage.get("input_tokens", 0)
+        session.cumulative_output_tokens += usage.get("output_tokens", 0)
+        session.cumulative_cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+        session.cumulative_cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+
+        session.updated_at = datetime.now(timezone.utc)
+
+        try:
+            await db.commit()
+            await db.refresh(session)
+        except Exception as e:
+            logger.error(f"Failed to update completion stats for {session.id}: {e}")
+            await db.rollback()
+            raise
+
+        logger.info(
+            f"Updated session {session.id}: status={status}, turns={num_turns}, "
+            f"cost=${cost_usd:.4f}, cumulative_cost=${session.cumulative_cost_usd:.4f}"
+        )
+        return session
+
+    @with_db_retry()
+    async def add_checkpoint(
+        self,
+        db: AsyncSession,
+        session: Session,
+        checkpoint: dict,
+    ) -> Session:
+        """
+        Add a checkpoint to the session's checkpoints_json.
+
+        Args:
+            db: Database session.
+            session: The session to add the checkpoint to.
+            checkpoint: Checkpoint dict with uuid, type, description, etc.
+
+        Returns:
+            The updated session.
+        """
+        checkpoints = json.loads(session.checkpoints_json or "[]")
+        checkpoints.append(checkpoint)
+        session.checkpoints_json = json.dumps(checkpoints)
+        session.updated_at = datetime.now(timezone.utc)
+
+        try:
+            await db.commit()
+            await db.refresh(session)
+        except Exception as e:
+            logger.error(f"Failed to add checkpoint to {session.id}: {e}")
+            await db.rollback()
+            raise
+
+        logger.debug(f"Added checkpoint to session {session.id}")
+        return session
+
+    @with_db_retry()
+    async def clear_checkpoints_after(
+        self,
+        db: AsyncSession,
+        session: Session,
+        checkpoint_uuid: str,
+    ) -> int:
+        """
+        Remove all checkpoints after a specific checkpoint.
+
+        Used when rewinding to a checkpoint - subsequent checkpoints
+        become invalid as the file state has changed.
+
+        Args:
+            db: Database session.
+            session: The session to modify.
+            checkpoint_uuid: The UUID of the checkpoint to keep.
+
+        Returns:
+            Number of checkpoints removed.
+        """
+        checkpoints = json.loads(session.checkpoints_json or "[]")
+        original_count = len(checkpoints)
+
+        keep_checkpoints = []
+        for cp in checkpoints:
+            keep_checkpoints.append(cp)
+            if cp.get("uuid") == checkpoint_uuid:
+                break
+
+        removed = original_count - len(keep_checkpoints)
+
+        if removed > 0:
+            session.checkpoints_json = json.dumps(keep_checkpoints)
+            session.updated_at = datetime.now(timezone.utc)
+
+            try:
+                await db.commit()
+                await db.refresh(session)
+            except Exception as e:
+                logger.error(f"Failed to clear checkpoints for {session.id}: {e}")
+                await db.rollback()
+                raise
+
+            logger.info(f"Cleared {removed} checkpoints after {checkpoint_uuid}")
+
+        return removed
+
+    async def get_session_for_resume(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+    ) -> Optional[dict]:
+        """
+        Get session data needed for resumption.
+
+        Args:
+            db: Database session.
+            session_id: The session ID.
+            user_id: The user ID.
+
+        Returns:
+            Dict with claude_session_id, cumulative stats, and checkpoints,
+            or None if session not found.
+        """
+        session = await self.get_session(db, session_id, user_id)
+        if not session:
+            return None
+
+        return {
+            "claude_session_id": session.claude_session_id,
+            "cumulative_turns": session.cumulative_turns,
+            "cumulative_duration_ms": session.cumulative_duration_ms,
+            "cumulative_cost_usd": session.cumulative_cost_usd,
+            "checkpoints": json.loads(session.checkpoints_json or "[]"),
+            "file_checkpointing_enabled": session.file_checkpointing_enabled,
+        }
+
     @with_db_retry()
     async def request_cancellation(
         self,
@@ -457,70 +707,6 @@ class SessionService:
             raise FileNotFoundError("File not found")
 
         return candidate
-
-    def get_session_info(self, session_id: str) -> dict:
-        """
-        Get the file-based session info (session_info.json).
-
-        This contains token usage, cumulative stats, and other metadata
-        not stored in the database.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            Session info as a dictionary, or empty dict if not found.
-        """
-        try:
-            validate_session_id(session_id)
-            session_info = self._session_manager.load_session(session_id)
-            return session_info.model_dump()
-        except InvalidSessionIdError:
-            logger.debug(f"Invalid session ID format: {session_id}")
-            return {}
-        except Exception as e:
-            # Lower to debug - file-based session may be in user-specific directory
-            logger.debug(f"Failed to load session info for {session_id}: {e}")
-            return {}
-
-    def update_resume_id(
-        self, session_id: str, resume_id: str, sessions_base_dir: Optional[Path] = None
-    ) -> None:
-        """
-        Persist a Claude resume_id for a session.
-
-        Args:
-            session_id: The local session ID.
-            resume_id: Claude session ID to store.
-            sessions_base_dir: Optional user-specific sessions directory.
-        """
-        try:
-            validate_session_id(session_id)
-        except InvalidSessionIdError as e:
-            logger.warning(f"Invalid session ID in update_resume_id: {e}")
-            return
-
-        if not resume_id or not isinstance(resume_id, str):
-            logger.warning(f"Invalid resume_id for {session_id}: {resume_id}")
-            return
-
-        try:
-            # Use provided sessions_base_dir or default
-            manager = (
-                SessionManager(sessions_base_dir) if sessions_base_dir
-                else self._session_manager
-            )
-            session_info = manager.load_session(session_id)
-            if session_info.resume_id == resume_id:
-                return
-            manager.update_session(
-                session_info,
-                resume_id=resume_id,
-            )
-            logger.debug(f"Updated resume_id for {session_id}")
-        except Exception as e:
-            # Lower to debug level - file-based update is not critical when DB is primary
-            logger.debug(f"Failed to update resume_id for {session_id}: {e}")
 
     def is_cancellation_requested(self, session_id: str) -> bool:
         """

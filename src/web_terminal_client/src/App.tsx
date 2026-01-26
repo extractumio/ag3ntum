@@ -5,6 +5,7 @@ import YAML from 'yaml';
 import {
   cancelSession,
   continueTask,
+  deleteSession,
   downloadFile,
   getConfig,
   getFileContent,
@@ -41,7 +42,7 @@ import {
 } from './FileViewer';
 import { renderMarkdownElements } from './MarkdownRenderer';
 import { ProtectedRoute } from './ProtectedRoute';
-import { connectSSE } from './sse';
+import { connectSSE, connectUserEventsSSE, type UserEvent } from './sse';
 import type { AppConfig, SessionListResponse, SessionResponse, SkillInfo, TerminalEvent } from './types';
 import type {
   AskUserQuestionInput,
@@ -63,10 +64,20 @@ import {
   EyeIcon,
   FolderIcon,
   InlineStreamSpinner,
+  Popup,
   PulsingCircleSpinner,
+  QueueIndicator,
+  SessionListTab,
   StatusSpinner,
   TrailingWaitSpinner,
+  useSessionBadges,
+  useToast,
 } from './components';
+
+// Terminal statuses that should not be overwritten by stale server data or events.
+// This set is used throughout session state management to prevent race conditions
+// where the server hasn't persisted a terminal status yet but the frontend already knows.
+const TERMINAL_STATUSES = new Set(['complete', 'completed', 'partial', 'failed', 'cancelled', 'canceled']);
 import { useElapsedTime, useSpinnerFrame } from './hooks';
 import {
   blockAltKeyHotkeys,
@@ -1079,6 +1090,12 @@ function SystemEventsPanel({
                 <span className="system-event-profile">{event.profileName}</span>
               </>
             )}
+            {event.eventType === 'queue_started' && (
+              <>
+                <span className="system-event-badge-info">▶ STARTED</span>
+                <span className="system-event-message">{event.message}</span>
+              </>
+            )}
           </div>
         ))}
       </div>
@@ -1372,7 +1389,7 @@ function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
-  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
+  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
   const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
@@ -1943,6 +1960,9 @@ function InputField({
 
 function StatusFooter({
   isRunning,
+  isQueued,
+  queuePosition,
+  isAutoResume,
   statusLabel,
   statusClass,
   stats,
@@ -1950,6 +1970,9 @@ function StatusFooter({
   startTime,
 }: {
   isRunning: boolean;
+  isQueued: boolean;
+  queuePosition: number | null;
+  isAutoResume: boolean;
   statusLabel: string;
   statusClass: string;
   stats: {
@@ -1980,7 +2003,9 @@ function StatusFooter({
         </span>
         <span className="status-divider">│</span>
         <span className={`status-state ${statusClass}`}>
-          {isRunning ? (
+          {isQueued ? (
+            <QueueIndicator position={queuePosition ?? 0} isAutoResume={isAutoResume} />
+          ) : isRunning ? (
             <>
               <StatusSpinner /> Running...{elapsedTime && ` (${elapsedTime})`}
             </>
@@ -2070,6 +2095,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [inputValue, setInputValue] = useState('');
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState<string | null>(null);
+  // Session error popup state (for prominent error display with navigation)
+  const [sessionErrorPopup, setSessionErrorPopup] = useState<{
+    message: string;
+    sessionId: string;
+  } | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting' | 'polling' | 'degraded'>('connected');
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
@@ -2085,8 +2115,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [fileExplorerVisible, setFileExplorerVisible] = useState(false);
   // New layout state
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
-  const [rightPanelMode, setRightPanelMode] = useState<'details' | 'explorer'>('details');
+  const [rightPanelMode, setRightPanelMode] = useState<'details' | 'explorer' | 'sessions'>('details');
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  // Session badges for non-current session status changes
+  const { badges: sessionBadges, addBadge: addSessionBadge, clearBadge: clearSessionBadge, badgeCounts: sessionBadgeCounts } = useSessionBadges(currentSession?.id ?? null);
   // Resizable panel state
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
     const stored = localStorage.getItem('rightPanelWidth');
@@ -2120,6 +2152,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     filesWithSecrets: number;
     totalSecrets: number;
   } | null>(null);
+
+  // Toast notifications
+  const toast = useToast();
 
   const isMobile = useIsMobile();
 
@@ -2179,13 +2214,75 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     }
 
     listSessionsCached(config.api.base_url, token)
-      .then((response: SessionListResponse) => setSessions(response.sessions))
+      .then((response: SessionListResponse) => {
+        // Merge server sessions with local state using defensive merging:
+        // 1. Terminal statuses are "sticky" - can't be reverted to non-terminal
+        // 2. Newer local timestamps take precedence over stale server data
+        setSessions((prevSessions) => {
+          const localSessionMap = new Map<string, SessionResponse>();
+          for (const session of prevSessions) {
+            localSessionMap.set(session.id, session);
+          }
+
+          return response.sessions.map((serverSession) => {
+            const localSession = localSessionMap.get(serverSession.id);
+            if (!localSession) {
+              // New session from server, use server data
+              return serverSession;
+            }
+
+            // RULE 1: If local is terminal and server is non-terminal, keep local
+            // (Server hasn't caught up to the terminal event yet)
+            if (TERMINAL_STATUSES.has(localSession.status) && !TERMINAL_STATUSES.has(serverSession.status)) {
+              return localSession;
+            }
+
+            // RULE 2: If local has newer timestamp and is terminal, keep local
+            // (Local state was updated more recently and reached a final state)
+            const localTime = new Date(localSession.updated_at).getTime();
+            const serverTime = new Date(serverSession.updated_at).getTime();
+            if (localTime > serverTime && TERMINAL_STATUSES.has(localSession.status)) {
+              return localSession;
+            }
+
+            // Otherwise, use server data (it's fresher or both are terminal)
+            return serverSession;
+          });
+        });
+      })
       .catch((err: Error) => setError(`Failed to load sessions: ${err.message}`));
   }, [config, token]);
 
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
+
+  // Sync sessions[] from currentSession when currentSession has terminal status but sessions[] doesn't
+  // This is a ONE-WAY sync: currentSession → sessions[], never the reverse.
+  //
+  // Why one-way only?
+  // - When user clicks "Continue" on a completed session, handleSubmit sets currentSession to 'running'
+  // - If we synced FROM sessions[] TO currentSession, we'd overwrite the intentional 'running' back to 'completed'
+  // - Terminal events always come through Session SSE which updates BOTH currentSession and sessions[]
+  // - So there's no legitimate case where sessions[] has newer terminal info than currentSession
+  useEffect(() => {
+    if (!currentSession) return;
+
+    const matchingSession = sessions.find((s) => s.id === currentSession.id);
+    if (!matchingSession) return;
+
+    // Only sync if currentSession is terminal and sessions[] is not
+    // This handles: User Events SSE sent stale 'running' status for current session
+    if (
+      matchingSession.status !== currentSession.status &&
+      TERMINAL_STATUSES.has(currentSession.status) &&
+      !TERMINAL_STATUSES.has(matchingSession.status)
+    ) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === currentSession.id ? { ...s, status: currentSession.status } : s))
+      );
+    }
+  }, [currentSession, sessions]);
 
   // Load session from URL on mount
   useEffect(() => {
@@ -2202,6 +2299,120 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       }
     };
   }, []);
+
+  // User-level SSE subscription for cross-session updates (badges, status changes)
+  const userEventsCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!config || !token) {
+      return;
+    }
+
+    // Clean up any existing subscription
+    if (userEventsCleanupRef.current) {
+      userEventsCleanupRef.current();
+    }
+
+    const cleanup = connectUserEventsSSE({
+      baseUrl: config.api.base_url,
+      token,
+      onEvent: (event: UserEvent) => {
+        // Handle specific session status change events
+        if (event.type === 'session_status_change') {
+          const change = event.data as {
+            id: string;
+            old_status: string;
+            new_status: string;
+            queue_position?: number;
+          } | undefined;
+
+          if (change) {
+            // Update the session in our list, with terminal status protection
+            setSessions((prevSessions) =>
+              prevSessions.map((session) => {
+                if (session.id !== change.id) return session;
+
+                // CRITICAL: Don't overwrite terminal status with non-terminal status
+                // This prevents race conditions where server sends stale status updates
+                if (TERMINAL_STATUSES.has(session.status) && !TERMINAL_STATUSES.has(change.new_status)) {
+                  return session;
+                }
+
+                return { ...session, status: change.new_status, queue_position: change.queue_position ?? null };
+              })
+            );
+
+            // Add badge for status changes on non-current sessions
+            if (change.id !== currentSession?.id) {
+              if (change.new_status === 'complete' || change.new_status === 'completed') {
+                addSessionBadge(change.id, 'completed');
+              } else if (change.new_status === 'failed') {
+                addSessionBadge(change.id, 'failed');
+              } else if (change.new_status === 'waiting_for_input') {
+                addSessionBadge(change.id, 'waiting');
+              }
+            }
+          }
+        }
+
+        // Handle bulk session list updates
+        if (event.type === 'session_list_update') {
+          // Update sessions list with new data
+          const sessionList = event.data?.sessions as Array<{
+            id: string;
+            status: string;
+            queue_position?: number;
+            is_auto_resume?: boolean;
+          }> | undefined;
+
+          if (sessionList) {
+            // Update session statuses in our local list, with terminal status protection
+            setSessions((prevSessions) =>
+              prevSessions.map((session) => {
+                const updated = sessionList.find((s) => s.id === session.id);
+                if (!updated) return session;
+
+                // CRITICAL: Don't overwrite terminal status with non-terminal status
+                // This prevents race conditions where server sends stale status updates
+                if (TERMINAL_STATUSES.has(session.status) && !TERMINAL_STATUSES.has(updated.status)) {
+                  return session;
+                }
+
+                // Check if status changed for badge purposes
+                if (session.status !== updated.status && session.id !== currentSession?.id) {
+                  // Add badge based on new status
+                  if (updated.status === 'complete' || updated.status === 'completed') {
+                    addSessionBadge(session.id, 'completed');
+                  } else if (updated.status === 'failed') {
+                    addSessionBadge(session.id, 'failed');
+                  } else if (updated.status === 'waiting_for_input') {
+                    addSessionBadge(session.id, 'waiting');
+                  }
+                }
+                return {
+                  ...session,
+                  status: updated.status,
+                  queue_position: updated.queue_position ?? null,
+                  is_auto_resume: updated.is_auto_resume ?? false,
+                };
+              })
+            );
+          }
+        }
+      },
+      onError: (error: Error) => {
+        console.warn('[UserEventsSSE] Error:', error.message);
+      },
+    });
+
+    userEventsCleanupRef.current = cleanup;
+
+    return () => {
+      if (userEventsCleanupRef.current) {
+        userEventsCleanupRef.current();
+        userEventsCleanupRef.current = null;
+      }
+    };
+  }, [config, token, currentSession?.id, addSessionBadge]);
 
   const appendEvent = useCallback(
     (event: TerminalEvent) => {
@@ -2300,20 +2511,23 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         setStatus(normalizedStatus);
         setRunningStartTime(null);
 
+        const completedAt = new Date().toISOString();
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: normalizedStatus,
-                completed_at: new Date().toISOString(),
+                completed_at: completedAt,
+                updated_at: completedAt,
                 num_turns: prev.num_turns + Number(event.data.num_turns ?? 0),
               }
             : null
         );
+        // Update sessions list with timestamps so elapsed timer stops immediately
         setSessions((prev) =>
           prev.map((session) =>
             session.id === currentSession?.id
-              ? { ...session, status: normalizedStatus }
+              ? { ...session, status: normalizedStatus, completed_at: completedAt, updated_at: completedAt }
               : session
           )
         );
@@ -2325,21 +2539,81 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
       if (event.type === 'cancelled') {
         setStatus('cancelled');
+        setRunningStartTime(null);
         // Check if session is resumable (has resume_id established)
         const resumable = Boolean(event.data?.resumable);
+        const cancelledAt = new Date().toISOString();
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: 'cancelled',
-                completed_at: new Date().toISOString(),
+                completed_at: cancelledAt,
+                updated_at: cancelledAt,
                 resumable,
               }
             : null
         );
+        // Update sessions list with timestamps so elapsed timer stops immediately
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: 'cancelled', completed_at: cancelledAt, updated_at: cancelledAt }
+              : session
+          )
+        );
         // Invalidate cache and refresh to sync with server
         invalidateSessionsCache();
         refreshSessions();
+      }
+
+      // Handle queue_started event - task started after being queued
+      if (event.type === 'queue_started') {
+        // Update status from 'queued' to 'running'
+        setStatus('running');
+        setRunningStartTime(new Date().toISOString());
+        setCurrentSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: 'running',
+                queue_position: null,
+                queued_at: null,
+              }
+            : null
+        );
+        // Update session in list
+        setSessions((prevSessions) =>
+          prevSessions.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: 'running', queue_position: null }
+              : session
+          )
+        );
+      }
+
+      // Handle queue_position_update event - position changed while waiting in queue
+      if (event.type === 'queue_position_update') {
+        const newPosition = event.data?.position as number | undefined;
+        if (newPosition !== undefined) {
+          // Update current session's queue position
+          setCurrentSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  queue_position: newPosition,
+                }
+              : null
+          );
+          // Update session in list
+          setSessions((prevSessions) =>
+            prevSessions.map((session) =>
+              session.id === currentSession?.id
+                ? { ...session, queue_position: newPosition }
+                : session
+            )
+          );
+        }
       }
 
       if (event.type === 'metrics_update') {
@@ -2355,24 +2629,31 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
       if (event.type === 'error') {
         setStatus('failed');
+        setRunningStartTime(null);
         setError(String(event.data.message ?? 'Unknown error'));
+        const nowIso = new Date().toISOString();
         // Update session status so next submit can continue rather than reset
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: 'failed',
-                completed_at: new Date().toISOString(),
+                completed_at: nowIso,
+                updated_at: nowIso,
               }
             : null
         );
+        // Update sessions list with timestamps so elapsed timer stops
         setSessions((prevSessions) =>
           prevSessions.map((session) =>
             session.id === currentSession?.id
-              ? { ...session, status: 'failed' }
+              ? { ...session, status: 'failed', completed_at: nowIso, updated_at: nowIso }
               : session
           )
         );
+        // Invalidate cache and refresh to sync with server
+        invalidateSessionsCache();
+        refreshSessions();
       }
 
       // Handle security alert events (sensitive data detected and redacted)
@@ -2436,10 +2717,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         },
         // Connection state change callback
         (state) => {
+          const previousState = connectionState;
           setConnectionState(state);
           if (state === 'connected') {
             setReconnecting(false);
             setError(null);
+            // RESYNC ON RECONNECT: When transitioning to connected from degraded/reconnecting/polling,
+            // refresh sessions to ensure we have the latest state (terminal status protection applies)
+            if (previousState === 'reconnecting' || previousState === 'polling' || previousState === 'degraded') {
+              invalidateSessionsCache();
+              refreshSessions();
+            }
           } else if (state === 'polling') {
             // Polling mode still works - just a different transport
             setError(null);
@@ -2651,6 +2939,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           updated_at: new Date().toISOString(),
         }));
 
+        // CRITICAL: Also update sessions[] directly so the session panel shows 'running'
+        // We can't rely on refreshSessions() because terminal status protection would
+        // keep the old 'completed' status if the server hasn't updated yet.
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === currentSession.id
+              ? { ...s, status: response.status, updated_at: new Date().toISOString() }
+              : s
+          )
+        );
+
         setInputValue('');
         setAttachedFiles([]);
         const lastSequence = getLastServerSequence(events);
@@ -2730,6 +3029,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           duration_ms: null,
           total_cost_usd: null,
           cancel_requested: false,
+          queue_position: response.queue_position ?? null,
+          queued_at: response.status === 'queued' ? new Date().toISOString() : null,
+          is_auto_resume: false,
         });
         setInputValue('');
         setAttachedFiles([]);
@@ -2852,6 +3154,39 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     setStoredSelectedModel(model);
   }, []);
 
+  /**
+   * Scroll output to bottom. If distance > 1000px, jump instantly.
+   * When forceInstant is true, scrolls multiple times to catch lazy-loaded content.
+   */
+  const scrollOutputToBottom = useCallback((forceInstant = false) => {
+    const doScroll = () => {
+      if (!outputRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = outputRef.current;
+      const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+
+      // Jump instantly if distance > 1000px or forceInstant is true
+      if (forceInstant || distanceToBottom > 1000) {
+        outputRef.current.scrollTop = scrollHeight;
+      } else {
+        outputRef.current.scrollTo({
+          top: scrollHeight,
+          behavior: 'smooth',
+        });
+      }
+    };
+
+    // First scroll immediately after next frame
+    requestAnimationFrame(doScroll);
+
+    // When loading a session, scroll multiple times to catch lazy-loaded content
+    // (images, embedded documents, syntax highlighting, etc.)
+    if (forceInstant) {
+      setTimeout(doScroll, 50);   // After initial render
+      setTimeout(doScroll, 150);  // After most content loads
+      setTimeout(doScroll, 400);  // After images/heavy content
+    }
+  }, []);
+
   const handleSelectSession = async (sessionId: string): Promise<void> => {
     if (!config || !token) {
       return;
@@ -2871,6 +3206,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
       const lastSequence = getLastServerSequence(historyEvents);
       setEvents(seedSessionEvents(session, historyEvents));
+
+      // Scroll to bottom after loading session (instant jump for long conversations)
+      scrollOutputToBottom(true);
 
       // Sum up stats from ALL agent_complete events (for multi-turn/resumed sessions)
       const completionEvents = historyEvents.filter((event) => event.type === 'agent_complete');
@@ -2926,16 +3264,74 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
       setStatus(normalizeStatus(session.status));
 
-      if (session.status === 'running') {
+      // Start SSE for running or queued sessions (to receive queue_started event)
+      if (session.status === 'running' || session.status === 'queued') {
         startSSE(sessionId, lastSequence);
       }
 
       // Update URL to reflect selected session
       navigate(`/session/${sessionId}/`, { replace: true });
     } catch (err) {
-      setError(`Failed to load session: ${(err as Error).message}`);
+      // Parse error message - API returns JSON like {"detail":"Session not found: xyz"}
+      let errorMessage = (err as Error).message;
+      try {
+        const parsed = JSON.parse(errorMessage);
+        if (parsed.detail) {
+          errorMessage = parsed.detail;
+        }
+      } catch {
+        // Not JSON, use as-is
+      }
+
+      // Show prominent error popup
+      setSessionErrorPopup({
+        message: errorMessage,
+        sessionId,
+      });
     }
   };
+
+  /**
+   * Handle session error popup close - navigate to home.
+   */
+  const handleSessionErrorClose = useCallback(() => {
+    setSessionErrorPopup(null);
+    setCurrentSession(null);
+    setEvents(EMPTY_EVENTS);
+    setStatus('idle');
+    navigate('/', { replace: true });
+  }, [navigate]);
+
+  /**
+   * Handle session deletion from SessionListTab.
+   */
+  const handleDeleteSession = useCallback(async (sessionId: string): Promise<void> => {
+    if (!config || !token) {
+      return;
+    }
+
+    try {
+      await deleteSession(config.api.base_url, token, sessionId);
+
+      // If deleting current session, clear it
+      if (currentSession?.id === sessionId) {
+        setCurrentSession(null);
+        setEvents([]);
+        setStatus('idle');
+        navigate('/', { replace: true });
+      }
+
+      // Refresh sessions list
+      invalidateSessionsCache();
+      refreshSessions();
+
+      // Show success notification
+      toast.success(`Session ${sessionId} deleted`);
+    } catch (err) {
+      toast.error(`Failed to delete session: ${(err as Error).message}`);
+      throw err; // Re-throw so the modal can handle the error state
+    }
+  }, [config, token, currentSession, navigate, refreshSessions]);
 
   const handleNewSession = useCallback((): void => {
     if (cleanupRef.current) {
@@ -3587,6 +3983,18 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           });
           break;
         }
+        case 'queue_started': {
+          // Task started after being queued - add a system event notification
+          const wasAutoResume = Boolean(event.data?.was_auto_resume);
+          items.push({
+            type: 'system_event',
+            id: `system-${items.length}`,
+            time: formatTimestamp(event.timestamp),
+            eventType: 'queue_started',
+            message: wasAutoResume ? 'Auto-resumed task started' : 'Queued task started',
+          });
+          break;
+        }
         case 'subagent_start': {
           const taskId = String(event.data.task_id ?? '');
           const subagentName = String(event.data.subagent_name ?? 'unknown');
@@ -3774,9 +4182,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           eventType: 'profile_switch',
           profileName: String(event.data.profile_name ?? ''),
         });
+      } else if (event.type === 'queue_started') {
+        const wasAutoResume = Boolean(event.data?.was_auto_resume);
+        sysEvents.push({
+          id: `sys-${eventCounter++}`,
+          time: formatTimestamp(event.timestamp),
+          eventType: 'queue_started',
+          message: wasAutoResume ? 'Auto-resumed task started' : 'Queued task started',
+        });
       }
     });
-    
+
     return sysEvents;
   }, [events]);
 
@@ -3895,7 +4311,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       >
         <div className="session-item-row">
           <span className="session-id">{session.id.slice(0, 8)}...</span>
-          <span className={`session-status ${session.status}`}>{session.status}</span>
+          <span className={`session-status ${session.status}`}>
+            {session.status === 'queued' && session.queue_position != null
+              ? `queued #${session.queue_position}`
+              : session.status}
+          </span>
         </div>
         <div className="session-task">{truncateSessionTitle(session.task)}</div>
       </button>
@@ -4347,6 +4767,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         </div>
         <StatusFooter
           isRunning={isRunning}
+          isQueued={status === 'queued'}
+          queuePosition={currentSession?.queue_position ?? null}
+          isAutoResume={currentSession?.is_auto_resume ?? false}
           statusLabel={statusLabel}
           statusClass={statusClass}
           stats={stats}
@@ -4380,6 +4803,27 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             </button>
             <button
               type="button"
+              className={`right-panel-tab ${rightPanelMode === 'sessions' ? 'active' : ''}`}
+              onClick={() => setRightPanelMode('sessions')}
+              title="Sessions (Alt+S)"
+            >
+              Sessions
+              {sessionBadgeCounts.total > 0 && (
+                <span className="right-panel-tab-badge">
+                  {sessionBadgeCounts.completed > 0 && (
+                    <span className="badge-count completed">{sessionBadgeCounts.completed}</span>
+                  )}
+                  {sessionBadgeCounts.failed > 0 && (
+                    <span className="badge-count failed">{sessionBadgeCounts.failed}</span>
+                  )}
+                  {sessionBadgeCounts.waiting > 0 && (
+                    <span className="badge-count waiting">{sessionBadgeCounts.waiting}</span>
+                  )}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
               className={`right-panel-tab ${rightPanelMode === 'explorer' ? 'active' : ''}`}
               onClick={() => {
                 setRightPanelMode('explorer');
@@ -4390,7 +4834,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               }}
               title="File Explorer (Alt+E)"
             >
-              File Explorer
+              Files
             </button>
             {isMobile && (
               <button
@@ -4418,6 +4862,16 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   onShowInExplorer={handleShowInExplorer}
                   onExpandAll={expandAllSections}
                   onCollapseAll={collapseAllSections}
+                />
+              ) : rightPanelMode === 'sessions' ? (
+                <SessionListTab
+                  sessions={sessions}
+                  currentSessionId={currentSession?.id ?? null}
+                  onSelectSession={handleSelectSession}
+                  badges={sessionBadges}
+                  onClearBadge={clearSessionBadge}
+                  onDeleteSession={handleDeleteSession}
+                  currentRunStartTime={runningStartTime}
                 />
               ) : currentSession && config && token ? (
               <>
@@ -4504,6 +4958,23 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             </div>
           </div>
         )}
+
+        {/* Session error popup (e.g., session not found) */}
+        <Popup
+          isOpen={sessionErrorPopup !== null}
+          type="error"
+          title="Session Not Found"
+          message="The session you're looking for doesn't exist or has been deleted."
+          details={sessionErrorPopup?.sessionId}
+          onClose={handleSessionErrorClose}
+          actions={[
+            {
+              label: 'Go to Home',
+              onClick: handleSessionErrorClose,
+              variant: 'primary',
+            },
+          ]}
+        />
       </main>
 
       {/* Mobile panel backdrop */}

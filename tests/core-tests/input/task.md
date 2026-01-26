@@ -1,4 +1,1 @@
-The the random fact about cats using meow skill.
-
-
-
+Create a simple Python function that adds two numbers and save it to workspace/add.py.

@@ -15,7 +15,7 @@ providers:
     api_key_env: OPENAI_API_KEY
   local-openai:
     type: openai-compatible
-    base_url: http://localhost:11434/v1
+    base_url: http://host.docker.internal:8033/v1  # Use host.docker.internal to reach host machine
     api_key_env: LOCAL_OPENAI_API_KEY
 
 models:

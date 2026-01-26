@@ -43,7 +43,7 @@ from .schemas import (
     Checkpoint,
     CheckpointType,
     LLMMetrics,
-    SessionInfo,
+    SessionContext,
     TaskStatus,
     TokenUsage,
 )
@@ -87,31 +87,38 @@ class CheckpointTracker:
     Tracks checkpoints during agent execution.
 
     Captures UUIDs from tool result messages and creates checkpoints
-    for file-modifying tools (Write, Edit).
+    for file-modifying tools (Write, Edit). Checkpoints are collected
+    in memory and can be retrieved for database persistence.
     """
 
     def __init__(
         self,
-        session_manager: "SessionManager",
-        session_info: SessionInfo,
+        session_id: str,
         auto_checkpoint_tools: list[str],
-        enabled: bool = True
+        enabled: bool = True,
+        initial_turn_count: int = 0
     ) -> None:
         """
         Initialize the checkpoint tracker.
 
         Args:
-            session_manager: SessionManager for storing checkpoints.
-            session_info: Current session information.
+            session_id: The session ID.
             auto_checkpoint_tools: Tools that trigger auto-checkpoints.
             enabled: Whether checkpoint tracking is enabled.
+            initial_turn_count: Starting turn number (cumulative from previous runs).
         """
-        self._session_manager = session_manager
-        self._session_info = session_info
+        self._session_id = session_id
         self._auto_checkpoint_tools = auto_checkpoint_tools
         self._enabled = enabled
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._turn_counter = 0
+        self._initial_turn_count = initial_turn_count
+        self._checkpoints: list[Checkpoint] = []
+
+    @property
+    def checkpoints(self) -> list[Checkpoint]:
+        """Get all checkpoints created during this execution."""
+        return self._checkpoints.copy()
 
     def track_tool_use(self, tool_use_id: str, tool_name: str, tool_input: dict) -> None:
         """
@@ -154,14 +161,16 @@ class CheckpointTracker:
 
         # Create checkpoint for file-modifying tool
         self._turn_counter += 1
-        checkpoint = self._session_manager.add_checkpoint(
-            self._session_info,
+        from datetime import datetime
+        checkpoint = Checkpoint(
             uuid=uuid,
+            created_at=datetime.now(),
             checkpoint_type=CheckpointType.AUTO,
-            turn_number=self._session_info.cumulative_turns + self._turn_counter,
+            turn_number=self._initial_turn_count + self._turn_counter,
             tool_name=tool_name,
             file_path=tool_info.get("file_path"),
         )
+        self._checkpoints.append(checkpoint)
         logger.debug(f"Created auto checkpoint: {checkpoint.to_summary()}")
         return checkpoint
 
@@ -526,7 +535,7 @@ class ClaudeAgent:
 
     def _build_options(
         self,
-        session_info: SessionInfo,
+        session_context: SessionContext,
         system_prompt: str,
         trace_processor: Optional[Any] = None,
         resume_id: Optional[str] = None,
@@ -537,7 +546,7 @@ class ClaudeAgent:
         Build ClaudeAgentOptions for the SDK.
 
         Args:
-            session_info: Session information.
+            session_context: Session context with session_id and related data.
             system_prompt: System prompt (required, must not be empty).
             trace_processor: Optional trace processor for permission denial tracking.
             resume_id: Claude's session ID for resuming conversations (optional).
@@ -615,7 +624,7 @@ class ClaudeAgent:
         # Use workspace subdirectory as cwd to prevent reading session logs
         # The workspace only contains files the agent should access
         workspace_dir = self._session_manager.get_workspace_dir(
-            session_info.session_id
+            session_context.session_id
         )
 
         # Load sandboxed environment variables (global + user-specific overrides)
@@ -716,7 +725,7 @@ class ClaudeAgent:
         all_tools = available_tools
 
         # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
-        session_dir = self._session_manager.get_session_dir(session_info.session_id)
+        session_dir = self._session_manager.get_session_dir(session_context.session_id)
 
         # Set up MCP servers for additional tools
         mcp_servers: dict[str, Any] = {}
@@ -771,7 +780,7 @@ class ClaudeAgent:
                     logger.warning(f"Failed to load per-user mounts for PathValidator: {e}")
 
             configure_path_validator(
-                session_id=session_info.session_id,
+                session_id=session_context.session_id,
                 workspace_path=workspace_dir,
                 username=username,  # Pass username to configure SandboxPathResolver
                 skills_path=self._skills_dir if self._config.enable_skills else None,
@@ -784,7 +793,7 @@ class ClaudeAgent:
                 user_mounts_rw=user_mounts_rw_paths if user_mounts_rw_paths else None,
             )
             logger.info(
-                f"PathValidator configured for session {session_info.session_id}, "
+                f"PathValidator configured for session {session_context.session_id}, "
                 f"workspace={workspace_dir}, global_skills={global_skills}, user_skills={user_skills}, "
                 f"external_ro={external_ro_base if external_ro_base.exists() else None}, "
                 f"external_rw={external_rw_base if external_rw_base.exists() else None}, "
@@ -800,7 +809,7 @@ class ClaudeAgent:
         # mcp__ag3ntum__Bash, mcp__ag3ntum__Read, mcp__ag3ntum__Write, etc.
         # SECURITY: Bash uses bwrap sandbox, file tools use PathValidator
         # NOTE: MCP tools are REQUIRED - fail fast if creation fails
-        session_id = session_info.session_id
+        session_id = session_context.session_id
         include_bash = AG3NTUM_BASH_TOOL in all_tools
         try:
             # Create unified MCP server with ALL Ag3ntum tools
@@ -947,7 +956,7 @@ class ClaudeAgent:
     def _build_user_prompt(
         self,
         task: str,
-        session_info: SessionInfo,
+        session_context: SessionContext,
         parameters: Optional[dict] = None
     ) -> str:
         """
@@ -955,7 +964,7 @@ class ClaudeAgent:
 
         Args:
             task: The task description.
-            session_info: Session information.
+            session_context: Session context with session_id.
             parameters: Additional template parameters.
 
         Returns:
@@ -978,7 +987,7 @@ class ClaudeAgent:
 
         params = parameters or {}
         workspace_dir = self._session_manager.get_workspace_dir(
-            session_info.session_id
+            session_context.session_id
         )
         try:
             user_prompt = _jinja_env.get_template("user.j2").render(
@@ -1123,7 +1132,8 @@ class ClaudeAgent:
         fork_session: bool = False,
         timeout_seconds: Optional[int] = None,
         session_id: Optional[str] = None,
-        username: Optional[str] = None
+        username: Optional[str] = None,
+        session_context: Optional[SessionContext] = None
     ) -> AgentResult:
         """
         Execute the agent with a task.
@@ -1135,11 +1145,14 @@ class ClaudeAgent:
             task: The task description.
             system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
             parameters: Additional template parameters (optional).
-            resume_session_id: Session ID to resume (optional).
+            resume_session_id: Session ID to resume (optional, for logging - use session_context.claude_session_id).
             fork_session: If True, fork to new session when resuming (optional).
             timeout_seconds: Override timeout (uses config.timeout_seconds if None).
-            session_id: Session ID to use for new session (optional, auto-generated if None).
-                        Used by API to ensure database session ID matches file-based session.
+            session_id: Session ID to use for new session (optional, use session_context.session_id instead).
+            username: Optional username for user-specific features.
+            session_context: Session context from database. If provided, contains session_id and
+                            claude_session_id for resumption. Caller is responsible for persisting
+                            updates from AgentResult back to database.
 
         Returns:
             AgentResult with execution outcome.
@@ -1154,7 +1167,7 @@ class ClaudeAgent:
         return await asyncio.wait_for(
             self._execute(
                 task, system_prompt, parameters, resume_session_id, fork_session,
-                session_id=session_id, username=username
+                session_id=session_id, username=username, session_context=session_context
             ),
             timeout=effective_timeout,
         )
@@ -1167,7 +1180,8 @@ class ClaudeAgent:
         resume_session_id: Optional[str] = None,
         fork_session: bool = False,
         session_id: Optional[str] = None,
-        username: Optional[str] = None
+        username: Optional[str] = None,
+        session_context: Optional[SessionContext] = None
     ) -> AgentResult:
         """
         Internal execution logic (called by run() with timeout wrapper).
@@ -1176,9 +1190,11 @@ class ClaudeAgent:
             task: The task description.
             system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
             parameters: Additional template parameters (optional).
-            resume_session_id: Session ID to resume (optional).
+            resume_session_id: Session ID to resume (optional, for logging only - use session_context.claude_session_id).
             fork_session: If True, fork to new session when resuming (optional).
-            session_id: Session ID to use for new session (optional).
+            session_id: Session ID to use for new session (optional, use session_context.session_id instead).
+            username: Optional username for user-specific features.
+            session_context: Session context from database. If not provided, a minimal one is created.
 
         Returns:
             AgentResult with execution outcome.
@@ -1186,35 +1202,32 @@ class ClaudeAgent:
         Raises:
             AgentError: If prompts cannot be loaded or are invalid.
         """
-        # Create or resume session first (needed for session-specific permissions)
-        # Also extract Claude's session ID (resume_id) for SDK resumption
-        resume_id: Optional[str] = None
-        if resume_session_id:
-            try:
-                session_info = self._session_manager.load_session(
-                    resume_session_id
-                )
-                resume_id = session_info.resume_id  # Claude's session ID
-                logger.info(
-                    f"Resuming session: {resume_session_id} "
-                    f"(Claude session: {resume_id or 'none'})"
-                )
-            except Exception as e:
-                logger.warning(f"Could not resume session: {e}. Creating new.")
-                session_info = self._session_manager.create_session(
-                    working_dir=self._config.working_dir or str(AGENT_DIR),
-                    session_id=session_id
-                )
-        else:
-            session_info = self._session_manager.create_session(
+        # Session context should be provided by caller (from database)
+        # If not provided, create a minimal one (for backward compat during transition)
+        if session_context is None:
+            # Generate session ID if not provided
+            if session_id is None:
+                from .sessions import generate_session_id
+                session_id = generate_session_id()
+            session_context = SessionContext(
+                session_id=session_id,
                 working_dir=self._config.working_dir or str(AGENT_DIR),
-                session_id=session_id
+                file_checkpointing_enabled=self._config.enable_file_checkpointing,
             )
+            # Create session directory
+            self._session_manager.create_session_directory(session_context.session_id)
+        else:
+            # Ensure session directory exists
+            self._session_manager.create_session_directory(session_context.session_id)
 
-        # Set file checkpointing flag on session
-        if self._config.enable_file_checkpointing:
-            session_info.file_checkpointing_enabled = True
-            self._session_manager._save_session_info(session_info)
+        # Extract resume_id from session_context for SDK resumption
+        resume_id: Optional[str] = None
+        if session_context.claude_session_id:
+            resume_id = session_context.claude_session_id
+            logger.info(
+                f"Resuming session: {session_context.session_id} "
+                f"(Claude session: {resume_id})"
+            )
 
         # Set session context for session-specific permissions
         # This sandboxes the agent to only its own workspace folder
@@ -1224,10 +1237,10 @@ class ClaudeAgent:
             # Agent's perspective inside sandbox: cwd is /workspace
             workspace_path = "."
             workspace_absolute = self._session_manager.get_workspace_dir(
-                session_info.session_id
+                session_context.session_id
             )
             self._permission_manager.set_session_context(
-                session_id=session_info.session_id,
+                session_id=session_context.session_id,
                 workspace_path=workspace_path,
                 workspace_absolute_path=workspace_absolute,
                 username=username
@@ -1235,7 +1248,7 @@ class ClaudeAgent:
 
         # Setup skills access in workspace
         # Creates merged .claude/skills/ directory with symlinks to global and user skills
-        self._setup_workspace_skills(session_info.session_id, username=username)
+        self._setup_workspace_skills(session_context.session_id, username=username)
 
         # Load system prompt from template if not provided
         # Done after session creation so permissions reflect session-specific rules
@@ -1287,7 +1300,7 @@ class ClaudeAgent:
 
             # Get workspace directory for template
             workspace_dir = self._session_manager.get_workspace_dir(
-                session_info.session_id
+                session_context.session_id
             )
 
             # Load role content from role template file (fail-fast if missing)
@@ -1310,7 +1323,7 @@ class ClaudeAgent:
                 # Environment info
                 "current_date": datetime.now().strftime("%A, %B %d, %Y"),
                 "model": self._config.model,
-                "session_id": session_info.session_id,
+                "session_id": session_context.session_id,
                 "workspace_path": str(workspace_dir),
                 "working_dir": self._config.working_dir or str(workspace_dir),
                 # Role
@@ -1340,31 +1353,31 @@ class ClaudeAgent:
         trace_processor.set_task(task)
         trace_processor.set_model(self._config.model)
 
-        # Set cumulative stats if resuming a session
-        if session_info.cumulative_usage is not None:
+        # Set cumulative stats if resuming a session (for display during execution)
+        if session_context.cumulative_turns > 0 or session_context.cumulative_cost_usd > 0:
             trace_processor.set_cumulative_stats(
-                cost_usd=session_info.cumulative_cost_usd,
-                turns=session_info.cumulative_turns,
-                tokens=session_info.cumulative_usage.total_tokens,
+                cost_usd=session_context.cumulative_cost_usd,
+                turns=session_context.cumulative_turns,
+                tokens=session_context.cumulative_total_tokens,
             )
 
         options = self._build_options(
-            session_info, system_prompt, trace_processor,
+            session_context, system_prompt, trace_processor,
             resume_id=resume_id,
             fork_session=fork_session,
             username=username
         )
-        user_prompt = self._build_user_prompt(task, session_info, parameters)
+        user_prompt = self._build_user_prompt(task, session_context, parameters)
 
-        log_file = self._session_manager.get_log_file(session_info.session_id)
+        log_file = self._session_manager.get_log_file(session_context.session_id)
         result: Optional[ResultMessage] = None
 
         # Create checkpoint tracker for file change tracking
         checkpoint_tracker = CheckpointTracker(
-            session_manager=self._session_manager,
-            session_info=session_info,
+            session_id=session_context.session_id,
             auto_checkpoint_tools=self._config.auto_checkpoint_tools,
-            enabled=self._config.enable_file_checkpointing,
+            enabled=session_context.file_checkpointing_enabled,
+            initial_turn_count=session_context.cumulative_turns,
         )
 
         try:
@@ -1393,22 +1406,13 @@ class ClaudeAgent:
                 denial = self._denial_tracker.last_denial
                 error_msg = denial.message if denial else "Permission denied"
                 self._tracer.on_error(error_msg, error_type="permission_denied")
-                self._cleanup_session(session_info.session_id)
+                self._cleanup_session(session_context.session_id)
 
                 # Extract metrics even for failed runs
                 usage = None
                 if result:
                     usage = TokenUsage.from_sdk_usage(result.usage)
-                    self._session_manager.update_session(
-                        session_info,
-                        status=TaskStatus.FAILED,
-                        resume_id=result.session_id,
-                        num_turns=result.num_turns,
-                        duration_ms=result.duration_ms,
-                        total_cost_usd=result.total_cost_usd,
-                        usage=usage,
-                        model=self._config.model,
-                    )
+                    # Note: Session update is now handled by caller via AgentResult.metrics
 
                 # Finalize any orphaned subagents before emitting completion
                 trace_processor.finalize_orphaned_subagents()
@@ -1424,13 +1428,9 @@ class ClaudeAgent:
                         session_id=getattr(result, "session_id", None),
                         usage=getattr(result, "usage", None),
                         model=self._config.model,
-                        cumulative_cost_usd=session_info.cumulative_cost_usd,
-                        cumulative_turns=session_info.cumulative_turns,
-                        cumulative_tokens=(
-                            session_info.cumulative_usage.total_tokens
-                            if session_info.cumulative_usage is not None
-                            else None
-                        ),
+                        cumulative_cost_usd=session_context.cumulative_cost_usd,
+                        cumulative_turns=session_context.cumulative_turns,
+                        cumulative_tokens=session_context.cumulative_total_tokens,
                     )
 
                 return AgentResult(
@@ -1444,30 +1444,26 @@ class ClaudeAgent:
                         total_cost_usd=result.total_cost_usd if result else None,
                         usage=usage,
                     ) if result else None,
-                    session_info=session_info,
+                    session_id=session_context.session_id,
                 )
 
             # Normal successful completion
             # Clean up session (remove skills, switch to system profile)
-            self._cleanup_session(session_info.session_id)
+            self._cleanup_session(session_context.session_id)
 
-            # Update session with Claude's session ID and metrics
+            # Extract token usage from result (for metrics in AgentResult)
+            usage = None
             if result:
-                # Extract token usage from result
                 usage = TokenUsage.from_sdk_usage(result.usage)
+                # Note: Session update is now handled by caller via AgentResult.metrics
 
-                self._session_manager.update_session(
-                    session_info,
-                    status=TaskStatus.COMPLETE,
-                    resume_id=result.session_id,
-                    num_turns=result.num_turns,
-                    duration_ms=result.duration_ms,
-                    total_cost_usd=result.total_cost_usd,
-                    usage=usage,
-                    model=self._config.model,
-                )
-
-            raw_status = "COMPLETE"
+            # Determine status based on tool errors during execution
+            # If any tool returned is_error=True, mark the session as FAILED
+            # (even though the agent completed, tool failures mean the task wasn't fully accomplished)
+            if trace_processor.had_tool_errors():
+                raw_status = "FAILED"
+            else:
+                raw_status = "COMPLETE"
 
             # Finalize any orphaned subagents before emitting completion
             trace_processor.finalize_orphaned_subagents()
@@ -1483,13 +1479,9 @@ class ClaudeAgent:
                     session_id=getattr(result, "session_id", None),
                     usage=getattr(result, "usage", None),
                     model=self._config.model,
-                    cumulative_cost_usd=session_info.cumulative_cost_usd,
-                    cumulative_turns=session_info.cumulative_turns,
-                    cumulative_tokens=(
-                        session_info.cumulative_usage.total_tokens
-                        if session_info.cumulative_usage is not None
-                        else None
-                    ),
+                    cumulative_cost_usd=session_context.cumulative_cost_usd,
+                    cumulative_turns=session_context.cumulative_turns,
+                    cumulative_tokens=session_context.cumulative_total_tokens,
                 )
 
             return AgentResult(
@@ -1503,34 +1495,28 @@ class ClaudeAgent:
                     total_cost_usd=result.total_cost_usd,
                     usage=usage,
                 ) if result else None,
-                session_info=session_info,
+                session_id=session_context.session_id,
             )
 
         except AgentError as e:
             self._tracer.on_error(str(e), error_type="agent_error")
-            self._cleanup_session(session_info.session_id)
-            self._session_manager.update_session(
-                session_info, status=TaskStatus.FAILED
-            )
+            self._cleanup_session(session_context.session_id)
+            # Note: Session status update is now handled by caller
             raise
         except asyncio.TimeoutError:
             error_msg = f"Timed out after {self._config.timeout_seconds}s"
             self._tracer.on_error(error_msg, error_type="timeout")
-            self._cleanup_session(session_info.session_id)
-            self._session_manager.update_session(
-                session_info, status=TaskStatus.FAILED
-            )
+            self._cleanup_session(session_context.session_id)
+            # Note: Session status update is now handled by caller
             raise AgentError(error_msg)
         except Exception as e:
             self._tracer.on_error(str(e), error_type="error")
-            self._cleanup_session(session_info.session_id)
-            self._session_manager.update_session(
-                session_info, status=TaskStatus.ERROR
-            )
+            self._cleanup_session(session_context.session_id)
+            # Note: Session status update is now handled by caller
             return AgentResult(
                 status=TaskStatus.ERROR,
                 error=str(e),
-                session_info=session_info,
+                session_id=session_context.session_id,
             )
 
     async def run_with_timeout(
@@ -1565,7 +1551,11 @@ class ClaudeAgent:
             timeout_seconds=timeout_seconds, session_id=session_id
         )
 
-    async def compact(self, session_id: str) -> dict[str, Any]:
+    async def compact(
+        self,
+        session_id: str,
+        claude_session_id: str
+    ) -> dict[str, Any]:
         """
         Compact conversation history for a session.
 
@@ -1573,7 +1563,8 @@ class ClaudeAgent:
         preserving important context. Uses the SDK's /compact command.
 
         Args:
-            session_id: The session ID to compact.
+            session_id: The Ag3ntum session ID (for logging).
+            claude_session_id: The Claude SDK session ID for resumption.
 
         Returns:
             Dict with compaction metadata:
@@ -1582,11 +1573,9 @@ class ClaudeAgent:
             - trigger: What triggered the compaction
 
         Raises:
-            AgentError: If session cannot be loaded or has no resume ID.
+            AgentError: If claude_session_id is not provided.
         """
-        session_info = self._session_manager.load_session(session_id)
-
-        if not session_info.resume_id:
+        if not claude_session_id:
             raise AgentError(
                 f"Session {session_id} has no Claude session ID to resume"
             )
@@ -1595,7 +1584,7 @@ class ClaudeAgent:
 
         async with ClaudeSDKClient(
             options=ClaudeAgentOptions(
-                resume=session_info.resume_id,
+                resume=claude_session_id,
                 max_turns=1
             )
         ) as client:
@@ -1615,75 +1604,50 @@ class ClaudeAgent:
 
     # -------------------------------------------------------------------------
     # Checkpoint Management
+    #
+    # NOTE: Checkpoint data is now stored in the database (Session.checkpoints_json).
+    # Callers should use session_service to manage checkpoints.
+    # These methods are provided for convenience and work with passed-in data.
     # -------------------------------------------------------------------------
-
-    def list_checkpoints(self, session_id: str) -> list[Checkpoint]:
-        """
-        List all checkpoints for a session.
-
-        Args:
-            session_id: The session ID.
-
-        Returns:
-            List of Checkpoint objects, ordered by creation time.
-        """
-        return self._session_manager.list_checkpoints(session_id)
-
-    def get_checkpoint(
-        self,
-        session_id: str,
-        checkpoint_id: Optional[str] = None,
-        index: Optional[int] = None
-    ) -> Optional[Checkpoint]:
-        """
-        Get a specific checkpoint by UUID or index.
-
-        Args:
-            session_id: The session ID.
-            checkpoint_id: The checkpoint UUID to find.
-            index: The checkpoint index (0 = first, -1 = last).
-
-        Returns:
-            The Checkpoint if found, None otherwise.
-        """
-        return self._session_manager.get_checkpoint(
-            session_id, checkpoint_id=checkpoint_id, index=index
-        )
 
     def create_checkpoint(
         self,
         session_id: str,
         uuid: str,
+        turn_number: int,
         description: Optional[str] = None
     ) -> Checkpoint:
         """
-        Manually create a checkpoint for a session.
+        Create a manual checkpoint object.
 
-        This allows programmatically marking a point in the conversation
-        that can be rewound to later.
+        This creates a Checkpoint object that the caller should persist to the database.
 
         Args:
             session_id: The session ID.
             uuid: The user message UUID from the SDK.
+            turn_number: Current cumulative turn number.
             description: Optional description of the checkpoint.
 
         Returns:
-            The created Checkpoint object.
+            The created Checkpoint object. Caller must persist to database.
         """
-        session_info = self._session_manager.load_session(session_id)
-        return self._session_manager.add_checkpoint(
-            session_info,
+        from datetime import datetime
+        checkpoint = Checkpoint(
             uuid=uuid,
+            created_at=datetime.now(),
             checkpoint_type=CheckpointType.MANUAL,
             description=description,
-            turn_number=session_info.cumulative_turns,
+            turn_number=turn_number,
         )
+        logger.debug(f"Created manual checkpoint: {checkpoint.to_summary()}")
+        return checkpoint
 
     async def rewind_to_checkpoint(
         self,
         session_id: str,
-        checkpoint_id: Optional[str] = None,
-        checkpoint_index: Optional[int] = None
+        claude_session_id: str,
+        checkpoint: Checkpoint,
+        file_checkpointing_enabled: bool = True
     ) -> dict[str, Any]:
         """
         Rewind files to a specific checkpoint.
@@ -1691,82 +1655,66 @@ class ClaudeAgent:
         This restores all files to their state at the specified checkpoint,
         reverting any changes made after that point.
 
-        Requires enable_file_checkpointing=True in agent config.
-
         Args:
-            session_id: The session ID.
-            checkpoint_id: UUID of the checkpoint to rewind to.
-            checkpoint_index: Index of the checkpoint (alternative to UUID).
+            session_id: The Ag3ntum session ID (for logging).
+            claude_session_id: The Claude SDK session ID for resumption.
+            checkpoint: The Checkpoint object to rewind to.
+            file_checkpointing_enabled: Whether file checkpointing is enabled.
 
         Returns:
             Dict with rewind metadata:
             - checkpoint: The checkpoint that was rewound to
-            - checkpoints_removed: Number of subsequent checkpoints removed
+            - success: Whether the rewind succeeded
 
         Raises:
-            AgentError: If session or checkpoint cannot be found,
-                or if file checkpointing is not enabled.
-        """
-        # Load session
-        session_info = self._session_manager.load_session(session_id)
+            AgentError: If session data is invalid or checkpointing not enabled.
 
+        Note:
+            The caller is responsible for clearing checkpoints after this one
+            from the database using session_service.clear_checkpoints_after().
+        """
         # Validate file checkpointing is enabled
-        if not session_info.file_checkpointing_enabled:
+        if not file_checkpointing_enabled:
             raise AgentError(
                 f"File checkpointing is not enabled for session {session_id}. "
-                "Set enable_file_checkpointing=True in AgentConfig."
+                "Set enable_file_checkpointing=True in session config."
             )
 
         # Validate session has a resume ID
-        if not session_info.resume_id:
+        if not claude_session_id:
             raise AgentError(
                 f"Session {session_id} has no Claude session ID to resume"
-            )
-
-        # Get the target checkpoint
-        checkpoint = self._session_manager.get_checkpoint(
-            session_id,
-            checkpoint_id=checkpoint_id,
-            index=checkpoint_index
-        )
-
-        if checkpoint is None:
-            raise AgentError(
-                f"Checkpoint not found: id={checkpoint_id}, index={checkpoint_index}"
             )
 
         # Use SDK to rewind files
         async with ClaudeSDKClient(
             options=ClaudeAgentOptions(
-                resume=session_info.resume_id,
+                resume=claude_session_id,
                 max_turns=1,
                 enable_file_checkpointing=True,
             )
         ) as client:
             await client.rewind_files(checkpoint.uuid)
 
-        # Clear checkpoints after the rewound-to checkpoint
-        removed = self._session_manager.clear_checkpoints_after(
-            session_info, checkpoint.uuid
-        )
-
         logger.info(
-            f"Rewound session {session_id} to checkpoint {checkpoint.uuid}, "
-            f"removed {removed} subsequent checkpoints"
+            f"Rewound session {session_id} to checkpoint {checkpoint.uuid}"
         )
 
         # Notify tracer if available
         if hasattr(self._tracer, 'on_checkpoint_rewind'):
-            self._tracer.on_checkpoint_rewind(checkpoint, removed)
+            self._tracer.on_checkpoint_rewind(checkpoint, 0)
 
         return {
             "checkpoint": checkpoint,
-            "checkpoints_removed": removed,
+            "success": True,
         }
 
     async def rewind_to_latest_checkpoint(
         self,
-        session_id: str
+        session_id: str,
+        claude_session_id: str,
+        checkpoints: list[Checkpoint],
+        file_checkpointing_enabled: bool = True
     ) -> dict[str, Any]:
         """
         Rewind to the most recent checkpoint.
@@ -1774,7 +1722,10 @@ class ClaudeAgent:
         Convenience method for undoing the last file-modifying operation.
 
         Args:
-            session_id: The session ID.
+            session_id: The Ag3ntum session ID.
+            claude_session_id: The Claude SDK session ID for resumption.
+            checkpoints: List of checkpoints from database (Session.checkpoints_json).
+            file_checkpointing_enabled: Whether file checkpointing is enabled.
 
         Returns:
             Dict with rewind metadata (same as rewind_to_checkpoint).
@@ -1782,9 +1733,6 @@ class ClaudeAgent:
         Raises:
             AgentError: If no checkpoints exist or rewind fails.
         """
-        # Get the second-to-last checkpoint (rewind to state before last change)
-        checkpoints = self.list_checkpoints(session_id)
-
         if len(checkpoints) < 2:
             raise AgentError(
                 f"Session {session_id} needs at least 2 checkpoints to rewind"
@@ -1792,20 +1740,23 @@ class ClaudeAgent:
 
         # Rewind to the checkpoint before the last one
         return await self.rewind_to_checkpoint(
-            session_id, checkpoint_index=-2
+            session_id=session_id,
+            claude_session_id=claude_session_id,
+            checkpoint=checkpoints[-2],
+            file_checkpointing_enabled=file_checkpointing_enabled
         )
 
-    def get_checkpoint_summary(self, session_id: str) -> list[str]:
+    @staticmethod
+    def get_checkpoint_summary(checkpoints: list[Checkpoint]) -> list[str]:
         """
-        Get a human-readable summary of all checkpoints.
+        Get a human-readable summary of checkpoints.
 
         Args:
-            session_id: The session ID.
+            checkpoints: List of Checkpoint objects.
 
         Returns:
             List of checkpoint summary strings.
         """
-        checkpoints = self.list_checkpoints(session_id)
         return [
             f"[{i}] {cp.to_summary()}"
             for i, cp in enumerate(checkpoints)

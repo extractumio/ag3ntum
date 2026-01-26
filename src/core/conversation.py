@@ -31,7 +31,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from .schemas import SessionInfo, TaskStatus, TokenUsage
+from .schemas import SessionContext, TaskStatus, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -432,28 +432,27 @@ class ConversationSession:
 
         raise RuntimeError("No ResultMessage received")
 
-    def get_session_info(self, working_dir: str) -> SessionInfo:
+    def get_session_context(self, working_dir: str) -> SessionContext:
         """
-        Create a SessionInfo from current conversation state.
+        Create a SessionContext from current conversation state.
 
         Args:
             working_dir: The working directory for the session.
 
         Returns:
-            SessionInfo with accumulated metrics.
+            SessionContext with accumulated metrics.
         """
-        return SessionInfo(
+        return SessionContext(
             session_id=self._session_id or "unknown",
             working_dir=working_dir,
-            status=TaskStatus.COMPLETE if not self._interrupted else TaskStatus.FAILED,
-            resume_id=self._session_id,
-            num_turns=self._metrics.agent_turns,  # SDK turn count
-            duration_ms=self._metrics.total_duration_ms,
-            total_cost_usd=self._metrics.total_cost_usd or None,
+            claude_session_id=self._session_id,
             cumulative_turns=self._metrics.agent_turns,
             cumulative_duration_ms=self._metrics.total_duration_ms,
             cumulative_cost_usd=self._metrics.total_cost_usd,
-            cumulative_usage=self._metrics.to_token_usage(),
+            cumulative_input_tokens=self._metrics.input_tokens,
+            cumulative_output_tokens=self._metrics.output_tokens,
+            cumulative_cache_creation_tokens=self._metrics.cache_creation_tokens,
+            cumulative_cache_read_tokens=self._metrics.cache_read_tokens,
         )
 
     async def __aenter__(self) -> "ConversationSession":

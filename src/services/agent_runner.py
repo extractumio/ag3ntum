@@ -9,17 +9,17 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 from sqlalchemy import select
 
 from ..config import CONFIG_DIR
-from ..core.schemas import TaskExecutionParams
+from ..core.schemas import SessionContext, TaskExecutionParams
 from ..core.task_runner import execute_agent_task
 from ..core.tracer import BackendConsoleTracer, EventingTracer
 from ..db.database import AsyncSessionLocal
-from ..db.models import Token, User
+from ..db.models import Session, Token, User
 from ..services import event_service
 from ..services.encryption_service import encryption_service
 from ..services.redis_event_hub import RedisEventHub, EventSinkQueue
@@ -88,6 +88,7 @@ class AgentRunner:
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._cancel_flags: dict[str, bool] = {}
         self._results: dict[str, dict[str, Any]] = {}
+        self._completion_callbacks: list[Callable[[str, str], None]] = []
 
         # Load Redis URL from config (required)
         api_config_path = CONFIG_DIR / "api.yaml"
@@ -152,12 +153,15 @@ class AgentRunner:
         num_turns: Optional[int] = None,
         duration_ms: Optional[int] = None,
         total_cost_usd: Optional[float] = None,
+        usage: Optional[dict] = None,
     ) -> None:
         """
         Update session status in database using a fresh session.
 
         This method creates its own database session to avoid issues
         with closed sessions from request handlers.
+
+        Also updates cumulative stats when completion metrics are provided.
         """
         from ..db.models import Session
 
@@ -176,12 +180,23 @@ class AgentRunner:
                     session.model = model
                 if num_turns is not None:
                     session.num_turns = num_turns
+                    # Also accumulate to cumulative
+                    session.cumulative_turns += num_turns
                 if duration_ms is not None:
                     session.duration_ms = duration_ms
+                    session.cumulative_duration_ms += duration_ms
                 if total_cost_usd is not None:
                     session.total_cost_usd = total_cost_usd
+                    session.cumulative_cost_usd += total_cost_usd
                 if status in ("completed", "complete", "partial", "failed", "cancelled"):
                     session.completed_at = datetime.now(timezone.utc)
+
+                # Update cumulative token stats if usage provided
+                if usage:
+                    session.cumulative_input_tokens += usage.get("input_tokens", 0)
+                    session.cumulative_output_tokens += usage.get("output_tokens", 0)
+                    session.cumulative_cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+                    session.cumulative_cache_read_tokens += usage.get("cache_read_input_tokens", 0)
 
                 await db.commit()
                 logger.debug(f"Updated session {session_id} status to {status}")
@@ -298,6 +313,7 @@ class AgentRunner:
             api_key: Optional[str] = None
             linux_uid: Optional[int] = None
             linux_gid: Optional[int] = None
+            session_context: Optional[SessionContext] = None
 
             async with AsyncSessionLocal() as db:
                 # Fetch user
@@ -361,6 +377,17 @@ class AgentRunner:
                     await self._update_session_status(session_id, "failed")
                     return
 
+                # Fetch Session from database and create SessionContext
+                session_result = await db.execute(
+                    select(Session).where(Session.id == session_id)
+                )
+                db_session = session_result.scalar_one_or_none()
+                if db_session:
+                    session_context = SessionContext.from_db_session(db_session)
+                    logger.debug(f"Created SessionContext for {session_id}")
+                else:
+                    logger.warning(f"Session {session_id} not found in database")
+
             # Use sessions_dir passed from API endpoint (already determined once)
             sessions_dir = Path(params.sessions_dir)
             working_dir = sessions_dir / session_id
@@ -394,6 +421,8 @@ class AgentRunner:
                 anthropic_api_key=api_key,
                 sessions_dir=sessions_dir,
                 tracer=tracer,
+                # Session context from database
+                session_context=session_context,
             )
 
             # Execute using unified task runner
@@ -430,6 +459,16 @@ class AgentRunner:
             except Exception as e:
                 logger.warning(f"Failed to check pending questions for {session_id}: {e}")
 
+            # Extract usage data for cumulative token tracking
+            usage_dict = None
+            if metrics and metrics.usage:
+                usage_dict = {
+                    "input_tokens": metrics.usage.input_tokens,
+                    "output_tokens": metrics.usage.output_tokens,
+                    "cache_creation_input_tokens": metrics.usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": metrics.usage.cache_read_input_tokens,
+                }
+
             await self._update_session_status(
                 session_id=session_id,
                 status=final_status,
@@ -437,6 +476,7 @@ class AgentRunner:
                 num_turns=metrics.num_turns if metrics else None,
                 duration_ms=metrics.duration_ms if metrics else None,
                 total_cost_usd=metrics.total_cost_usd if metrics else None,
+                usage=usage_dict,
             )
 
             logger.info(f"Agent completed for session: {session_id} (status: {final_status})")
@@ -444,23 +484,28 @@ class AgentRunner:
         except asyncio.CancelledError:
             logger.info(f"Agent cancelled for session: {session_id}")
 
-            # Check if session has agent_start event (Claude session was established)
+            # Check if session has claude_session_id (Claude session was established)
             # This determines if the session can be resumed.
-            # We check the database rather than session_info.json because the
-            # resume_id may not have been written yet (race condition with async event recording)
+            # We check the database Session.claude_session_id directly.
             has_resume_id = False
             try:
-                events = await event_service.list_events(session_id, limit=50)
-                has_resume_id = any(
-                    e.get("type") == "agent_start" and e.get("data", {}).get("session_id")
-                    for e in events
-                )
+                # Primary: Check database for claude_session_id
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(Session).where(Session.id == session_id)
+                    )
+                    db_session = result.scalar_one_or_none()
+                    if db_session and db_session.claude_session_id:
+                        has_resume_id = True
+                    else:
+                        # Fallback: Check events for agent_start with session_id
+                        events = await event_service.list_events(session_id, limit=50)
+                        has_resume_id = any(
+                            e.get("type") == "agent_start" and e.get("data", {}).get("session_id")
+                            for e in events
+                        )
             except Exception as e:
-                logger.warning(f"Failed to check agent_start for {session_id}: {e}")
-                # Fall back to session_info check
-                from ..services.session_service import session_service
-                session_info = session_service.get_session_info(session_id)
-                has_resume_id = bool(session_info.get("resume_id"))
+                logger.warning(f"Failed to check resumability for {session_id}: {e}")
 
             self._results[session_id] = {
                 "status": "cancelled",
@@ -501,6 +546,28 @@ class AgentRunner:
             self._running_tasks.pop(session_id, None)
             self._cancel_flags.pop(session_id, None)
             # Subscribers handle their own cleanup
+
+            # Notify completion callbacks (for queue processor)
+            for callback in self._completion_callbacks:
+                try:
+                    callback(session_id, params.user_id)
+                except Exception as cb_error:
+                    logger.warning(f"Completion callback error: {cb_error}")
+
+    def register_completion_callback(
+        self, callback: Callable[[str, str], None]
+    ) -> None:
+        """
+        Register a callback to be called when any task completes.
+
+        Callbacks are invoked with (session_id, user_id) arguments after
+        task completion (success, failure, or cancellation).
+
+        Args:
+            callback: Function to call on completion.
+        """
+        self._completion_callbacks.append(callback)
+        logger.debug(f"Registered completion callback: {callback.__name__}")
 
     async def cancel_task(self, session_id: str) -> bool:
         """

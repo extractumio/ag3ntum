@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom';
 import App from './App';
 import { ErrorBoundary } from './ErrorBoundary';
+import { ToastProvider } from './components';
 import './styles.css';
 
 // Session ID validation: must match backend pattern YYYYMMDD_HHMMSS_8hexchars
@@ -44,26 +45,28 @@ if (!container) {
 createRoot(container).render(
   <React.StrictMode>
     <ErrorBoundary>
-      {/* Global CRT scanline overlay effect */}
-      <div
-        className="crt-overlay"
-        style={{
-          position: 'fixed',
-          inset: 0,
-          pointerEvents: 'none',
-          zIndex: 9999,
-          background: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px)',
-        }}
-      />
-      <BrowserRouter>
-        <TrailingSlashRedirect />
-        <Routes>
-          <Route path="/" element={<App />} />
-          <Route path="/session/:sessionId/" element={<SessionRoute />} />
-          <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+      <ToastProvider>
+        {/* Global CRT scanline overlay effect */}
+        <div
+          className="crt-overlay"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            pointerEvents: 'none',
+            zIndex: 9999,
+            background: 'repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px)',
+          }}
+        />
+        <BrowserRouter>
+          <TrailingSlashRedirect />
+          <Routes>
+            <Route path="/" element={<App />} />
+            <Route path="/session/:sessionId/" element={<SessionRoute />} />
+            <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </ToastProvider>
     </ErrorBoundary>
   </React.StrictMode>
 );

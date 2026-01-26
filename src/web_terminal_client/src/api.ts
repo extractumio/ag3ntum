@@ -3,6 +3,7 @@ import type {
   DirectoryListing,
   FileContentResponse,
   FileSortField,
+  QueueStatusResponse,
   ResultResponse,
   SessionListResponse,
   SessionResponse,
@@ -35,6 +36,11 @@ async function apiRequest<T>(
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
+  }
+
+  // Handle 204 No Content responses (e.g., DELETE operations)
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -129,6 +135,13 @@ export async function getResult(
   sessionId: string
 ): Promise<ResultResponse> {
   return apiRequest<ResultResponse>(baseUrl, `/api/v1/sessions/${sessionId}/result`, {}, token);
+}
+
+export async function getQueueStatus(
+  baseUrl: string,
+  token: string
+): Promise<QueueStatusResponse> {
+  return apiRequest<QueueStatusResponse>(baseUrl, '/api/v1/queue/status', {}, token);
 }
 
 export async function getSessionEvents(
@@ -268,6 +281,19 @@ export async function deleteFile(
     { method: 'DELETE' },
     token
   );
+}
+
+/**
+ * Delete a session completely (database + files).
+ * Only non-running sessions can be deleted.
+ */
+export async function deleteSession(
+  baseUrl: string,
+  token: string,
+  sessionId: string
+): Promise<void> {
+  const apiPath = `/api/v1/sessions/${sessionId}`;
+  await apiRequest<void>(baseUrl, apiPath, { method: 'DELETE' }, token);
 }
 
 /**

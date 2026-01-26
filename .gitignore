@@ -10,7 +10,11 @@ config/user_secrets.yaml
 venv/
 
 # User config files (not committed)
+# Copy from *.example files and customize for your deployment
+config/agent.yaml
+config/api.yaml
 config/external-mounts.yaml
+config/llm-api-proxy.yaml
 
 # Auto-generated files (created by run.sh)
 data/auto-generated/
@@ -30,6 +34,7 @@ node_modules/
 package-lock.json
 dist/
 .vite/
+*.timestamp-*.mjs
 
 # IDE
 .idea/

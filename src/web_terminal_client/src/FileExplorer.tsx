@@ -17,6 +17,7 @@ import {
   getFileContent,
   uploadFiles,
 } from './api';
+import { useToast } from './components';
 import type {
   FileContentResponse,
   FileInfo,
@@ -354,7 +355,6 @@ function DeleteConfirmModal({
     <div className="file-delete-overlay" onClick={onCancel}>
       <div className="file-delete-modal" onClick={(e) => e.stopPropagation()}>
         <div className="file-delete-header">
-          <span className="file-delete-icon">{ICONS.warning}</span>
           <span>Confirm Delete</span>
         </div>
         <div className="file-delete-content">
@@ -593,14 +593,10 @@ export function FileExplorer({
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [uploadNotification, setUploadNotification] = useState<{
-    type: 'uploading' | 'success' | 'error';
-    message: string;
-    fileCount: number;
-  } | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
-  const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uploadingToastRef = useRef<string | null>(null);
+  const toast = useToast();
 
   // Store callback props in refs to avoid re-creating callbacks when they change.
   // This prevents unnecessary API calls when parent re-renders (e.g., during user input or streaming).
@@ -971,37 +967,31 @@ export function FileExplorer({
       const fileCount = filesToUpload.length;
       const fileLabel = fileCount === 1 ? 'file' : 'files';
 
-      // Clear any existing notification timeout
-      if (notificationTimeoutRef.current) {
-        clearTimeout(notificationTimeoutRef.current);
+      // Remove any existing uploading toast
+      if (uploadingToastRef.current) {
+        toast.removeToast(uploadingToastRef.current);
       }
 
-      // Show uploading notification
-      setUploadNotification({
-        type: 'uploading',
-        message: `Uploading ${fileCount} ${fileLabel}...`,
-        fileCount,
-      });
+      // Show uploading toast (persistent until complete)
+      uploadingToastRef.current = toast.info(`Uploading ${fileCount} ${fileLabel}...`, true);
 
       setIsUploading(true);
       try {
         const result = await uploadFiles(baseUrl, token, sessionId, filesToUpload, targetPath);
 
+        // Remove uploading toast
+        if (uploadingToastRef.current) {
+          toast.removeToast(uploadingToastRef.current);
+          uploadingToastRef.current = null;
+        }
+
         // Report errors if any
         if (result.errors.length > 0) {
           onErrorRef.current?.(result.errors.join(', '));
-          setUploadNotification({
-            type: 'error',
-            message: `Upload failed: ${result.errors[0]}`,
-            fileCount,
-          });
+          toast.error(`Upload failed: ${result.errors[0]}`);
         } else {
           // Show success notification
-          setUploadNotification({
-            type: 'success',
-            message: `${fileCount} ${fileLabel} uploaded successfully`,
-            fileCount,
-          });
+          toast.success(`${fileCount} ${fileLabel} uploaded successfully`);
         }
 
         // Refresh the file listing to show new files
@@ -1017,28 +1007,20 @@ export function FileExplorer({
           // Refresh root
           await loadRootFiles();
         }
-
-        // Auto-dismiss notification after 3 seconds
-        notificationTimeoutRef.current = setTimeout(() => {
-          setUploadNotification(null);
-        }, 3000);
       } catch (err) {
+        // Remove uploading toast
+        if (uploadingToastRef.current) {
+          toast.removeToast(uploadingToastRef.current);
+          uploadingToastRef.current = null;
+        }
         console.error('Upload failed:', err);
         onErrorRef.current?.((err as Error).message);
-        setUploadNotification({
-          type: 'error',
-          message: `Upload failed: ${(err as Error).message}`,
-          fileCount,
-        });
-        // Auto-dismiss error after 5 seconds
-        notificationTimeoutRef.current = setTimeout(() => {
-          setUploadNotification(null);
-        }, 5000);
+        toast.error(`Upload failed: ${(err as Error).message}`);
       } finally {
         setIsUploading(false);
       }
     },
-    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, loadRootFiles]
+    [baseUrl, token, sessionId, showHiddenFiles, sortBy, sortOrder, loadRootFiles, toast]
   );
 
   // Handle file input change
@@ -1215,27 +1197,6 @@ export function FileExplorer({
               <UploadIcon />
               <span>Drop files here to upload</span>
             </div>
-          </div>
-        )}
-        {/* Upload notification toast */}
-        {uploadNotification && (
-          <div className={`file-upload-toast file-upload-toast-${uploadNotification.type}`}>
-            <span className="file-upload-toast-icon">
-              {uploadNotification.type === 'uploading' && ICONS.spinner}
-              {uploadNotification.type === 'success' && '✓'}
-              {uploadNotification.type === 'error' && '✗'}
-            </span>
-            <span className="file-upload-toast-message">{uploadNotification.message}</span>
-            {uploadNotification.type !== 'uploading' && (
-              <button
-                type="button"
-                className="file-upload-toast-dismiss"
-                onClick={() => setUploadNotification(null)}
-                title="Dismiss"
-              >
-                ×
-              </button>
-            )}
           </div>
         )}
         {isLoading ? (

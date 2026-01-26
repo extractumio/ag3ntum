@@ -83,6 +83,92 @@ class TaskStatus(StrEnum):
     ERROR = "ERROR"
 
 
+@dataclass
+class SessionContext:
+    """
+    Context data for an agent execution session.
+
+    This is a lightweight DTO that carries session state between
+    the caller (API/CLI) and the agent execution logic.
+
+    The caller is responsible for:
+    - Creating this from database Session model before execution
+    - Persisting updates back to database after execution
+
+    Usage:
+        # Create from database Session model
+        session_context = SessionContext.from_db_session(db_session)
+
+        # Run agent
+        result = await agent.run(task, session_context=session_context)
+
+        # Persist completion data from result.metrics back to database
+    """
+    session_id: str
+    # Claude SDK session ID for resumption (captured from init event)
+    claude_session_id: Optional[str] = None
+    # Cumulative statistics across all resumptions
+    cumulative_turns: int = 0
+    cumulative_duration_ms: int = 0
+    cumulative_cost_usd: float = 0.0
+    # Token usage
+    cumulative_input_tokens: int = 0
+    cumulative_output_tokens: int = 0
+    cumulative_cache_creation_tokens: int = 0
+    cumulative_cache_read_tokens: int = 0
+    # Session configuration
+    file_checkpointing_enabled: bool = False
+    model: Optional[str] = None
+    parent_session_id: Optional[str] = None
+    working_dir: Optional[str] = None
+
+    @property
+    def cumulative_total_tokens(self) -> int:
+        """Total cumulative tokens (input + output + cache)."""
+        return (
+            self.cumulative_input_tokens +
+            self.cumulative_output_tokens +
+            self.cumulative_cache_creation_tokens +
+            self.cumulative_cache_read_tokens
+        )
+
+    def to_token_usage(self) -> "TokenUsage":
+        """Convert cumulative token stats to TokenUsage for display."""
+        return TokenUsage(
+            input_tokens=self.cumulative_input_tokens,
+            output_tokens=self.cumulative_output_tokens,
+            cache_creation_input_tokens=self.cumulative_cache_creation_tokens,
+            cache_read_input_tokens=self.cumulative_cache_read_tokens,
+        )
+
+    @classmethod
+    def from_db_session(cls, session: Any) -> "SessionContext":
+        """
+        Create SessionContext from a database Session model.
+
+        Args:
+            session: Database Session model instance.
+
+        Returns:
+            SessionContext populated from database fields.
+        """
+        return cls(
+            session_id=session.id,
+            claude_session_id=session.claude_session_id,
+            cumulative_turns=session.cumulative_turns or 0,
+            cumulative_duration_ms=session.cumulative_duration_ms or 0,
+            cumulative_cost_usd=session.cumulative_cost_usd or 0.0,
+            cumulative_input_tokens=session.cumulative_input_tokens or 0,
+            cumulative_output_tokens=session.cumulative_output_tokens or 0,
+            cumulative_cache_creation_tokens=session.cumulative_cache_creation_tokens or 0,
+            cumulative_cache_read_tokens=session.cumulative_cache_read_tokens or 0,
+            file_checkpointing_enabled=session.file_checkpointing_enabled or False,
+            model=session.model,
+            parent_session_id=session.parent_session_id,
+            working_dir=session.working_dir,
+        )
+
+
 # Model context window sizes (in tokens)
 # These are the maximum context window sizes for each model
 MODEL_CONTEXT_SIZES: dict[str, int] = {
@@ -348,78 +434,14 @@ class AgentConfig(BaseModel):
         return None
 
 
-class SessionInfo(BaseModel):
-    """
-    Session information.
-
-    Contains session ID, timestamps, state, metrics, cumulative
-    token/cost statistics, and checkpoint history.
-    """
-    session_id: str
-    created_at: datetime = Field(default_factory=datetime.now)
-    working_dir: str
-    status: TaskStatus = TaskStatus.PARTIAL
-    resume_id: Optional[str] = Field(
-        default=None,
-        description="Claude session ID for resuming"
-    )
-    num_turns: Optional[int] = Field(
-        default=None,
-        description="Number of turns in the session (current run only)"
-    )
-    duration_ms: Optional[int] = Field(
-        default=None,
-        description="Duration of the session in milliseconds (current run only)"
-    )
-    total_cost_usd: Optional[float] = Field(
-        default=None,
-        description="Total cost of the session in USD (current run only)"
-    )
-    # Cumulative statistics (persist across session resumptions)
-    cumulative_turns: int = Field(
-        default=0,
-        description="Cumulative number of turns across all runs"
-    )
-    cumulative_duration_ms: int = Field(
-        default=0,
-        description="Cumulative duration in milliseconds across all runs"
-    )
-    cumulative_cost_usd: float = Field(
-        default=0.0,
-        description="Cumulative cost in USD across all runs"
-    )
-    cumulative_usage: Optional[TokenUsage] = Field(
-        default=None,
-        description="Cumulative token usage across all runs"
-    )
-    # Model information for context load tracking
-    model: Optional[str] = Field(
-        default=None,
-        description="The model used in this session"
-    )
-    # Fork tracking
-    parent_session_id: Optional[str] = Field(
-        default=None,
-        description="Parent session ID if this session was forked"
-    )
-    # File checkpointing
-    checkpoints: list[Checkpoint] = Field(
-        default_factory=list,
-        description="""
-List of checkpoints for file state tracking.
-Each checkpoint represents a point that can be rewound to."""
-    )
-    file_checkpointing_enabled: bool = Field(
-        default=False,
-        description="Whether file checkpointing is enabled for this session"
-    )
-
-
 class AgentResult(BaseModel):
     """
     Agent execution result.
 
     Contains the status, output, error, comments, result_files, and metrics.
+
+    Note: Session context is passed in and returned for convenience, but the
+    caller is responsible for persisting any updates to the database.
     """
     status: TaskStatus
     output: Optional[str] = None
@@ -427,7 +449,8 @@ class AgentResult(BaseModel):
     comments: Optional[str] = None
     result_files: list[str] = Field(default_factory=list)
     metrics: Optional[LLMMetrics] = None
-    session_info: Optional[SessionInfo] = None
+    # Session ID for reference (session context is passed separately)
+    session_id: Optional[str] = None
 
 
 @dataclass
@@ -486,3 +509,7 @@ class TaskExecutionParams:
 
     # Tracer (CLI: ExecutionTracer, HTTP: BackendConsoleTracer)
     tracer: Optional[Any] = None  # Type: TracerBase (Any to avoid circular import)
+
+    # Session context (for passing cumulative stats, claude_session_id, etc.)
+    # API caller creates this from database Session; CLI may leave it None
+    session_context: Optional["SessionContext"] = None
