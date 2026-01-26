@@ -126,6 +126,9 @@ async def stream_user_events(
             detail="Invalid or expired token",
         )
 
+    # Import here to avoid circular imports
+    from ...db.database import AsyncSessionLocal
+
     async def event_generator():
         """
         Generate SSE events for all user sessions.
@@ -139,12 +142,13 @@ async def stream_user_events(
 
         # Track session statuses to detect changes
         session_statuses: dict[str, str] = {}
+        consecutive_errors = 0
 
-        try:
-            while True:
+        while True:
+            try:
                 # Get ALL recent sessions for this user (not just running/queued)
                 # This allows us to detect status changes (running -> complete/failed)
-                async with get_db_session() as session_db:
+                async with AsyncSessionLocal() as session_db:
                     result = await session_db.execute(
                         select(Session).where(Session.user_id == user_id)
                         .order_by(Session.updated_at.desc())
@@ -152,6 +156,9 @@ async def stream_user_events(
                     )
                     sessions = result.scalars().all()
                     current_statuses = {s.id: s.status for s in sessions}
+
+                # Reset error counter on success
+                consecutive_errors = 0
 
                 # Check if any session status changed
                 changed_sessions = []
@@ -213,23 +220,27 @@ async def stream_user_events(
                 # Poll for updates (could be replaced with Redis pub/sub for better performance)
                 await asyncio.sleep(2)
 
-        except asyncio.CancelledError:
-            logger.debug(f"User events stream cancelled for user {user_id}")
-            raise
+            except asyncio.CancelledError:
+                logger.debug(f"User events stream cancelled for user {user_id}")
+                raise
 
-        except Exception as e:
-            logger.exception(f"User events stream error for user {user_id}: {e}")
-            error_event = {
-                "type": "error",
-                "data": {"message": f"Stream error: {str(e)}"},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            yield f"data: {json.dumps(error_event)}\n\n"
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(f"User events stream error for user {user_id} (attempt {consecutive_errors}): {e}")
 
-    # Helper to get fresh DB session in generator
-    from ...db.database import AsyncSessionLocal
-    async def get_db_session():
-        return AsyncSessionLocal()
+                # After too many consecutive errors, terminate the stream
+                if consecutive_errors >= 5:
+                    logger.error(f"User events stream for {user_id} terminated after {consecutive_errors} consecutive errors")
+                    error_event = {
+                        "type": "error",
+                        "data": {"message": "Stream terminated due to repeated errors"},
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                    return
+
+                # Wait before retrying (with backoff)
+                await asyncio.sleep(min(2 ** consecutive_errors, 30))
 
     return StreamingResponse(
         event_generator(),

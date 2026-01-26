@@ -7,6 +7,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockClipboardWrite = vi.fn();
 const mockClipboardWriteText = vi.fn();
 
+// Mock ClipboardItem since it's not available in jsdom
+class MockClipboardItem {
+  types: string[];
+  private data: Record<string, Blob>;
+
+  constructor(data: Record<string, Blob>) {
+    this.data = data;
+    this.types = Object.keys(data);
+  }
+
+  async getType(type: string): Promise<Blob> {
+    return this.data[type];
+  }
+}
+
+// Set up ClipboardItem globally before tests
+(global as unknown as { ClipboardItem: typeof MockClipboardItem }).ClipboardItem = MockClipboardItem;
+
 // CopyButtons component implementation (extracted from App.tsx)
 async function copyAsRichText(element: HTMLElement): Promise<boolean> {
   try {

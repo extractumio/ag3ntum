@@ -181,8 +181,19 @@ vi.mock('../../../src/web_terminal_client/src/FileViewer', () => ({
 }));
 
 import { FileExplorer } from '../../../src/web_terminal_client/src/FileExplorer';
+import { ToastProvider } from '../../../src/web_terminal_client/src/components';
 import * as api from '../../../src/web_terminal_client/src/api';
 import { createMockDirectoryListing, createMockFileInfo } from '../mocks/data';
+import type { RenderOptions } from '@testing-library/react';
+import React from 'react';
+
+// Wrapper that provides ToastProvider context
+function renderWithToast(ui: React.ReactElement, options?: Omit<RenderOptions, 'wrapper'>) {
+  return render(ui, {
+    wrapper: ({ children }) => <ToastProvider>{children}</ToastProvider>,
+    ...options,
+  });
+}
 
 describe('FileExplorer Component', () => {
   const defaultProps = {
@@ -202,7 +213,7 @@ describe('FileExplorer Component', () => {
     it('renders loading state initially', async () => {
       vi.mocked(api.browseFiles).mockImplementation(() => new Promise(() => {})); // Never resolves
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       expect(screen.getByText(/loading/i)).toBeInTheDocument();
     });
@@ -211,7 +222,7 @@ describe('FileExplorer Component', () => {
       const mockListing = createMockDirectoryListing();
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('file1.txt')).toBeInTheDocument();
@@ -230,7 +241,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('my-folder')).toBeInTheDocument();
@@ -244,7 +255,7 @@ describe('FileExplorer Component', () => {
     it('renders error state when loading fails', async () => {
       vi.mocked(api.browseFiles).mockRejectedValue(new Error('Network error'));
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText(/error/i)).toBeInTheDocument();
@@ -255,7 +266,7 @@ describe('FileExplorer Component', () => {
       const onError = vi.fn();
       vi.mocked(api.browseFiles).mockRejectedValue(new Error('Network error'));
 
-      render(<FileExplorer {...defaultProps} onError={onError} />);
+      renderWithToast(<FileExplorer {...defaultProps} onError={onError} />);
 
       await waitFor(() => {
         expect(onError).toHaveBeenCalled();
@@ -288,7 +299,7 @@ describe('FileExplorer Component', () => {
           truncated: false,
         });
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('src')).toBeInTheDocument();
@@ -323,7 +334,7 @@ describe('FileExplorer Component', () => {
           truncated: false,
         });
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('src')).toBeInTheDocument();
@@ -361,7 +372,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('readme.md')).toBeInTheDocument();
@@ -383,7 +394,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('data.zip')).toBeInTheDocument();
@@ -407,7 +418,7 @@ describe('FileExplorer Component', () => {
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
       vi.mocked(api.downloadFile).mockResolvedValue(undefined);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('file.txt')).toBeInTheDocument();
@@ -438,7 +449,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('old-file.txt')).toBeInTheDocument();
@@ -471,7 +482,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      render(<FileExplorer {...defaultProps} />);
+      renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('large.bin')).toBeInTheDocument();
@@ -492,7 +503,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('file.txt')).toBeInTheDocument();
@@ -515,7 +526,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         expect(screen.getByText('protected.txt')).toBeInTheDocument();
@@ -534,7 +545,7 @@ describe('FileExplorer Component', () => {
       const mockListing = createMockDirectoryListing();
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(
+      const { container } = renderWithToast(
         <FileExplorer {...defaultProps} className="custom-explorer" />
       );
 
@@ -557,7 +568,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      render(
+      renderWithToast(
         <FileExplorer {...defaultProps} onFileNameInsert={onFileNameInsert} />
       );
 
@@ -583,7 +594,7 @@ describe('FileExplorer Component', () => {
       });
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      render(<FileExplorer {...defaultProps} showHiddenFiles={true} />);
+      renderWithToast(<FileExplorer {...defaultProps} showHiddenFiles={true} />);
 
       await waitFor(() => {
         // browseFiles(baseUrl, token, sessionId, path, options)
@@ -606,7 +617,7 @@ describe('FileExplorer Component', () => {
       const mockListing = createMockDirectoryListing();
       vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
 
-      const { container } = render(<FileExplorer {...defaultProps} />);
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
 
       await waitFor(() => {
         // Look for upload button in the header

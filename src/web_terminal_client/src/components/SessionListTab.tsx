@@ -7,8 +7,9 @@
  * - Status indicators (pulsing spinner for running, checkmark, X, clock, etc.)
  * - Badge system for non-current session changes
  * - Delete functionality for non-running sessions
+ * - Columnar layout with elapsed time timers
  */
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import type { SessionResponse } from '../types';
 
 interface SessionListTabProps {
@@ -18,6 +19,8 @@ interface SessionListTabProps {
   badges: SessionBadges;
   onClearBadge: (sessionId: string) => void;
   onDeleteSession?: (sessionId: string) => Promise<void>;
+  /** Start time of the current run (for active sessions) - used for elapsed time calculation */
+  currentRunStartTime?: string | null;
 }
 
 export interface SessionBadges {
@@ -104,6 +107,119 @@ function formatRelativeTime(dateStr: string | null | undefined): string {
 }
 
 /**
+ * Format elapsed time in human-readable format.
+ * Returns: XX sec, NN min XX sec, or HH hours NN min XX sec
+ */
+function formatElapsedTime(seconds: number): string {
+  if (seconds < 0) return '0 sec';
+
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${secs}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  } else {
+    return `${secs}s`;
+  }
+}
+
+/**
+ * Calculate elapsed seconds from a start time to now or end time.
+ */
+function calculateElapsedSeconds(startTime: string, endTime?: string | null): number {
+  const start = new Date(startTime).getTime();
+  const end = endTime ? new Date(endTime).getTime() : Date.now();
+  return Math.max(0, Math.floor((end - start) / 1000));
+}
+
+/**
+ * ElapsedTime component - displays a live timer that updates every 2 seconds.
+ * Shows the duration of the current/last run, NOT total session time.
+ * Stops updating when the session is no longer running/queued.
+ */
+interface ElapsedTimeProps {
+  session: SessionResponse;
+  /** For the current running session, the time when the run started */
+  runStartTime?: string | null;
+}
+
+function ElapsedTime({ session, runStartTime }: ElapsedTimeProps): JSX.Element {
+  const isActive = session.status === 'running' || session.status === 'queued';
+
+  // Determine the start time based on status:
+  // - For queued: use queued_at
+  // - For running: use runStartTime if provided, otherwise updated_at (approximation)
+  // - For completed/failed: use duration_ms if available, otherwise calculate from updated_at
+  const getStartTime = (): string => {
+    if (session.status === 'queued' && session.queued_at) {
+      return session.queued_at;
+    }
+    if (session.status === 'running') {
+      // For running sessions, prefer the explicit run start time
+      // Fall back to updated_at which is set when status changes to running
+      return runStartTime || session.updated_at;
+    }
+    // For completed/failed/cancelled sessions, we want to show the duration of the last run
+    // We'll calculate from the point the session status was last set to running (approximated by updated_at)
+    // This will be refined by the end time calculation
+    return session.updated_at;
+  };
+
+  const startTime = getStartTime();
+
+  // Determine end time - use completed_at if available for finished sessions
+  const endTime = !isActive ? (session.completed_at || session.updated_at) : null;
+
+  // For completed sessions with duration_ms, use that directly
+  const getDurationSeconds = (): number => {
+    if (!isActive && session.duration_ms != null && session.duration_ms > 0) {
+      return Math.floor(session.duration_ms / 1000);
+    }
+    return calculateElapsedSeconds(startTime, endTime);
+  };
+
+  const [elapsed, setElapsed] = useState(() => getDurationSeconds());
+  const intervalRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    // Initial calculation
+    setElapsed(getDurationSeconds());
+
+    // Only set up interval if session is active
+    if (isActive) {
+      intervalRef.current = window.setInterval(() => {
+        setElapsed(calculateElapsedSeconds(startTime, null));
+      }, 2000);
+    }
+
+    return () => {
+      if (intervalRef.current !== null) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [startTime, endTime, isActive, runStartTime, session.duration_ms]);
+
+  // Update elapsed when session status changes (e.g., from running to complete)
+  useEffect(() => {
+    if (!isActive) {
+      setElapsed(getDurationSeconds());
+    }
+  }, [isActive, startTime, endTime, session.duration_ms]);
+
+  const label = session.status === 'queued' ? 'queued' : 'elapsed';
+
+  return (
+    <span className={`session-elapsed-time ${isActive ? 'active' : ''}`} title={`${label}: ${formatElapsedTime(elapsed)}`}>
+      {formatElapsedTime(elapsed)}
+    </span>
+  );
+}
+
+/**
  * Delete confirmation modal.
  */
 interface DeleteConfirmModalProps {
@@ -123,7 +239,6 @@ function DeleteConfirmModal({
     <div className="session-delete-overlay" onClick={onCancel}>
       <div className="session-delete-modal" onClick={(e) => e.stopPropagation()}>
         <div className="session-delete-header">
-          <span className="session-delete-warning-icon">{ICONS.warning}</span>
           <span>Delete Session</span>
         </div>
         <div className="session-delete-content">
@@ -166,16 +281,19 @@ export function SessionListTab({
   badges,
   onClearBadge,
   onDeleteSession,
+  currentRunStartTime,
 }: SessionListTabProps) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Sort sessions by updated_at (most recent first)
-  const sortedSessions = [...sessions].sort((a, b) => {
-    const dateA = new Date(a.updated_at || a.created_at).getTime();
-    const dateB = new Date(b.updated_at || b.created_at).getTime();
-    return dateB - dateA;
-  });
+  // Sort sessions by updated_at (most recent first) and limit to 30
+  const sortedSessions = [...sessions]
+    .sort((a, b) => {
+      const dateA = new Date(a.updated_at || a.created_at).getTime();
+      const dateB = new Date(b.updated_at || b.created_at).getTime();
+      return dateB - dateA;
+    })
+    .slice(0, 30);
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -227,6 +345,17 @@ export function SessionListTab({
   return (
     <>
       <div className="session-list-tab">
+        {/* Column headers */}
+        <div className="session-list-header">
+          <span className="session-col-status">Status</span>
+          <span className="session-col-id">Session ID</span>
+          <span className="session-col-task">Task</span>
+          <span className="session-col-elapsed">Elapsed</span>
+          <span className="session-col-time">When</span>
+          <span className="session-col-actions"></span>
+        </div>
+
+        {/* Session rows */}
         {sortedSessions.map((session) => {
           const { icon, className } = getStatusIndicator(session.status);
           const isCurrent = session.id === currentSessionId;
@@ -246,45 +375,62 @@ export function SessionListTab({
           return (
             <div
               key={session.id}
-              className={`session-list-item ${isCurrent ? 'current' : ''} ${hasBadge ? 'has-badge' : ''}`}
+              className={`session-list-row ${isCurrent ? 'current' : ''} ${hasBadge ? 'has-badge' : ''}`}
             >
               <button
-                className="session-list-item-main"
+                className="session-list-row-main"
                 onClick={() => handleSelectSession(session.id)}
                 type="button"
               >
-                <span className={`session-status-icon ${className}`}>{icon}</span>
-                <div className="session-list-item-content">
-                  <span className="session-list-item-id">
-                    {session.id}
-                  </span>
-                  <span className="session-list-item-task">
-                    {session.task ? (session.task.length > 40 ? session.task.slice(0, 40) + '...' : session.task) : 'No task'}
-                  </span>
-                </div>
-                <div className="session-list-item-meta">
-                  <span className="session-list-item-time">
-                    {formatRelativeTime(session.updated_at || session.created_at)}
-                  </span>
-                  {session.status === 'queued' && session.queue_position != null && (
-                    <span className="session-list-item-queue">#{session.queue_position}</span>
-                  )}
+                {/* Status column */}
+                <span className={`session-col-status session-status-icon ${className}`}>
+                  {icon}
                   {badgeType && !isCurrent && (
                     <span className={`session-list-item-badge badge-${badgeType}`} />
                   )}
-                </div>
+                </span>
+
+                {/* Session ID column */}
+                <span className="session-col-id" title={session.id}>
+                  {session.id}
+                </span>
+
+                {/* Task column */}
+                <span className="session-col-task" title={session.task || 'No task'}>
+                  {session.task ? (session.task.length > 35 ? session.task.slice(0, 35) + '...' : session.task) : 'No task'}
+                </span>
+
+                {/* Elapsed time column */}
+                <span className="session-col-elapsed">
+                  <ElapsedTime
+                    session={session}
+                    runStartTime={isCurrent ? currentRunStartTime : undefined}
+                  />
+                  {session.status === 'queued' && session.queue_position != null && (
+                    <span className="session-queue-pos">#{session.queue_position}</span>
+                  )}
+                </span>
+
+                {/* Relative time column */}
+                <span className="session-col-time">
+                  {formatRelativeTime(session.updated_at || session.created_at)}
+                </span>
               </button>
-              {showDeleteButton && (
-                <button
-                  className="session-list-item-delete"
-                  onClick={(e) => handleDeleteClick(e, session.id)}
-                  type="button"
-                  title="Delete session"
-                  aria-label="Delete session"
-                >
-                  <TrashIcon />
-                </button>
-              )}
+
+              {/* Actions column */}
+              <span className="session-col-actions">
+                {showDeleteButton && (
+                  <button
+                    className="session-list-item-delete"
+                    onClick={(e) => handleDeleteClick(e, session.id)}
+                    type="button"
+                    title="Delete session"
+                    aria-label="Delete session"
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
+              </span>
             </div>
           );
         })}

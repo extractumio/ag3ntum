@@ -71,7 +71,13 @@ import {
   StatusSpinner,
   TrailingWaitSpinner,
   useSessionBadges,
+  useToast,
 } from './components';
+
+// Terminal statuses that should not be overwritten by stale server data or events.
+// This set is used throughout session state management to prevent race conditions
+// where the server hasn't persisted a terminal status yet but the frontend already knows.
+const TERMINAL_STATUSES = new Set(['complete', 'completed', 'partial', 'failed', 'cancelled', 'canceled']);
 import { useElapsedTime, useSpinnerFrame } from './hooks';
 import {
   blockAltKeyHotkeys,
@@ -1383,7 +1389,7 @@ function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
-  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
+  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
   const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
@@ -2147,11 +2153,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     totalSecrets: number;
   } | null>(null);
 
-  // Notification state for session deletion success
-  const [notification, setNotification] = useState<{
-    message: string;
-    type: 'success' | 'error';
-  } | null>(null);
+  // Toast notifications
+  const toast = useToast();
 
   const isMobile = useIsMobile();
 
@@ -2211,13 +2214,75 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     }
 
     listSessionsCached(config.api.base_url, token)
-      .then((response: SessionListResponse) => setSessions(response.sessions))
+      .then((response: SessionListResponse) => {
+        // Merge server sessions with local state using defensive merging:
+        // 1. Terminal statuses are "sticky" - can't be reverted to non-terminal
+        // 2. Newer local timestamps take precedence over stale server data
+        setSessions((prevSessions) => {
+          const localSessionMap = new Map<string, SessionResponse>();
+          for (const session of prevSessions) {
+            localSessionMap.set(session.id, session);
+          }
+
+          return response.sessions.map((serverSession) => {
+            const localSession = localSessionMap.get(serverSession.id);
+            if (!localSession) {
+              // New session from server, use server data
+              return serverSession;
+            }
+
+            // RULE 1: If local is terminal and server is non-terminal, keep local
+            // (Server hasn't caught up to the terminal event yet)
+            if (TERMINAL_STATUSES.has(localSession.status) && !TERMINAL_STATUSES.has(serverSession.status)) {
+              return localSession;
+            }
+
+            // RULE 2: If local has newer timestamp and is terminal, keep local
+            // (Local state was updated more recently and reached a final state)
+            const localTime = new Date(localSession.updated_at).getTime();
+            const serverTime = new Date(serverSession.updated_at).getTime();
+            if (localTime > serverTime && TERMINAL_STATUSES.has(localSession.status)) {
+              return localSession;
+            }
+
+            // Otherwise, use server data (it's fresher or both are terminal)
+            return serverSession;
+          });
+        });
+      })
       .catch((err: Error) => setError(`Failed to load sessions: ${err.message}`));
   }, [config, token]);
 
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
+
+  // Sync sessions[] from currentSession when currentSession has terminal status but sessions[] doesn't
+  // This is a ONE-WAY sync: currentSession → sessions[], never the reverse.
+  //
+  // Why one-way only?
+  // - When user clicks "Continue" on a completed session, handleSubmit sets currentSession to 'running'
+  // - If we synced FROM sessions[] TO currentSession, we'd overwrite the intentional 'running' back to 'completed'
+  // - Terminal events always come through Session SSE which updates BOTH currentSession and sessions[]
+  // - So there's no legitimate case where sessions[] has newer terminal info than currentSession
+  useEffect(() => {
+    if (!currentSession) return;
+
+    const matchingSession = sessions.find((s) => s.id === currentSession.id);
+    if (!matchingSession) return;
+
+    // Only sync if currentSession is terminal and sessions[] is not
+    // This handles: User Events SSE sent stale 'running' status for current session
+    if (
+      matchingSession.status !== currentSession.status &&
+      TERMINAL_STATUSES.has(currentSession.status) &&
+      !TERMINAL_STATUSES.has(matchingSession.status)
+    ) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === currentSession.id ? { ...s, status: currentSession.status } : s))
+      );
+    }
+  }, [currentSession, sessions]);
 
   // Load session from URL on mount
   useEffect(() => {
@@ -2261,13 +2326,19 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           } | undefined;
 
           if (change) {
-            // Update the session in our list
+            // Update the session in our list, with terminal status protection
             setSessions((prevSessions) =>
-              prevSessions.map((session) =>
-                session.id === change.id
-                  ? { ...session, status: change.new_status, queue_position: change.queue_position ?? null }
-                  : session
-              )
+              prevSessions.map((session) => {
+                if (session.id !== change.id) return session;
+
+                // CRITICAL: Don't overwrite terminal status with non-terminal status
+                // This prevents race conditions where server sends stale status updates
+                if (TERMINAL_STATUSES.has(session.status) && !TERMINAL_STATUSES.has(change.new_status)) {
+                  return session;
+                }
+
+                return { ...session, status: change.new_status, queue_position: change.queue_position ?? null };
+              })
             );
 
             // Add badge for status changes on non-current sessions
@@ -2294,30 +2365,35 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           }> | undefined;
 
           if (sessionList) {
-            // Update session statuses in our local list
+            // Update session statuses in our local list, with terminal status protection
             setSessions((prevSessions) =>
               prevSessions.map((session) => {
                 const updated = sessionList.find((s) => s.id === session.id);
-                if (updated) {
-                  // Check if status changed for badge purposes
-                  if (session.status !== updated.status && session.id !== currentSession?.id) {
-                    // Add badge based on new status
-                    if (updated.status === 'complete' || updated.status === 'completed') {
-                      addSessionBadge(session.id, 'completed');
-                    } else if (updated.status === 'failed') {
-                      addSessionBadge(session.id, 'failed');
-                    } else if (updated.status === 'waiting_for_input') {
-                      addSessionBadge(session.id, 'waiting');
-                    }
-                  }
-                  return {
-                    ...session,
-                    status: updated.status,
-                    queue_position: updated.queue_position ?? null,
-                    is_auto_resume: updated.is_auto_resume ?? false,
-                  };
+                if (!updated) return session;
+
+                // CRITICAL: Don't overwrite terminal status with non-terminal status
+                // This prevents race conditions where server sends stale status updates
+                if (TERMINAL_STATUSES.has(session.status) && !TERMINAL_STATUSES.has(updated.status)) {
+                  return session;
                 }
-                return session;
+
+                // Check if status changed for badge purposes
+                if (session.status !== updated.status && session.id !== currentSession?.id) {
+                  // Add badge based on new status
+                  if (updated.status === 'complete' || updated.status === 'completed') {
+                    addSessionBadge(session.id, 'completed');
+                  } else if (updated.status === 'failed') {
+                    addSessionBadge(session.id, 'failed');
+                  } else if (updated.status === 'waiting_for_input') {
+                    addSessionBadge(session.id, 'waiting');
+                  }
+                }
+                return {
+                  ...session,
+                  status: updated.status,
+                  queue_position: updated.queue_position ?? null,
+                  is_auto_resume: updated.is_auto_resume ?? false,
+                };
               })
             );
           }
@@ -2435,20 +2511,23 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         setStatus(normalizedStatus);
         setRunningStartTime(null);
 
+        const completedAt = new Date().toISOString();
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: normalizedStatus,
-                completed_at: new Date().toISOString(),
+                completed_at: completedAt,
+                updated_at: completedAt,
                 num_turns: prev.num_turns + Number(event.data.num_turns ?? 0),
               }
             : null
         );
+        // Update sessions list with timestamps so elapsed timer stops immediately
         setSessions((prev) =>
           prev.map((session) =>
             session.id === currentSession?.id
-              ? { ...session, status: normalizedStatus }
+              ? { ...session, status: normalizedStatus, completed_at: completedAt, updated_at: completedAt }
               : session
           )
         );
@@ -2460,17 +2539,28 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
       if (event.type === 'cancelled') {
         setStatus('cancelled');
+        setRunningStartTime(null);
         // Check if session is resumable (has resume_id established)
         const resumable = Boolean(event.data?.resumable);
+        const cancelledAt = new Date().toISOString();
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: 'cancelled',
-                completed_at: new Date().toISOString(),
+                completed_at: cancelledAt,
+                updated_at: cancelledAt,
                 resumable,
               }
             : null
+        );
+        // Update sessions list with timestamps so elapsed timer stops immediately
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === currentSession?.id
+              ? { ...session, status: 'cancelled', completed_at: cancelledAt, updated_at: cancelledAt }
+              : session
+          )
         );
         // Invalidate cache and refresh to sync with server
         invalidateSessionsCache();
@@ -2539,24 +2629,31 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
       if (event.type === 'error') {
         setStatus('failed');
+        setRunningStartTime(null);
         setError(String(event.data.message ?? 'Unknown error'));
+        const nowIso = new Date().toISOString();
         // Update session status so next submit can continue rather than reset
         setCurrentSession((prev) =>
           prev
             ? {
                 ...prev,
                 status: 'failed',
-                completed_at: new Date().toISOString(),
+                completed_at: nowIso,
+                updated_at: nowIso,
               }
             : null
         );
+        // Update sessions list with timestamps so elapsed timer stops
         setSessions((prevSessions) =>
           prevSessions.map((session) =>
             session.id === currentSession?.id
-              ? { ...session, status: 'failed' }
+              ? { ...session, status: 'failed', completed_at: nowIso, updated_at: nowIso }
               : session
           )
         );
+        // Invalidate cache and refresh to sync with server
+        invalidateSessionsCache();
+        refreshSessions();
       }
 
       // Handle security alert events (sensitive data detected and redacted)
@@ -2620,10 +2717,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         },
         // Connection state change callback
         (state) => {
+          const previousState = connectionState;
           setConnectionState(state);
           if (state === 'connected') {
             setReconnecting(false);
             setError(null);
+            // RESYNC ON RECONNECT: When transitioning to connected from degraded/reconnecting/polling,
+            // refresh sessions to ensure we have the latest state (terminal status protection applies)
+            if (previousState === 'reconnecting' || previousState === 'polling' || previousState === 'degraded') {
+              invalidateSessionsCache();
+              refreshSessions();
+            }
           } else if (state === 'polling') {
             // Polling mode still works - just a different transport
             setError(null);
@@ -2835,6 +2939,17 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           updated_at: new Date().toISOString(),
         }));
 
+        // CRITICAL: Also update sessions[] directly so the session panel shows 'running'
+        // We can't rely on refreshSessions() because terminal status protection would
+        // keep the old 'completed' status if the server hasn't updated yet.
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === currentSession.id
+              ? { ...s, status: response.status, updated_at: new Date().toISOString() }
+              : s
+          )
+        );
+
         setInputValue('');
         setAttachedFiles([]);
         const lastSequence = getLastServerSequence(events);
@@ -3039,6 +3154,39 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     setStoredSelectedModel(model);
   }, []);
 
+  /**
+   * Scroll output to bottom. If distance > 1000px, jump instantly.
+   * When forceInstant is true, scrolls multiple times to catch lazy-loaded content.
+   */
+  const scrollOutputToBottom = useCallback((forceInstant = false) => {
+    const doScroll = () => {
+      if (!outputRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = outputRef.current;
+      const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+
+      // Jump instantly if distance > 1000px or forceInstant is true
+      if (forceInstant || distanceToBottom > 1000) {
+        outputRef.current.scrollTop = scrollHeight;
+      } else {
+        outputRef.current.scrollTo({
+          top: scrollHeight,
+          behavior: 'smooth',
+        });
+      }
+    };
+
+    // First scroll immediately after next frame
+    requestAnimationFrame(doScroll);
+
+    // When loading a session, scroll multiple times to catch lazy-loaded content
+    // (images, embedded documents, syntax highlighting, etc.)
+    if (forceInstant) {
+      setTimeout(doScroll, 50);   // After initial render
+      setTimeout(doScroll, 150);  // After most content loads
+      setTimeout(doScroll, 400);  // After images/heavy content
+    }
+  }, []);
+
   const handleSelectSession = async (sessionId: string): Promise<void> => {
     if (!config || !token) {
       return;
@@ -3058,6 +3206,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       const historyEvents = await getSessionEvents(config.api.base_url, token, sessionId);
       const lastSequence = getLastServerSequence(historyEvents);
       setEvents(seedSessionEvents(session, historyEvents));
+
+      // Scroll to bottom after loading session (instant jump for long conversations)
+      scrollOutputToBottom(true);
 
       // Sum up stats from ALL agent_complete events (for multi-turn/resumed sessions)
       const completionEvents = historyEvents.filter((event) => event.type === 'agent_complete');
@@ -3175,19 +3326,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       refreshSessions();
 
       // Show success notification
-      setNotification({
-        message: `Session ${sessionId} deleted`,
-        type: 'success',
-      });
-
-      // Auto-hide notification after 3 seconds
-      setTimeout(() => setNotification(null), 3000);
+      toast.success(`Session ${sessionId} deleted`);
     } catch (err) {
-      setNotification({
-        message: `Failed to delete session: ${(err as Error).message}`,
-        type: 'error',
-      });
-      setTimeout(() => setNotification(null), 5000);
+      toast.error(`Failed to delete session: ${(err as Error).message}`);
       throw err; // Re-throw so the modal can handle the error state
     }
   }, [config, token, currentSession, navigate, refreshSessions]);
@@ -4730,6 +4871,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   badges={sessionBadges}
                   onClearBadge={clearSessionBadge}
                   onDeleteSession={handleDeleteSession}
+                  currentRunStartTime={runningStartTime}
                 />
               ) : currentSession && config && token ? (
               <>
@@ -4814,28 +4956,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                 I Understand
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Session action notification toast */}
-        {notification && (
-          <div
-            className={`notification-toast notification-${notification.type}`}
-            role="alert"
-            aria-live="polite"
-          >
-            <span className="notification-icon">
-              {notification.type === 'success' ? '\u2713' : '\u2717'}
-            </span>
-            <span className="notification-message">{notification.message}</span>
-            <button
-              type="button"
-              className="notification-dismiss"
-              onClick={() => setNotification(null)}
-              aria-label="Dismiss"
-            >
-              ×
-            </button>
           </div>
         )}
 

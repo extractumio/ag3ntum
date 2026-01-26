@@ -27,3 +27,5 @@ export { QueueIndicator } from './QueueIndicator';
 export { SessionListTab, useSessionBadges, type SessionBadges } from './SessionListTab';
 
 export { Popup, type PopupProps, type PopupType, type PopupAction } from './Popup';
+
+export { ToastProvider, useToast, type ToastType, type ToastOptions } from './Toast';
