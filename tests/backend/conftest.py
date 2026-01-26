@@ -275,6 +275,12 @@ def test_app(test_db_override, mock_agent_runner, temp_sessions_dir):
                 "host": "0.0.0.0",
                 "port": 40080,
                 "cors_origins": ["http://localhost:50080"],
+            },
+            # Disable task queue in tests to avoid requiring Redis
+            "task_queue": {
+                "queue": {
+                    "enabled": False
+                }
             }
         }
 

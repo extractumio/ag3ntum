@@ -41,6 +41,16 @@ export type ConversationItem =
       files: string[];
       status: ResultStatus;
       error?: string;
+    }
+  | {
+      type: 'system_event';
+      id: string;
+      time: string;
+      eventType: 'permission_denied' | 'hook_triggered' | 'profile_switch' | 'queue_started';
+      toolName?: string;
+      decision?: string;
+      message?: string;
+      profileName?: string;
     };
 
 export type ToolCallView = {
@@ -75,7 +85,7 @@ export type AskUserQuestionInput = {
 export type SystemEventView = {
   id: string;
   time: string;
-  eventType: 'permission_denied' | 'hook_triggered' | 'profile_switch';
+  eventType: 'permission_denied' | 'hook_triggered' | 'profile_switch' | 'queue_started';
   toolName?: string;
   decision?: string;
   message?: string;

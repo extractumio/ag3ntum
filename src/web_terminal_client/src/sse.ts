@@ -332,3 +332,174 @@ export function connectSSE(
 
   return cleanup;
 }
+
+/**
+ * User-level events for cross-session updates.
+ */
+export interface UserEvent {
+  type: 'session_list_update' | 'session_status_change' | 'heartbeat';
+  data: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface UserEventsSSEOptions {
+  baseUrl: string;
+  token: string;
+  onEvent: (event: UserEvent) => void;
+  onError: (error: Error) => void;
+  onConnectionStateChange?: (state: 'connected' | 'reconnecting' | 'polling' | 'degraded') => void;
+}
+
+/**
+ * Connect to user-level SSE stream for cross-session updates.
+ *
+ * Receives events for all user sessions:
+ * - session_list_update: List of active/queued sessions changed
+ * - session_status_change: A session's status changed
+ * - heartbeat: Keep-alive
+ *
+ * Used by SessionListTab to show real-time badges and status updates.
+ */
+export function connectUserEventsSSE(options: UserEventsSSEOptions): () => void {
+  const { baseUrl, token, onEvent, onError, onConnectionStateChange } = options;
+
+  let source: EventSource | null = null;
+  let reconnectAttempts = 0;
+  let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let isClosed = false;
+  let connectionState: 'connected' | 'reconnecting' | 'polling' | 'degraded' = 'reconnecting';
+
+  const USER_EVENTS_POLL_INTERVAL_MS = 5000; // Poll every 5s for user events
+  const USER_EVENTS_HEARTBEAT_TIMEOUT_MS = 60000; // 60s heartbeat timeout
+
+  function setConnectionState(state: 'connected' | 'reconnecting' | 'polling' | 'degraded') {
+    if (connectionState !== state) {
+      connectionState = state;
+      onConnectionStateChange?.(state);
+    }
+  }
+
+  function buildUrl(): string {
+    return `${baseUrl}/api/v1/auth/me/events?token=${encodeURIComponent(token)}`;
+  }
+
+  function getBackoffDelay(): number {
+    const exponential = INITIAL_RECONNECT_DELAY_MS * Math.pow(2, Math.min(reconnectAttempts - 1, 10));
+    const capped = Math.min(exponential, MAX_BACKOFF_MS);
+    const jitter = capped * 0.2 * (Math.random() - 0.5) * 2;
+    return Math.max(100, capped + jitter);
+  }
+
+  function resetHeartbeatTimeout() {
+    if (heartbeatTimeout) {
+      clearTimeout(heartbeatTimeout);
+    }
+    if (isClosed) return;
+
+    heartbeatTimeout = setTimeout(() => {
+      console.warn('[UserEventsSSE] Heartbeat timeout - reconnecting...');
+      source?.close();
+      reconnectAttempts++;
+      setConnectionState('reconnecting');
+      scheduleReconnect();
+    }, USER_EVENTS_HEARTBEAT_TIMEOUT_MS);
+  }
+
+  function startPolling() {
+    if (pollInterval) return;
+    setConnectionState('polling');
+
+    // For user events, "polling" means we just try to reconnect periodically
+    pollInterval = setInterval(() => {
+      if (isClosed) return;
+      // Try reconnecting
+      reconnectAttempts = 0;
+      connect();
+    }, USER_EVENTS_POLL_INTERVAL_MS * 2);
+  }
+
+  function stopPolling() {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
+  function scheduleReconnect() {
+    if (isClosed) return;
+
+    const delay = getBackoffDelay();
+
+    // After many failed attempts, switch to polling mode
+    if (reconnectAttempts > 3) {
+      startPolling();
+      return;
+    }
+
+    reconnectTimeout = setTimeout(connect, delay);
+  }
+
+  function connect() {
+    if (isClosed) return;
+
+    source?.close();
+
+    const url = buildUrl();
+    source = new EventSource(url);
+
+    source.onopen = () => {
+      reconnectAttempts = 0;
+      setConnectionState('connected');
+      resetHeartbeatTimeout();
+      stopPolling();
+    };
+
+    source.onmessage = (event) => {
+      resetHeartbeatTimeout();
+
+      try {
+        const parsed = JSON.parse(event.data) as UserEvent;
+
+        // Handle heartbeat silently
+        if (parsed.type === 'heartbeat') {
+          return;
+        }
+
+        onEvent(parsed);
+      } catch (error) {
+        onError(new Error('Failed to parse user events SSE payload'));
+      }
+    };
+
+    source.onerror = () => {
+      source?.close();
+
+      if (isClosed) return;
+
+      reconnectAttempts++;
+      setConnectionState('reconnecting');
+      scheduleReconnect();
+    };
+  }
+
+  function cleanup() {
+    isClosed = true;
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+    if (heartbeatTimeout) {
+      clearTimeout(heartbeatTimeout);
+      heartbeatTimeout = null;
+    }
+    stopPolling();
+    source?.close();
+    source = null;
+  }
+
+  connect();
+
+  return cleanup;
+}

@@ -19,7 +19,9 @@ export type SSEEventType =
   | 'subagent_stop'
   | 'heartbeat'
   | 'infrastructure_error'
-  | 'security_alert';
+  | 'security_alert'
+  | 'queue_started'
+  | 'queue_position_update';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -47,6 +49,10 @@ export interface SessionResponse {
   total_cost_usd?: number | null;
   cancel_requested: boolean;
   resumable?: boolean;
+  // Queue management fields
+  queue_position?: number | null;
+  queued_at?: string | null;
+  is_auto_resume?: boolean;
 }
 
 export interface SessionListResponse {
@@ -74,6 +80,23 @@ export interface TaskStartedResponse {
   status: string;
   message: string;
   resumed_from?: string | null;
+  queue_position?: number | null;
+}
+
+export interface QueuedSessionInfo {
+  session_id: string;
+  queue_position?: number | null;
+  queued_at?: string | null;
+  is_auto_resume: boolean;
+}
+
+export interface QueueStatusResponse {
+  global_queue_length: number;
+  global_active_tasks: number;
+  user_active_tasks: number;
+  user_queued_tasks: QueuedSessionInfo[];
+  max_concurrent_global: number;
+  max_concurrent_user: number;
 }
 
 export interface ResultMetrics {
@@ -202,3 +225,29 @@ export interface SecurityAlertData {
   message: string;
   files: SecurityAlertFile[];
 }
+
+// =============================================================================
+// User Events Types (for cross-session SSE)
+// =============================================================================
+
+export interface UserSessionInfo {
+  id: string;
+  status: string;
+  queue_position?: number | null;
+  is_auto_resume?: boolean;
+}
+
+export interface SessionListUpdateEvent {
+  type: 'session_list_update';
+  data: {
+    sessions: UserSessionInfo[];
+  };
+  timestamp: string;
+}
+
+export interface UserHeartbeatEvent {
+  type: 'heartbeat';
+  timestamp: string;
+}
+
+export type UserEvent = SessionListUpdateEvent | UserHeartbeatEvent | { type: string; data?: unknown; timestamp: string };

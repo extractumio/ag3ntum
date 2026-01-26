@@ -106,3 +106,27 @@ redis:
 
   # Decode responses as UTF-8 strings
   decode_responses: false
+
+# =============================================================================
+# TASK QUEUE - Auto-resume and queue management
+# =============================================================================
+task_queue:
+  # Auto-resume settings - recover interrupted sessions on startup
+  auto_resume:
+    enabled: true
+    max_session_age_hours: 6        # Only resume sessions from last N hours
+    max_resume_attempts: 3          # Give up after N failed resume attempts
+    resume_delay_seconds: 5         # Delay between auto-resumed tasks
+
+  # Queue settings - manage concurrent task execution
+  queue:
+    enabled: true
+    processing_interval_ms: 500     # How often to check queue
+    max_queue_size: 1000            # Maximum pending tasks across all users
+    task_timeout_minutes: 30        # Timeout for queued tasks waiting to start
+
+  # Quota settings - limit concurrent tasks
+  quotas:
+    global_max_concurrent: 4        # Max concurrent tasks across all users
+    per_user_max_concurrent: 2      # Max concurrent tasks per user
+    per_user_daily_limit: 50        # Max tasks per user per day (0 = unlimited)

@@ -7,8 +7,10 @@ Critical security tests for:
 - Extension sanitization
 - System reminder stripping
 - Tool name sanitization
+- Tool error tracking for session status determination
 """
 import pytest
+from unittest.mock import MagicMock
 
 from src.core.trace_processor import (
     _sanitize_filename,
@@ -17,7 +19,9 @@ from src.core.trace_processor import (
     _sanitize_size_formatted,
     strip_system_reminders,
     sanitize_tool_names_in_text,
+    TraceProcessor,
 )
+from src.core.tracer import NullTracer
 
 
 class TestSanitizeFilename:
@@ -249,3 +253,129 @@ class TestSanitizeToolNamesInText:
         assert "mcp__ag3ntum__" not in result
         assert "ReadFile" in result
         assert "WriteFile" in result
+
+
+class TestTraceProcessorToolErrorTracking:
+    """Tests for TraceProcessor tool error tracking.
+
+    The TraceProcessor tracks tool errors during execution to determine
+    the final session status. If any tool returns is_error=True, the
+    session should be marked as FAILED instead of COMPLETE.
+    """
+
+    @pytest.fixture
+    def trace_processor(self) -> TraceProcessor:
+        """Create a TraceProcessor with a NullTracer for testing."""
+        return TraceProcessor(NullTracer())
+
+    @pytest.mark.unit
+    def test_initial_tool_error_count_is_zero(self, trace_processor: TraceProcessor) -> None:
+        """Tool error count starts at zero."""
+        assert trace_processor.tool_error_count == 0
+        assert trace_processor.had_tool_errors() is False
+
+    @pytest.mark.unit
+    def test_tool_error_count_property(self, trace_processor: TraceProcessor) -> None:
+        """tool_error_count property returns current count."""
+        assert trace_processor.tool_error_count == 0
+        trace_processor._tool_error_count = 5
+        assert trace_processor.tool_error_count == 5
+
+    @pytest.mark.unit
+    def test_had_tool_errors_false_when_no_errors(self, trace_processor: TraceProcessor) -> None:
+        """had_tool_errors() returns False when no errors occurred."""
+        assert trace_processor.had_tool_errors() is False
+
+    @pytest.mark.unit
+    def test_had_tool_errors_true_when_errors_exist(self, trace_processor: TraceProcessor) -> None:
+        """had_tool_errors() returns True when errors occurred."""
+        trace_processor._tool_error_count = 1
+        assert trace_processor.had_tool_errors() is True
+
+        trace_processor._tool_error_count = 10
+        assert trace_processor.had_tool_errors() is True
+
+    @pytest.mark.unit
+    def test_tool_complete_increments_error_count_on_error(self, trace_processor: TraceProcessor) -> None:
+        """on_tool_complete with is_error=True increments error count."""
+        # Register a pending tool call first
+        trace_processor._pending_tool_calls["tool-1"] = {"name": "TestTool"}
+
+        # Create a ToolResultBlock with is_error=True
+        from claude_agent_sdk.types import ToolResultBlock
+        block = ToolResultBlock(
+            tool_use_id="tool-1",
+            content="Error: Something went wrong",
+            is_error=True,
+        )
+
+        # Process the block - this should increment error count
+        trace_processor._process_content_block(block)
+
+        assert trace_processor.tool_error_count == 1
+        assert trace_processor.had_tool_errors() is True
+
+    @pytest.mark.unit
+    def test_tool_complete_no_increment_on_success(self, trace_processor: TraceProcessor) -> None:
+        """on_tool_complete with is_error=False does not increment count."""
+        # Register a pending tool call
+        trace_processor._pending_tool_calls["tool-1"] = {"name": "TestTool"}
+
+        # Create a ToolResultBlock with is_error=False
+        from claude_agent_sdk.types import ToolResultBlock
+        block = ToolResultBlock(
+            tool_use_id="tool-1",
+            content="Success",
+            is_error=False,
+        )
+
+        trace_processor._process_content_block(block)
+
+        assert trace_processor.tool_error_count == 0
+        assert trace_processor.had_tool_errors() is False
+
+    @pytest.mark.unit
+    def test_multiple_tool_errors_accumulate(self, trace_processor: TraceProcessor) -> None:
+        """Multiple tool errors accumulate in the count."""
+        from claude_agent_sdk.types import ToolResultBlock
+
+        # Process multiple error results
+        for i in range(3):
+            tool_id = f"tool-{i}"
+            trace_processor._pending_tool_calls[tool_id] = {"name": f"TestTool{i}"}
+            block = ToolResultBlock(
+                tool_use_id=tool_id,
+                content=f"Error {i}",
+                is_error=True,
+            )
+            trace_processor._process_content_block(block)
+
+        assert trace_processor.tool_error_count == 3
+        assert trace_processor.had_tool_errors() is True
+
+    @pytest.mark.unit
+    def test_mixed_success_and_error_tools(self, trace_processor: TraceProcessor) -> None:
+        """Error count only reflects tools that actually errored."""
+        from claude_agent_sdk.types import ToolResultBlock
+
+        # Process mix of success and error results
+        results = [
+            ("tool-1", "Success 1", False),
+            ("tool-2", "Error 1", True),
+            ("tool-3", "Success 2", False),
+            ("tool-4", "Error 2", True),
+            ("tool-5", "Success 3", False),
+        ]
+
+        for tool_id, content, is_error in results:
+            trace_processor._pending_tool_calls[tool_id] = {"name": tool_id}
+            block = ToolResultBlock(
+                tool_use_id=tool_id,
+                content=content,
+                is_error=is_error,
+            )
+            trace_processor._process_content_block(block)
+
+        # Only 2 errors
+        assert trace_processor.tool_error_count == 2
+        assert trace_processor.had_tool_errors() is True

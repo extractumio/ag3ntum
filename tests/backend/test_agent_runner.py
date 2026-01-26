@@ -267,6 +267,37 @@ class TestAgentRunnerIntegration:
         mock_result.metrics.duration_ms = 1000
         mock_result.metrics.total_cost_usd = 0.01
 
+        # Mock user for database query
+        mock_user = MagicMock()
+        mock_user.id = "test-user-id"
+        mock_user.linux_uid = 50000
+        mock_user.queue_priority = 0
+
+        # Track query count to return different results
+        query_count = [0]
+
+        def mock_execute_side_effect(*args, **kwargs):
+            query_count[0] += 1
+            mock_result = MagicMock()
+            if query_count[0] == 1:
+                # First query: select User
+                mock_result.scalar_one_or_none.return_value = mock_user
+                mock_result.scalars.return_value.all.return_value = [mock_user]
+            elif query_count[0] == 2:
+                # Second query: select all users (debug)
+                mock_result.scalar_one_or_none.return_value = None
+                mock_result.scalars.return_value.all.return_value = [mock_user]
+            else:
+                # Third+ query: select Token - return None (no user token, use system key)
+                mock_result.scalar_one_or_none.return_value = None
+                mock_result.scalars.return_value.all.return_value = []
+            return mock_result
+
+        mock_db_session = AsyncMock()
+        mock_db_session.execute = AsyncMock(side_effect=mock_execute_side_effect)
+        mock_db_session.__aenter__ = AsyncMock(return_value=mock_db_session)
+        mock_db_session.__aexit__ = AsyncMock(return_value=None)
+
         with patch(
             "src.services.agent_runner.execute_agent_task",
             new_callable=AsyncMock,
@@ -275,17 +306,223 @@ class TestAgentRunnerIntegration:
             with patch.object(runner, '_update_session_status', new_callable=AsyncMock):
                 # Mock Redis connection check since Redis may not be available
                 with patch.object(runner, '_ensure_redis_connection', new_callable=AsyncMock):
-                    # Start the task using TaskParams
-                    params = make_task_params(
-                        session_id="integration-test",
-                        task="Test task"
-                    )
-                    await runner.start_task(params)
+                    # Mock database session
+                    with patch(
+                        "src.services.agent_runner.AsyncSessionLocal",
+                        return_value=mock_db_session
+                    ):
+                        # Start the task using TaskParams
+                        params = make_task_params(
+                            session_id="integration-test",
+                            task="Test task"
+                        )
+                        await runner.start_task(params)
 
-                # Wait for completion
-                await asyncio.sleep(0.5)
+                        # Wait for completion
+                        await asyncio.sleep(0.5)
 
-                # Check result was stored
-                result = runner.get_result("integration-test")
-                if result:
-                    assert result["status"] == "COMPLETE"
+                        # Check result was stored
+                        result = runner.get_result("integration-test")
+                        if result:
+                            assert result["status"] == "COMPLETE"
+
+
+class TestAgentRunnerCumulativeStats:
+    """Tests for cumulative stats calculation in _update_session_status.
+
+    These tests verify that session completion correctly updates both
+    current run stats and cumulative stats across resumptions.
+    """
+
+    @pytest.fixture
+    def mock_session(self):
+        """Create a mock session with zeroed stats."""
+        session = MagicMock()
+        session.status = "running"
+        session.model = None
+        session.num_turns = 0
+        session.duration_ms = 0
+        session.total_cost_usd = 0.0
+        session.cumulative_turns = 0
+        session.cumulative_duration_ms = 0
+        session.cumulative_cost_usd = 0.0
+        session.cumulative_input_tokens = 0
+        session.cumulative_output_tokens = 0
+        session.cumulative_cache_creation_tokens = 0
+        session.cumulative_cache_read_tokens = 0
+        session.completed_at = None
+        session.updated_at = None
+        return session
+
+    @pytest.fixture
+    def mock_db_context(self, mock_session):
+        """Create mock database context that returns mock_session."""
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_session
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        mock_db.commit = AsyncMock()
+
+        return patch(
+            "src.services.agent_runner.AsyncSessionLocal",
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_db),
+                __aexit__=AsyncMock()
+            )
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_updates_cumulative_turns(self, mock_session, mock_db_context) -> None:
+        """Cumulative turns increases by num_turns on completion."""
+        runner = AgentRunner()
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="complete", num_turns=5
+            )
+
+        assert mock_session.num_turns == 5
+        assert mock_session.cumulative_turns == 5
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_updates_cumulative_cost(self, mock_session, mock_db_context) -> None:
+        """Cumulative cost increases by total_cost_usd on completion."""
+        runner = AgentRunner()
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="complete", total_cost_usd=0.025
+            )
+
+        assert mock_session.total_cost_usd == 0.025
+        assert mock_session.cumulative_cost_usd == 0.025
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_updates_cumulative_duration(self, mock_session, mock_db_context) -> None:
+        """Cumulative duration increases by duration_ms on completion."""
+        runner = AgentRunner()
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="complete", duration_ms=5000
+            )
+
+        assert mock_session.duration_ms == 5000
+        assert mock_session.cumulative_duration_ms == 5000
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_updates_cumulative_tokens(self, mock_session, mock_db_context) -> None:
+        """Cumulative token counts increase when usage dict is provided."""
+        runner = AgentRunner()
+        usage = {
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 100,
+        }
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="complete", usage=usage
+            )
+
+        assert mock_session.cumulative_input_tokens == 1000
+        assert mock_session.cumulative_output_tokens == 500
+        assert mock_session.cumulative_cache_creation_tokens == 200
+        assert mock_session.cumulative_cache_read_tokens == 100
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_accumulates_across_multiple_runs(self, mock_session, mock_db_context) -> None:
+        """Cumulative stats accumulate correctly across multiple runs."""
+        runner = AgentRunner()
+
+        # Pre-set cumulative values (simulating previous runs)
+        mock_session.cumulative_turns = 10
+        mock_session.cumulative_cost_usd = 0.05
+        mock_session.cumulative_duration_ms = 10000
+        mock_session.cumulative_input_tokens = 2000
+        mock_session.cumulative_output_tokens = 1000
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session",
+                status="complete",
+                num_turns=3,
+                total_cost_usd=0.02,
+                duration_ms=5000,
+                usage={"input_tokens": 500, "output_tokens": 250},
+            )
+
+        # Current run stats
+        assert mock_session.num_turns == 3
+        assert mock_session.total_cost_usd == 0.02
+        assert mock_session.duration_ms == 5000
+
+        # Cumulative stats (previous + current)
+        assert mock_session.cumulative_turns == 13
+        assert mock_session.cumulative_cost_usd == 0.07
+        assert mock_session.cumulative_duration_ms == 15000
+        assert mock_session.cumulative_input_tokens == 2500
+        assert mock_session.cumulative_output_tokens == 1250
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_no_update_when_values_none(self, mock_session, mock_db_context) -> None:
+        """Cumulative stats unchanged when values are None."""
+        runner = AgentRunner()
+        mock_session.cumulative_turns = 5
+        mock_session.cumulative_cost_usd = 0.025
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="running"
+            )
+
+        assert mock_session.cumulative_turns == 5
+        assert mock_session.cumulative_cost_usd == 0.025
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_partial_usage_dict(self, mock_session, mock_db_context) -> None:
+        """Usage dict with missing keys uses 0 as default."""
+        runner = AgentRunner()
+
+        with mock_db_context:
+            await runner._update_session_status(
+                session_id="test-session", status="complete", usage={"input_tokens": 1000}
+            )
+
+        assert mock_session.cumulative_input_tokens == 1000
+        assert mock_session.cumulative_output_tokens == 0
+        assert mock_session.cumulative_cache_creation_tokens == 0
+        assert mock_session.cumulative_cache_read_tokens == 0
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_completed_at_set_for_terminal_statuses(self, mock_session, mock_db_context) -> None:
+        """completed_at is set for terminal statuses."""
+        runner = AgentRunner()
+        terminal_statuses = ["completed", "complete", "partial", "failed", "cancelled"]
+
+        for status in terminal_statuses:
+            mock_session.completed_at = None
+            with mock_db_context:
+                await runner._update_session_status(session_id="test-session", status=status)
+            assert mock_session.completed_at is not None, f"completed_at not set for: {status}"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_completed_at_not_set_for_running(self, mock_session, mock_db_context) -> None:
+        """completed_at is NOT set for non-terminal statuses."""
+        runner = AgentRunner()
+
+        with mock_db_context:
+            await runner._update_session_status(session_id="test-session", status="running")
+
+        assert mock_session.completed_at is None

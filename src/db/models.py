@@ -24,6 +24,7 @@ class User(Base):
     jwt_secret: Mapped[str] = mapped_column(String(64))
     linux_uid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    queue_priority: Mapped[int] = mapped_column(Integer, default=0)  # Higher = higher priority
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
@@ -47,8 +48,8 @@ class Session(Base):
     """
     Session model for agent execution tracking.
 
-    Mirrors the file-based SessionInfo but stored in SQLite for
-    faster queries and cross-session operations.
+    This is the authoritative source for all session metadata.
+    Session directories only contain agent.jsonl (SDK log) and workspace/.
     """
     __tablename__ = "sessions"
 
@@ -80,6 +81,37 @@ class Session(Base):
     )
 
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Queue management
+    queue_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Auto-resume tracking
+    is_auto_resume: Mapped[bool] = mapped_column(Boolean, default=False)
+    resume_attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Claude SDK session ID for resumption (captured from init event)
+    # This is different from `id` which is Ag3ntum's internal session ID
+    claude_session_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Cumulative statistics across all resumptions
+    cumulative_turns: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Token usage (separate columns for query efficiency)
+    cumulative_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_cache_creation_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Session forking
+    parent_session_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # Checkpointing (JSON array of Checkpoint objects)
+    file_checkpointing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    checkpoints_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationship to user
     user: Mapped["User"] = relationship("User", back_populates="sessions")
@@ -135,3 +167,44 @@ class Token(Base):
 
     # Relationship
     user: Mapped["User"] = relationship("User", back_populates="tokens")
+
+
+class UserQuota(Base):
+    """
+    Tracks user quota usage with persistence across restarts.
+
+    Stores per-user task limits and daily usage counters that survive
+    container restarts. The daily counter resets automatically when
+    a new day begins (based on last_reset timestamp).
+    """
+    __tablename__ = "user_quotas"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), primary_key=True
+    )
+
+    # Configurable limits (can override global defaults per user)
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, default=2)
+    max_daily_tasks: Mapped[int] = mapped_column(Integer, default=50)
+
+    # Usage tracking (persists across restarts)
+    tasks_today: Mapped[int] = mapped_column(Integer, default=0)
+    last_reset: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationship
+    user: Mapped["User"] = relationship("User")
+
+    def should_reset_daily_count(self) -> bool:
+        """Check if daily counter should be reset (new day)."""
+        now = datetime.now(timezone.utc)
+        return self.last_reset.date() < now.date()
+
+    def reset_if_needed(self) -> bool:
+        """Reset daily count if new day. Returns True if reset occurred."""
+        if self.should_reset_daily_count():
+            self.tasks_today = 0
+            self.last_reset = datetime.now(timezone.utc)
+            return True
+        return False

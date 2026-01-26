@@ -350,7 +350,7 @@ tail -f /logs/backend.log
 
 ### Session Storage
 
-Sessions are stored as files on disk for SDK compatibility and in SQLite for fast queries.
+Session metadata is stored in **SQLite database** (`data/ag3ntum.db`), while the session directory on disk contains only SDK-required files.
 
 **File Location**: `users/{username}/sessions/{session_id}/`
 
@@ -358,9 +358,8 @@ Sessions are stored as files on disk for SDK compatibility and in SQLite for fas
 # List all sessions for a user
 ls users/greg/sessions/
 
-# Session directory structure
+# Session directory structure (minimal - metadata is in database)
 users/greg/sessions/20260125_150542_1c4fce4f/
-├── session_info.json    # Metadata, resume_id, cumulative stats
 ├── agent.jsonl          # Complete SDK event log (JSONL format)
 └── workspace/
     ├── output.yaml      # Agent execution output
@@ -369,8 +368,8 @@ users/greg/sessions/20260125_150542_1c4fce4f/
 
 **Inspecting Sessions**:
 ```bash
-# View session metadata (status, cost, turns, resume_id)
-cat users/greg/sessions/20260125_150542_1c4fce4f/session_info.json | jq .
+# Query session metadata from database
+sqlite3 data/ag3ntum.db "SELECT id, status, claude_session_id, num_turns, total_cost_usd, cumulative_cost_usd FROM sessions WHERE id = '20260125_150542_1c4fce4f';"
 
 # Watch SDK events in real-time during execution
 tail -f users/greg/sessions/20260125_150542_1c4fce4f/agent.jsonl
@@ -379,14 +378,15 @@ tail -f users/greg/sessions/20260125_150542_1c4fce4f/agent.jsonl
 grep -r "error" users/greg/sessions/*/agent.jsonl
 ```
 
-**Key Fields in `session_info.json`**:
+**Key Session Fields (in database `sessions` table)**:
 | Field | Purpose |
 |-------|---------|
-| `status` | `COMPLETE`, `PARTIAL`, `FAILED`, `ERROR` |
-| `resume_id` | Claude session ID for resuming |
-| `total_cost_usd` | Cost for this execution |
-| `cumulative_cost_usd` | Total cost across all runs |
-| `num_turns` | API round-trips this execution |
+| `status` | `pending`, `queued`, `running`, `complete`, `failed`, `cancelled` |
+| `claude_session_id` | SDK session UUID for resumption |
+| `total_cost_usd` | Cost for latest execution |
+| `cumulative_cost_usd` | Total cost across all resumptions |
+| `cumulative_turns` | Total turns across all resumptions |
+| `checkpoints_json` | JSON array of file-state checkpoints |
 
 ### Log Files
 
@@ -731,11 +731,13 @@ Different output modes use different tracers:
 ### Session Structure
 ```
 users/{username}/sessions/{session_id}/
-├── session_info.json    # Metadata, resume_id
-├── agent.jsonl          # Complete SDK log
+├── agent.jsonl          # Complete SDK event log (required by SDK)
 └── workspace/
     ├── output.yaml      # Agent output
     └── .claude/skills/  # Symlinks to skills
+
+# Session metadata stored in SQLite (data/ag3ntum.db):
+#   - claude_session_id, status, cumulative stats, checkpoints
 ```
 
 ---

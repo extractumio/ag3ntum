@@ -5580,6 +5580,621 @@ resume-context {
 }
 
 /* =============================================================================
+ * QUEUE INDICATOR - Shows when task is queued
+ * ============================================================================= */
+
+.queue-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+.queue-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-yellow);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.queue-text {
+  color: var(--color-yellow);
+}
+
+/* Queue status in session header */
+.session-status-queued {
+  color: var(--color-yellow);
+}
+
+/* =============================================================================
+ * SESSION LIST TAB - Shows all sessions with status indicators
+ * ============================================================================= */
+
+.session-list-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+.session-list-empty {
+  padding: var(--spacing-xl);
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+.session-list-empty p {
+  margin: var(--spacing-sm) 0;
+}
+
+.session-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-bg-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: all 0.15s ease;
+}
+
+.session-list-item:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.session-list-item.current {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-cyan);
+}
+
+.session-list-item.has-badge {
+  border-color: var(--color-yellow);
+}
+
+.session-status-icon {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  font-size: var(--font-md);
+}
+
+.session-status-icon.status-complete {
+  color: var(--color-green);
+}
+
+.session-status-icon.status-failed {
+  color: var(--color-red);
+}
+
+.session-status-icon.status-partial {
+  color: var(--color-yellow);
+}
+
+.session-status-icon.status-running {
+  color: var(--color-cyan);
+}
+
+.session-status-icon.status-queued {
+  color: var(--color-text-muted);
+}
+
+.session-status-icon.status-waiting {
+  color: var(--color-yellow);
+}
+
+.session-status-icon.status-cancelled {
+  color: var(--color-text-muted);
+}
+
+.session-list-item-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-list-item-id {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+
+.session-list-item-task {
+  font-size: var(--font-sm);
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-list-item-meta {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.session-list-item-time {
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+
+.session-list-item-queue {
+  font-size: var(--font-xs);
+  color: var(--color-yellow);
+  font-family: var(--font-mono);
+}
+
+.session-list-item-badge {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.session-list-item-badge.badge-completed {
+  background: var(--color-green);
+}
+
+.session-list-item-badge.badge-failed {
+  background: var(--color-red);
+}
+
+.session-list-item-badge.badge-waiting {
+  background: var(--color-yellow);
+}
+
+/* Right panel tab badge counts */
+.right-panel-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  font-size: var(--font-xs);
+}
+
+.right-panel-tab-badge .badge-count {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+.right-panel-tab-badge .badge-count.completed {
+  background: var(--color-green);
+  color: var(--color-bg);
+}
+
+.right-panel-tab-badge .badge-count.failed {
+  background: var(--color-red);
+  color: var(--color-bg);
+}
+
+.right-panel-tab-badge .badge-count.waiting {
+  background: var(--color-yellow);
+  color: var(--color-bg);
+}
+
+/* Session list item layout with delete button */
+.session-list-item {
+  display: flex;
+  align-items: stretch;
+}
+
+.session-list-item-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.session-list-item-main:hover {
+  background: var(--color-surface);
+}
+
+.session-list-item.current .session-list-item-main {
+  background: rgba(var(--color-cyan-rgb, 126, 200, 212), 0.1);
+}
+
+/* Pulsing spinner for running sessions */
+.session-pulsing-spinner {
+  display: inline-block;
+  color: var(--color-cyan);
+  animation: session-pulsing 1.5s ease-in-out infinite;
+}
+
+@keyframes session-pulsing {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* Delete button in session list */
+.session-list-item-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.session-list-item:hover .session-list-item-delete {
+  opacity: 1;
+}
+
+.session-list-item-delete:hover {
+  color: var(--color-red);
+}
+
+.session-trash-svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Session delete confirmation modal */
+.session-delete-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.session-delete-modal {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  max-width: 400px;
+  width: 90%;
+  padding: var(--spacing-lg);
+}
+
+.session-delete-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--color-red);
+  margin-bottom: var(--spacing-md);
+}
+
+.session-delete-warning-icon {
+  font-size: var(--font-xl);
+}
+
+.session-delete-content {
+  margin-bottom: var(--spacing-lg);
+}
+
+.session-delete-content p {
+  margin: 0 0 var(--spacing-sm) 0;
+  color: var(--color-text);
+}
+
+.session-delete-id {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--color-cyan);
+  background: var(--color-surface);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
+
+.session-delete-warning {
+  font-size: var(--font-sm);
+  color: var(--color-text-muted);
+}
+
+.session-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+}
+
+.session-delete-cancel-btn,
+.session-delete-confirm-btn {
+  padding: var(--spacing-sm) var(--spacing-lg);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.session-delete-cancel-btn {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.session-delete-cancel-btn:hover:not(:disabled) {
+  background: var(--color-border);
+}
+
+.session-delete-confirm-btn {
+  background: var(--color-red);
+  color: white;
+}
+
+.session-delete-confirm-btn:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.session-delete-cancel-btn:disabled,
+.session-delete-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Notification toast for session actions */
+.notification-toast {
+  position: fixed;
+  bottom: var(--spacing-lg);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1001;
+  animation: notification-slide-in 0.3s ease-out;
+}
+
+@keyframes notification-slide-in {
+  from {
+    transform: translateX(-50%) translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+}
+
+.notification-toast.notification-success {
+  border-color: var(--color-green);
+}
+
+.notification-toast.notification-error {
+  border-color: var(--color-red);
+}
+
+.notification-icon {
+  font-size: var(--font-md);
+}
+
+.notification-success .notification-icon {
+  color: var(--color-green);
+}
+
+.notification-error .notification-icon {
+  color: var(--color-red);
+}
+
+.notification-message {
+  font-size: var(--font-sm);
+  color: var(--color-text);
+}
+
+.notification-dismiss {
+  margin-left: var(--spacing-sm);
+  padding: 0 var(--spacing-xs);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-lg);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.notification-dismiss:hover {
+  color: var(--color-text);
+}
+
+/* =============================================================================
+ * UNIFIED POPUP COMPONENT
+ * Reusable modal/dialog/alert component for consistent UX across the app.
+ * ============================================================================= */
+
+.popup-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+  z-index: var(--z-modal);
+  animation: popup-fade-in 0.2s ease-out;
+}
+
+.popup-overlay-transparent {
+  background: transparent;
+  pointer-events: none;
+}
+
+.popup-overlay-transparent .popup-modal {
+  pointer-events: auto;
+}
+
+.popup-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  max-width: 440px;
+  width: 90%;
+  padding: var(--spacing-xl);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: popup-scale-in 0.2s ease-out;
+}
+
+/* Type-specific border colors */
+.popup-error {
+  border-color: var(--color-red);
+}
+
+.popup-success {
+  border-color: var(--color-green);
+}
+
+.popup-warning {
+  border-color: var(--color-yellow);
+}
+
+.popup-info {
+  border-color: var(--color-cyan);
+}
+
+.popup-confirm {
+  border-color: var(--color-blue);
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.popup-title {
+  margin: 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.popup-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.popup-message {
+  margin: 0;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+.popup-details {
+  margin: 0;
+  padding: var(--spacing-md);
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--color-cyan);
+  word-break: break-all;
+}
+
+.popup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.popup-btn {
+  padding: var(--spacing-sm) var(--spacing-xl);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.popup-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.popup-btn-primary {
+  background: var(--color-cyan);
+  color: var(--color-bg-base);
+  border: none;
+}
+
+.popup-btn-primary:hover:not(:disabled) {
+  background: #5fb8c6;
+}
+
+.popup-btn-secondary {
+  background: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.popup-btn-secondary:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-border-hover);
+}
+
+.popup-btn-danger {
+  background: var(--color-red);
+  color: white;
+  border: none;
+}
+
+.popup-btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+@keyframes popup-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* =============================================================================
  * EXAMPLE LIGHT THEME (uncomment to test)
  * Apply with: document.documentElement.classList.add('theme-light')
  * ============================================================================= */

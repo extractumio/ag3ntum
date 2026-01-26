@@ -314,8 +314,8 @@ async def execute_task(args: argparse.Namespace, config_loader: AgentConfigLoade
                 f"cost=${result.metrics.total_cost_usd or 0:.4f}"
             )
 
-        if result.session_info:
-            logger.info(f"Session ID: {result.session_info.session_id}")
+        if result.session_id:
+            logger.info(f"Session ID: {result.session_id}")
 
         return 0 if result.status == TaskStatus.COMPLETE else 1
 

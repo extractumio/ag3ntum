@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
@@ -130,7 +130,7 @@ def session_to_response(session, resumable: bool | None = None) -> SessionRespon
 
     Args:
         session: Database session object.
-        resumable: Optional override for resumability. If None, determined from session_info.
+        resumable: Optional override for resumability. If None, determined from session data.
     """
     # Determine resumability if not explicitly provided
     if resumable is None:
@@ -138,8 +138,8 @@ def session_to_response(session, resumable: bool | None = None) -> SessionRespon
             # Sessions waiting for user input are always resumable
             resumable = True
         elif session.status == "cancelled":
-            session_info = session_service.get_session_info(session.id)
-            resumable = bool(session_info.get("resume_id"))
+            # Check claude_session_id from database (set during agent initialization)
+            resumable = bool(session.claude_session_id)
 
     return SessionResponse(
         id=session.id,
@@ -154,6 +154,14 @@ def session_to_response(session, resumable: bool | None = None) -> SessionRespon
         total_cost_usd=session.total_cost_usd,
         cancel_requested=session.cancel_requested,
         resumable=resumable,
+        # New fields from database
+        claude_session_id=session.claude_session_id,
+        cumulative_turns=session.cumulative_turns or 0,
+        cumulative_duration_ms=session.cumulative_duration_ms or 0,
+        cumulative_cost_usd=session.cumulative_cost_usd or 0.0,
+        cumulative_input_tokens=session.cumulative_input_tokens or 0,
+        cumulative_output_tokens=session.cumulative_output_tokens or 0,
+        parent_session_id=session.parent_session_id,
     )
 
 async def record_user_message_event(session_id: str, text: str, processed_text: str | None = None) -> None:
@@ -341,6 +349,7 @@ def build_task_params(
 @router.post("/run", response_model=TaskStartedResponse, status_code=status.HTTP_201_CREATED)
 async def run_task(
     request: RunTaskRequest,
+    fastapi_request: Request,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> TaskStartedResponse:
@@ -404,17 +413,87 @@ async def run_task(
         processed_text=task_for_agent if task_for_agent != request.task else None
     )
 
-    # Start the agent in background
-    await agent_runner.start_task(params)
+    # Check if queue system is enabled
+    task_queue = getattr(fastapi_request.app.state, "task_queue", None)
+    quota_manager = getattr(fastapi_request.app.state, "quota_manager", None)
+    queue_enabled = task_queue is not None and quota_manager is not None
 
-    # Update session to running status
-    await session_service.update_session(db=db, session=session, status="running")
+    # Check if quotas allow starting immediately
+    can_start = True
+    if queue_enabled:
+        can_start, reason = await quota_manager.can_start_task(user_id, db)
+        if not can_start:
+            logger.info(f"Task {session.id} cannot start immediately: {reason}")
+
+    if can_start:
+        # Start the agent in background immediately
+        await agent_runner.start_task(params)
+
+        # Track active task for quota management
+        if queue_enabled:
+            quota_manager.increment_global()
+            await task_queue.mark_user_active(user_id, session.id)
+
+        await session_service.update_session(db=db, session=session, status="running")
+
+        return TaskStartedResponse(
+            session_id=session.id,
+            status="running",
+            message="Task execution started",
+            resumed_from=request.resume_session_id,
+        )
+
+    # Queue the task for later execution
+    from ...services.task_queue import QueuedTask, QueueUnavailableError, QueueOverflowError
+
+    queued_task = QueuedTask(
+        session_id=session.id,
+        user_id=user_id,
+        task=task_for_agent,
+        priority=user.queue_priority,
+        queued_at=datetime.now(timezone.utc),
+        is_auto_resume=False,
+        resume_from=request.resume_session_id,
+    )
+
+    try:
+        queue_position = await task_queue.enqueue(queued_task)
+    except QueueOverflowError as e:
+        logger.warning(f"Queue overflow for session {session.id}: {e}")
+        # Mark session as failed since queue is full
+        session.status = "failed"
+        session.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Task queue is full ({e.current_size}/{e.max_size} tasks). Please try again later.",
+        )
+    except QueueUnavailableError as e:
+        logger.error(f"Queue unavailable for session {session.id}: {e}")
+        # Mark session as failed since we can't queue it
+        session.status = "failed"
+        session.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue temporarily unavailable. Please try again later.",
+        )
+
+    # Update session with queue info
+    session.status = "queued"
+    session.queue_position = queue_position
+    session.queued_at = datetime.now(timezone.utc)
+    session.priority = user.queue_priority
+    await db.commit()
+
+    logger.info(f"Task {session.id} queued at position {queue_position}")
 
     return TaskStartedResponse(
         session_id=session.id,
-        status="running",
-        message="Task execution started",
+        status="queued",
+        message=f"Task queued (position: {queue_position})",
         resumed_from=request.resume_session_id,
+        queue_position=queue_position,
     )
 
 
@@ -527,6 +606,58 @@ async def get_session(
 
 
 # =============================================================================
+# DELETE /sessions/{id} - Delete a session
+# =============================================================================
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """
+    Delete a session completely (database + files).
+
+    Only allows deletion of non-running sessions (pending, queued, cancelled, etc.).
+    Running sessions must be cancelled first.
+    """
+    from ...services.session_service import (
+        SessionNotFoundError,
+        SessionServiceError,
+    )
+
+    # Get user to determine sessions directory
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    sessions_dir = USERS_DIR / user.username / "sessions"
+
+    try:
+        await session_service.delete_session(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+            sessions_dir=sessions_dir,
+        )
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+    except SessionServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+# =============================================================================
 # POST /sessions/{id}/task - Start task on existing session
 # =============================================================================
 
@@ -534,6 +665,7 @@ async def get_session(
 async def start_task(
     session_id: str,
     request: StartTaskRequest,
+    fastapi_request: Request,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> TaskStartedResponse:
@@ -591,11 +723,10 @@ async def start_task(
 
     # Determine resume session:
     # - If request.resume_session_id is set, resume from that session
-    # - Otherwise, if this session was already run before (has turns), resume it
+    # - Otherwise, if this session was already run before (has turns or claude_session_id), resume it
     resume_from = request.resume_session_id
     if not resume_from:
-        session_info = session_service.get_session_info(session_id)
-        if session.num_turns > 0 or session_info.get("resume_id"):
+        if session.num_turns > 0 or session.claude_session_id:
             # This session has history, resume from itself
             resume_from = session_id
 
@@ -639,21 +770,92 @@ async def start_task(
         processed_text=processed_task if processed_task != original_task else None
     )
 
-    # Start the agent in background
-    await agent_runner.start_task(params)
+    # Check if queue system is enabled
+    task_queue = getattr(fastapi_request.app.state, "task_queue", None)
+    quota_manager = getattr(fastapi_request.app.state, "quota_manager", None)
+    queue_enabled = task_queue is not None and quota_manager is not None
 
-    # Update session to running status
-    session = await session_service.update_session(
-        db=db,
-        session=session,
-        status="running",
+    # Check if quotas allow starting immediately
+    can_start = True
+    if queue_enabled:
+        can_start, reason = await quota_manager.can_start_task(user_id, db)
+        if not can_start:
+            logger.info(f"Task {session_id} cannot start immediately: {reason}")
+
+    if can_start:
+        # Start the agent in background immediately
+        await agent_runner.start_task(params)
+
+        # Track active task for quota management
+        if queue_enabled:
+            quota_manager.increment_global()
+            await task_queue.mark_user_active(user_id, session_id)
+
+        # Update session to running status
+        session = await session_service.update_session(
+            db=db,
+            session=session,
+            status="running",
+        )
+
+        return TaskStartedResponse(
+            session_id=session_id,
+            status="running",
+            message="Task execution started",
+            resumed_from=resume_from if resume_from != session_id else None,
+        )
+
+    # Queue the task for later execution
+    from ...services.task_queue import QueuedTask, QueueUnavailableError, QueueOverflowError
+
+    queued_task = QueuedTask(
+        session_id=session_id,
+        user_id=user_id,
+        task=task_to_run,
+        priority=user.queue_priority,
+        queued_at=datetime.now(timezone.utc),
+        is_auto_resume=False,
+        resume_from=resume_from,
     )
+
+    try:
+        queue_position = await task_queue.enqueue(queued_task)
+    except QueueOverflowError as e:
+        logger.warning(f"Queue overflow for session {session_id}: {e}")
+        # Mark session as failed since queue is full
+        session.status = "failed"
+        session.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Task queue is full ({e.current_size}/{e.max_size} tasks). Please try again later.",
+        )
+    except QueueUnavailableError as e:
+        logger.error(f"Queue unavailable for session {session_id}: {e}")
+        # Mark session as failed since we can't queue it
+        session.status = "failed"
+        session.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue temporarily unavailable. Please try again later.",
+        )
+
+    # Update session with queue info
+    session.status = "queued"
+    session.queue_position = queue_position
+    session.queued_at = datetime.now(timezone.utc)
+    session.priority = user.queue_priority
+    await db.commit()
+
+    logger.info(f"Task {session_id} queued at position {queue_position}")
 
     return TaskStartedResponse(
         session_id=session_id,
-        status="running",
-        message="Task execution started",
+        status="queued",
+        message=f"Task queued (position: {queue_position})",
         resumed_from=resume_from if resume_from != session_id else None,
+        queue_position=queue_position,
     )
 
 
@@ -998,30 +1200,20 @@ async def get_result(
                     if isinstance(path_value, str) and not path_value.startswith(("/", "~")):
                         result_files.add(path_value)
 
-    # Get session info for token usage data
-    session_info = session_service.get_session_info(session_id)
-    cumulative_usage = session_info.get("cumulative_usage")
+    # Build token usage from database cumulative stats
+    usage = TokenUsageResponse(
+        input_tokens=session.cumulative_input_tokens or 0,
+        output_tokens=session.cumulative_output_tokens or 0,
+        cache_creation_input_tokens=session.cumulative_cache_creation_tokens or 0,
+        cache_read_input_tokens=session.cumulative_cache_read_tokens or 0,
+    )
 
-    # Build token usage from cumulative stats
-    usage = None
-    if cumulative_usage:
-        usage = TokenUsageResponse(
-            input_tokens=cumulative_usage.get("input_tokens", 0),
-            output_tokens=cumulative_usage.get("output_tokens", 0),
-            cache_creation_input_tokens=cumulative_usage.get(
-                "cache_creation_input_tokens", 0
-            ),
-            cache_read_input_tokens=cumulative_usage.get(
-                "cache_read_input_tokens", 0
-            ),
-        )
-
-    # Build metrics from session data + file-based info
+    # Build metrics from database session data
     metrics = ResultMetrics(
         duration_ms=session.duration_ms,
         num_turns=session.num_turns or 0,
         total_cost_usd=session.total_cost_usd,
-        model=session.model or session_info.get("model"),
+        model=session.model,
         usage=usage,
     )
 

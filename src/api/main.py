@@ -26,7 +26,7 @@ from ..services.session_service import InvalidSessionIdError, SessionNotFoundErr
 from ..core.logging_config import setup_backend_logging
 from ..core.subagent_manager import get_subagent_manager
 from ..db.database import init_db, DATABASE_PATH
-from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, sessions_router, skills_router
+from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, queue_router, sessions_router, skills_router
 from .waf_filter import validate_request_size
 from .security_middleware import (
     build_allowed_origins,
@@ -189,8 +189,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     FastAPI lifespan context manager.
 
     Handles startup and shutdown events:
-    - Startup: Initialize database, load subagent configurations
-    - Shutdown: Cleanup resources
+    - Startup: Initialize database, load subagent configurations, start queue processor
+    - Shutdown: Stop queue processor, cleanup resources
     """
     # Startup
     logger.info("Starting Ag3ntum API...")
@@ -208,9 +208,68 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         f"{subagent_manager.disabled_count} disabled)"
     )
 
+    # Initialize task queue system
+    queue_processor = None
+    try:
+        config = load_api_config()
+        queue_config = config.get("task_queue", {})
+
+        # Check if queue system is enabled
+        if queue_config.get("queue", {}).get("enabled", True):
+            from ..services.task_queue import TaskQueue
+            from ..services.quota_manager import QuotaManager
+            from ..services.queue_processor import QueueProcessor
+            from ..services.auto_resume import AutoResumeService
+            from ..services.queue_config import load_queue_config
+            from ..services.agent_runner import agent_runner
+            from ..db.database import AsyncSessionLocal
+
+            redis_url = config.get("redis", {}).get("url", "redis://redis:6379/0")
+            qc = load_queue_config(queue_config)
+
+            # Initialize queue components
+            task_queue = TaskQueue(redis_url, max_queue_size=qc.queue.max_queue_size)
+            quota_manager = QuotaManager(task_queue, qc.quotas)
+            queue_processor = QueueProcessor(
+                task_queue,
+                quota_manager,
+                qc.queue.processing_interval_ms,
+                redis_url,
+                qc.queue.task_timeout_minutes,
+            )
+            auto_resume_service = AutoResumeService(task_queue, qc.auto_resume)
+
+            # Register completion callback with AgentRunner
+            agent_runner.register_completion_callback(queue_processor.on_task_complete)
+
+            # Recover interrupted sessions (auto-resume)
+            async with AsyncSessionLocal() as db:
+                stats = await auto_resume_service.recover_on_startup(db)
+                logger.info(f"Auto-resume recovery: {stats}")
+
+            # Start queue processor background task
+            await queue_processor.start()
+
+            # Store in app.state for route access
+            app.state.task_queue = task_queue
+            app.state.quota_manager = quota_manager
+            app.state.queue_processor = queue_processor
+
+            logger.info("Task queue system initialized")
+        else:
+            logger.info("Task queue system disabled in configuration")
+
+    except Exception as e:
+        logger.warning(f"Failed to initialize task queue system: {e}")
+        # Continue without queue system - tasks will start immediately
+
     yield
 
     # Shutdown
+    if queue_processor:
+        await queue_processor.stop()
+        logger.info("Queue processor stopped")
+
     logger.info("Shutting down Ag3ntum API...")
 
 
@@ -297,6 +356,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
+    app.include_router(queue_router, prefix="/api/v1")
     app.include_router(llm_proxy_router, prefix="/api")
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(config_router, prefix="/api/v1")

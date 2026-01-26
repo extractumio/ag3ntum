@@ -293,6 +293,54 @@ class SessionResponse(BaseModel):
         description="Whether session can be resumed (has established Claude session)"
     )
 
+    # Claude SDK session ID for resumption
+    claude_session_id: Optional[str] = Field(
+        default=None,
+        description="Claude SDK session ID for resumption"
+    )
+
+    # Cumulative statistics across all resumptions
+    cumulative_turns: int = Field(
+        default=0,
+        description="Total turns across all resumptions"
+    )
+    cumulative_duration_ms: int = Field(
+        default=0,
+        description="Total duration across all resumptions in milliseconds"
+    )
+    cumulative_cost_usd: float = Field(
+        default=0.0,
+        description="Total cost across all resumptions in USD"
+    )
+    cumulative_input_tokens: int = Field(
+        default=0,
+        description="Total input tokens across all resumptions"
+    )
+    cumulative_output_tokens: int = Field(
+        default=0,
+        description="Total output tokens across all resumptions"
+    )
+
+    # Session forking
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description="Parent session ID if this session was forked"
+    )
+
+    # Queue management fields
+    queue_position: Optional[int] = Field(
+        default=None,
+        description="Position in queue (if status is 'queued')"
+    )
+    queued_at: Optional[datetime] = Field(
+        default=None,
+        description="Time when task was queued"
+    )
+    is_auto_resume: bool = Field(
+        default=False,
+        description="Whether this is an auto-resumed session"
+    )
+
 
 class SessionListResponse(BaseModel):
     """Response for GET /sessions."""
@@ -306,11 +354,15 @@ class SessionListResponse(BaseModel):
 class TaskStartedResponse(BaseModel):
     """Response from POST /sessions/run or POST /sessions/{id}/task."""
     session_id: str = Field(description="Session ID")
-    status: str = Field(description="Session status (running)")
+    status: str = Field(description="Session status (running or queued)")
     message: str = Field(description="Status message")
     resumed_from: Optional[str] = Field(
         default=None,
         description="Session ID that was resumed (if applicable)"
+    )
+    queue_position: Optional[int] = Field(
+        default=None,
+        description="Queue position (if status is 'queued')"
     )
 
 
@@ -319,6 +371,27 @@ class CancelResponse(BaseModel):
     session_id: str = Field(description="Session ID")
     status: str = Field(description="Session status after cancellation")
     message: str = Field(description="Cancellation message")
+
+
+class QueuedSessionInfo(BaseModel):
+    """Information about a queued session."""
+    session_id: str = Field(description="Session ID")
+    queue_position: Optional[int] = Field(description="Position in queue")
+    queued_at: Optional[datetime] = Field(description="Time queued")
+    is_auto_resume: bool = Field(default=False, description="Auto-resume session")
+
+
+class QueueStatusResponse(BaseModel):
+    """Response from GET /queue/status."""
+    global_queue_length: int = Field(description="Total tasks in queue")
+    global_active_tasks: int = Field(description="Currently running tasks")
+    user_active_tasks: int = Field(description="User's running tasks")
+    user_queued_tasks: list[QueuedSessionInfo] = Field(
+        default_factory=list,
+        description="User's queued tasks"
+    )
+    max_concurrent_global: int = Field(description="Max global concurrent tasks")
+    max_concurrent_user: int = Field(description="Max per-user concurrent tasks")
 
 
 class TokenUsageResponse(BaseModel):

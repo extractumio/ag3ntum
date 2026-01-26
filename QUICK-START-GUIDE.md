@@ -18,19 +18,34 @@ git clone https://github.com/extractumio/ag3ntum.git
 cd ag3ntum
 ```
 
-### 2. Configure API Key
+### 2. Set Up Configuration Files
 
-Create the secrets file with your Anthropic API key:
+Copy the example configuration files and customize them for your deployment:
 
 ```bash
-cat > config/secrets.yaml << 'EOF'
-anthropic_api_key: sk-ant-api03-YOUR_KEY_HERE
-EOF
+# Required: Copy all example config files
+cp config/secrets.yaml.example config/secrets.yaml
+cp config/agent.yaml.example config/agent.yaml
+cp config/api.yaml.example config/api.yaml
+
+# Optional: Additional config files
+cp config/external-mounts.yaml.example config/external-mounts.yaml  # For mounting external directories
+cp config/llm-api-proxy.yaml.example config/llm-api-proxy.yaml      # For LLM API proxy
+cp config/user_secrets.yaml.example config/user_secrets.yaml        # For per-user secrets
 ```
 
-Replace `sk-ant-api03-YOUR_KEY_HERE` with your actual key.
+### 3. Configure API Key
 
-### 3. Build and Start
+Edit `config/secrets.yaml` with your Anthropic API key:
+
+```yaml
+# config/secrets.yaml
+anthropic_api_key: sk-ant-api03-YOUR_KEY_HERE
+```
+
+Replace `sk-ant-api03-YOUR_KEY_HERE` with your actual key from [console.anthropic.com](https://console.anthropic.com/settings/keys).
+
+### 4. Build and Start
 
 ```bash
 ./run.sh rebuild --no-cache
@@ -38,7 +53,7 @@ Replace `sk-ant-api03-YOUR_KEY_HERE` with your actual key.
 
 This builds the Docker images and starts all services. First build takes 5-10 minutes.
 
-### 4. Create Admin User
+### 5. Create Admin User
 
 ```bash
 ./run.sh create-user \
@@ -48,13 +63,13 @@ This builds the Docker images and starts all services. First build takes 5-10 mi
   --admin
 ```
 
-### 5. Access the Web UI
+### 6. Access the Web UI
 
 Open in browser: `http://YOUR_VPS_IP:50080/`
 
 Login with the email and password you just created.
 
-### 6. Run Your First Query
+### 7. Run Your First Query
 
 Type a prompt in the chat interface and press Enter. The agent will execute in a sandboxed environment.
 

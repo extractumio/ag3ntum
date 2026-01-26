@@ -425,6 +425,8 @@ class TraceProcessor:
         # Throttle thinking updates to reduce UI blinking (1 second interval)
         self._thinking_last_emit_time: float = 0.0
         self._thinking_emit_interval: float = 1.0  # seconds
+        # Track tool errors for session status determination
+        self._tool_error_count: int = 0
 
     def set_task(self, task: str) -> None:
         """
@@ -475,6 +477,15 @@ class TraceProcessor:
         self._cumulative_cost_usd = cost_usd
         self._cumulative_turns = turns
         self._cumulative_tokens = tokens
+
+    @property
+    def tool_error_count(self) -> int:
+        """Return the number of tool errors that occurred during execution."""
+        return self._tool_error_count
+
+    def had_tool_errors(self) -> bool:
+        """Return True if any tool errors occurred during execution."""
+        return self._tool_error_count > 0
 
     def finalize_orphaned_subagents(self) -> None:
         """
@@ -621,13 +632,18 @@ class TraceProcessor:
             tool_id = block.tool_use_id
             tool_info = self._pending_tool_calls.pop(tool_id, {})
             tool_name = tool_info.get("name", "unknown")
+            is_error = block.is_error or False
+
+            # Track tool errors for session status determination
+            if is_error:
+                self._tool_error_count += 1
 
             self.tracer.on_tool_complete(
                 tool_name=tool_name,
                 tool_id=tool_id,
                 result=block.content,
                 duration_ms=0,  # Will be calculated by tracer
-                is_error=block.is_error or False
+                is_error=is_error
             )
 
             # Handle Task tool completion for subagent tracing
@@ -700,12 +716,18 @@ class TraceProcessor:
             # Tool result
             tool_id = block["tool_use_id"]
             tool_info = self._pending_tool_calls.pop(tool_id, {})
+            is_error = block.get("is_error", False)
+
+            # Track tool errors for session status determination
+            if is_error:
+                self._tool_error_count += 1
+
             self.tracer.on_tool_complete(
                 tool_name=tool_info.get("name", "unknown"),
                 tool_id=tool_id,
                 result=block.get("content", ""),
                 duration_ms=0,
-                is_error=block.get("is_error", False)
+                is_error=is_error
             )
 
             # Handle Task tool completion for subagent tracing
@@ -735,13 +757,18 @@ class TraceProcessor:
                     tool_id = block.tool_use_id
                     tool_info = self._pending_tool_calls.pop(tool_id, {})
                     tool_name = tool_info.get("name", "unknown")
-                    
+                    is_error = block.is_error or False
+
+                    # Track tool errors for session status determination
+                    if is_error:
+                        self._tool_error_count += 1
+
                     self.tracer.on_tool_complete(
                         tool_name=tool_name,
                         tool_id=tool_id,
                         result=block.content,
                         duration_ms=0,
-                        is_error=block.is_error or False
+                        is_error=is_error
                     )
                     
                     # Handle Task tool completion for subagent tracing
@@ -761,7 +788,11 @@ class TraceProcessor:
                     tool_info = self._pending_tool_calls.pop(tool_id, {})
                     tool_name = tool_info.get("name", "unknown")
                     is_error = block.get("is_error", False) or False
-                    
+
+                    # Track tool errors for session status determination
+                    if is_error:
+                        self._tool_error_count += 1
+
                     self.tracer.on_tool_complete(
                         tool_name=tool_name,
                         tool_id=tool_id,

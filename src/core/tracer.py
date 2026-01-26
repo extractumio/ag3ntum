@@ -2638,6 +2638,12 @@ class EventingTracer(TracerBase):
     ) -> None:
         # Store working_dir for post-completion security scanning
         self._working_dir = working_dir
+
+        # Save claude_session_id to database immediately when we receive it
+        # The session_id parameter here is the Claude SDK session ID
+        if session_id and session_id != "unknown" and self._session_id:
+            self._save_claude_session_id(session_id)
+
         self._tracer.on_agent_start(
             session_id=session_id,
             model=model,
@@ -2656,6 +2662,41 @@ class EventingTracer(TracerBase):
                 "task": task,
             },
         )
+
+    def _save_claude_session_id(self, claude_session_id: str) -> None:
+        """
+        Persist claude_session_id to database immediately (fire-and-forget).
+
+        This captures the Claude SDK's session ID as soon as we receive the init event,
+        enabling auto-resume even if execution is interrupted before completion.
+        """
+        async def _save():
+            try:
+                from ..db.database import AsyncSessionLocal
+                from ..db.models import Session
+                from sqlalchemy import select
+
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(Session).where(Session.id == self._session_id)
+                    )
+                    session = result.scalar_one_or_none()
+                    if session:
+                        session.claude_session_id = claude_session_id
+                        await db.commit()
+                        logger.debug(
+                            f"Saved claude_session_id for {self._session_id}: {claude_session_id}"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to save claude_session_id: {e}")
+
+        # Schedule in event loop (non-blocking)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_save())
+        except RuntimeError:
+            # No running loop - skip (will be saved on completion anyway)
+            pass
 
     def on_tool_start(
         self,

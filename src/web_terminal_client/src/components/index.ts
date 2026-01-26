@@ -21,3 +21,9 @@ export {
 } from './spinners';
 
 export { CopyButtons, type CopyButtonsProps } from './common';
+
+export { QueueIndicator } from './QueueIndicator';
+
+export { SessionListTab, useSessionBadges, type SessionBadges } from './SessionListTab';
+
+export { Popup, type PopupProps, type PopupType, type PopupAction } from './Popup';
