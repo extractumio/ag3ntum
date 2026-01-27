@@ -395,7 +395,14 @@ fi
 
 function read_config_value() {
   local key="$1"
+  local default="${2:-}"
   local config_file="config/api.yaml"
+
+  # Return default if config file doesn't exist
+  if [[ ! -f "$config_file" ]]; then
+    echo "$default"
+    return
+  fi
 
   # Split key into section and field (e.g., "api.external_port" -> "api" "external_port")
   local section="${key%%.*}"
@@ -404,7 +411,8 @@ function read_config_value() {
   # Parse simple nested YAML without external dependencies
   # Handles format:  section:
   #                    field: value
-  awk -v section="$section" -v field="$field" '
+  local value
+  value=$(awk -v section="$section" -v field="$field" '
     BEGIN { in_section = 0 }
     # Match section header (starts at column 0, ends with colon)
     /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
@@ -427,19 +435,22 @@ function read_config_value() {
         exit
       }
     }
-  ' "$config_file"
+  ' "$config_file")
+
+  # Return value if found, otherwise default
+  if [[ -n "$value" ]]; then
+    echo "$value"
+  else
+    echo "$default"
+  fi
 }
 
 function render_ui_config() {
-  # Read server configuration
+  # Read server configuration with defaults
   local HOSTNAME
   local PROTOCOL
-  HOSTNAME="$(read_config_value 'server.hostname')"
-  PROTOCOL="$(read_config_value 'server.protocol')"
-
-  # Default values if not set
-  HOSTNAME="${HOSTNAME:-localhost}"
-  PROTOCOL="${PROTOCOL:-http}"
+  HOSTNAME="$(read_config_value 'server.hostname' 'localhost')"
+  PROTOCOL="$(read_config_value 'server.protocol' 'http')"
 
   cat > src/web_terminal_client/public/config.yaml <<EOF
 server:
@@ -1295,8 +1306,8 @@ if [[ "${ACTION}" == "rebuild" ]]; then
   # Fall through to build
 fi
 
-API_PORT="$(read_config_value 'api.external_port')"
-WEB_PORT="$(read_config_value 'web.external_port')"
+API_PORT="$(read_config_value 'api.external_port' '40080')"
+WEB_PORT="$(read_config_value 'web.external_port' '50080')"
 
 # Setup directories with proper ownership before starting containers
 # This ensures bind-mounted volumes are writable by the container user

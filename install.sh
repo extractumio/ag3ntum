@@ -24,7 +24,6 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-VERSION="1.0.0"
 REPO_URL="https://github.com/extractumio/ag3ntum.git"
 MIN_DOCKER_VERSION="20.10"
 
@@ -118,7 +117,7 @@ prompt_text() {
         printf "${CYAN}?${NC} %s: " "$prompt"
     fi
 
-    read -r result
+    read -r result < /dev/tty
     result="${result:-$default}"
     eval "$var_name='$result'"
 }
@@ -132,7 +131,7 @@ prompt_password() {
 
     while true; do
         printf "${CYAN}?${NC} %s: " "$prompt"
-        read -rs result
+        read -rs result < /dev/tty
         printf "\n"
 
         if [[ ${#result} -lt 8 ]]; then
@@ -141,7 +140,7 @@ prompt_password() {
         fi
 
         printf "${CYAN}?${NC} Confirm password: "
-        read -rs confirm
+        read -rs confirm < /dev/tty
         printf "\n"
 
         if [[ "$result" != "$confirm" ]]; then
@@ -165,7 +164,7 @@ prompt_yesno() {
     [[ "$default" == "n" ]] && hint="[y/N]"
 
     printf "${CYAN}?${NC} %s %s: " "$prompt" "$hint"
-    read -r result
+    read -r result < /dev/tty
     result="${result:-$default}"
 
     [[ "$result" =~ ^[Yy] ]]
@@ -406,6 +405,12 @@ setup_repository() {
             print_success "Using existing repository"
             IN_REPO=1
             return 0
+        else
+            # Directory exists but is incomplete - fail with clear message
+            print_error "ag3ntum directory exists but is incomplete (missing run.sh or docker-compose.yml)"
+            print_info "Please remove the directory and try again:"
+            echo "  rm -rf ag3ntum"
+            exit 1
         fi
     fi
 
@@ -447,7 +452,7 @@ gather_configuration() {
     # API Key (required, sensitive)
     while true; do
         printf "${CYAN}?${NC} Anthropic API Key: "
-        read -rs ANTHROPIC_API_KEY
+        read -rs ANTHROPIC_API_KEY < /dev/tty
         printf "\n"
 
         if [[ -z "$ANTHROPIC_API_KEY" ]]; then
@@ -628,20 +633,21 @@ EOF
         return
     fi
 
-    # Update values - use sed with different delimiters to handle special chars
-    # macOS and GNU sed have different -i syntax
-    local sed_inplace
-    if [[ "$(uname)" == "Darwin" ]]; then
-        sed_inplace="sed -i ''"
-    else
-        sed_inplace="sed -i"
-    fi
+    # Update values using sed
+    # macOS and GNU sed have different -i syntax - use function to handle
+    sed_inplace() {
+        if [[ "$(uname)" == "Darwin" ]]; then
+            sed -i '' "$@"
+        else
+            sed -i "$@"
+        fi
+    }
 
     # Update hostname
-    $sed_inplace "s|hostname: \"localhost\"|hostname: \"${SERVER_HOSTNAME}\"|" config/api.yaml 2>/dev/null || true
+    sed_inplace "s|hostname: \"localhost\"|hostname: \"${SERVER_HOSTNAME}\"|" config/api.yaml
 
     # Update API external port (appears in api section)
-    $sed_inplace "s|external_port: 40080|external_port: ${API_PORT}|" config/api.yaml 2>/dev/null || true
+    sed_inplace "s|external_port: 40080|external_port: ${API_PORT}|" config/api.yaml
 
     # Update Web external port (appears in web section) - need to be careful not to change api port
     # This is a bit tricky since both are "external_port" - we'll use a two-step approach
@@ -673,15 +679,27 @@ generate_agent_yaml() {
         cp config/agent.yaml.example config/agent.yaml
         print_success "agent.yaml created (using defaults)"
     else
-        print_warning "agent.yaml.example not found, skipping"
+        print_warning "agent.yaml.example not found, creating minimal config"
+        cat > config/agent.yaml << 'EOF'
+# Ag3ntum Agent Configuration
+model: claude-sonnet-4-20250514
+max_turns: 100
+timeout_seconds: 1800
+role: default
+EOF
+        print_success "agent.yaml created (minimal)"
     fi
 }
 
 generate_configuration() {
     print_step "Generating Configuration Files"
 
-    # Ensure config directory exists
+    # Ensure config directory exists and is writable
     mkdir -p config
+    if [[ ! -w "config" ]]; then
+        print_error "Config directory is not writable"
+        exit 1
+    fi
 
     generate_secrets_yaml
     generate_api_yaml
@@ -697,6 +715,14 @@ generate_configuration() {
 run_build() {
     print_step "Building Ag3ntum"
 
+    # Ensure run.sh is executable
+    if [[ ! -x "./run.sh" ]]; then
+        chmod +x ./run.sh 2>/dev/null || {
+            print_error "Cannot make run.sh executable"
+            exit 1
+        }
+    fi
+
     print_info "This may take 5-10 minutes on first build..."
     echo ""
 
@@ -704,8 +730,8 @@ run_build() {
     export AG3NTUM_API_PORT="$API_PORT"
     export AG3NTUM_WEB_PORT="$WEB_PORT"
 
-    # Run the build with output
-    if ! ./run.sh rebuild --no-cache; then
+    # Run the build with output (use 'build' not 'rebuild' to preserve generated config)
+    if ! ./run.sh build --no-cache; then
         print_error "Build failed"
         echo ""
         echo "Check the output above for errors."
@@ -756,7 +782,6 @@ show_banner() {
 EOF
     printf "${NC}"
     printf "${WHITE}Self-hosted Claude Code execution platform${NC}\n"
-    printf "${DIM}Version ${VERSION}${NC}\n"
     echo ""
 }
 
