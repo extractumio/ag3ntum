@@ -3,6 +3,19 @@ set -e
 
 cd /src/web_terminal_client
 
+# Ensure node_modules directory exists and is writable
+# Named Docker volumes are created with root ownership by default
+# Fix ownership on first use so npm can write to it
+if [ ! -d "node_modules" ]; then
+    echo "Creating node_modules directory..."
+    mkdir -p node_modules
+fi
+
+if [ ! -w "node_modules" ]; then
+    echo "Fixing node_modules permissions (first run)..."
+    sudo chown -R "$(id -u):$(id -g)" node_modules
+fi
+
 # Check if node_modules needs (re)installation
 # Reinstall if: missing, empty, or missing platform-specific rollup binary
 NEEDS_INSTALL=0

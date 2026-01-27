@@ -705,6 +705,17 @@ generate_configuration() {
     generate_api_yaml
     generate_agent_yaml
 
+    # Verify all required config files were created
+    local missing_files=()
+    [[ ! -f "config/secrets.yaml" ]] && missing_files+=("secrets.yaml")
+    [[ ! -f "config/api.yaml" ]] && missing_files+=("api.yaml")
+    [[ ! -f "config/agent.yaml" ]] && missing_files+=("agent.yaml")
+
+    if [[ ${#missing_files[@]} -gt 0 ]]; then
+        print_error "Failed to create config files: ${missing_files[*]}"
+        exit 1
+    fi
+
     print_success "Configuration files generated"
 }
 
