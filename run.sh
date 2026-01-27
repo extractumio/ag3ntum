@@ -21,6 +21,7 @@ CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 RESERVED_NAMES=("persistent" "ro" "rw" "external")
 
 # Directories that container needs to WRITE to (need ownership fix on Linux)
+# Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
 WRITABLE_DIRS=("logs" "data" "users")
 
 # Directories that container only READS from (just need to exist)
@@ -120,10 +121,67 @@ CLI Hints:
 EOF
 }
 
+# Check if user has privileges to set directory ownership (Linux only)
+# Called early to fail fast with a clear message
+function check_privileges() {
+  local os_type
+  os_type="$(uname -s)"
+
+  # macOS - Docker Desktop handles permissions automatically
+  if [[ "${os_type}" == "Darwin" ]]; then
+    return 0
+  fi
+
+  # Windows environments (Git Bash, MINGW, Cygwin) - Docker Desktop handles permissions
+  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
+    return 0
+  fi
+
+  # At this point we're on Linux (native or WSL)
+  # Running as root - all good
+  if [[ "$(id -u)" == "0" ]]; then
+    return 0
+  fi
+
+  # Check if sudo is available and user has passwordless sudo (or cached credentials)
+  if ! command -v sudo &>/dev/null; then
+    echo ""
+    echo "ERROR: This script requires root privileges to set directory ownership."
+    echo ""
+    echo "The container runs as UID ${CONTAINER_UID} and needs write access to data directories."
+    echo "Please run as root or install sudo:"
+    echo ""
+    echo "  sudo ./run.sh $*"
+    echo ""
+    exit 1
+  fi
+
+  # Test if sudo works (will prompt for password if needed, or fail if not allowed)
+  if ! sudo -n true 2>/dev/null; then
+    echo ""
+    echo "NOTE: This script requires sudo privileges to set directory ownership."
+    echo "You may be prompted for your password."
+    echo ""
+    # Try sudo with prompt - if it fails, user doesn't have sudo access
+    if ! sudo true; then
+      echo ""
+      echo "ERROR: Cannot obtain sudo privileges."
+      echo "Please run as root or configure sudo access for your user."
+      echo ""
+      exit 1
+    fi
+  fi
+
+  return 0
+}
+
 # Setup directories with proper ownership for container user
 # Container runs as ag3ntum_api (UID 45045) - see Dockerfile
 function setup_directories() {
   echo "=== Setting up directories ==="
+
+  # Check privileges early - fail fast with clear message
+  check_privileges
 
   # Create all required directories
   for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
@@ -133,15 +191,24 @@ function setup_directories() {
     fi
   done
 
-  # On macOS, Docker Desktop handles file permissions automatically
+  # On macOS and Windows, Docker Desktop handles file permissions automatically
   # via its virtualization layer - no ownership changes needed
-  if [[ "$(uname)" == "Darwin" ]]; then
+  local os_type
+  os_type="$(uname -s)"
+
+  if [[ "${os_type}" == "Darwin" ]]; then
     echo "  macOS: Docker Desktop handles permissions automatically"
     echo "  Directories ready"
     return
   fi
 
-  # On Linux, set ownership of writable directories to container user (UID 45045)
+  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
+    echo "  Windows: Docker Desktop handles permissions automatically"
+    echo "  Directories ready"
+    return
+  fi
+
+  # On Linux (native or WSL), set ownership of writable directories to container user (UID 45045)
   echo "  Linux: Setting ownership to UID ${CONTAINER_UID} for writable directories"
 
   for dir in "${WRITABLE_DIRS[@]}"; do
@@ -154,12 +221,9 @@ function setup_directories() {
         echo "  Setting ownership: ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
         chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
       else
-        # Running as regular user - need sudo
+        # Running as regular user - need sudo (already verified in check_privileges)
         echo "  Setting ownership (sudo): ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}" || {
-          echo "  ERROR: Cannot set ownership. Run as root or use sudo."
-          exit 1
-        }
+        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
       fi
     fi
   done
@@ -1356,16 +1420,6 @@ if ! check_services; then
 fi
 
 ROLLBACK_ENV=0
-
-# Build the web frontend (catches Babel transpilation errors early)
-echo ""
-echo "=== Building Web Frontend ==="
-if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
-  echo ""
-  echo "ERROR: Vite build failed. Check for transpilation errors."
-  exit 1
-fi
-echo "Frontend build successful."
 
 # Verify fresh containers
 echo ""
