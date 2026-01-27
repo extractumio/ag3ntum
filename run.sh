@@ -768,13 +768,13 @@ function create_user() {
 
   # Get current UID mode from container
   local uid_mode
-  uid_mode=$(docker compose exec ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
+  uid_mode=$(docker compose exec -T ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
 
   echo "=== Creating user: $USERNAME ==="
   echo "  UID Security Mode: ${uid_mode:-isolated}"
 
   # Run create_user.py inside container as root (avoids sudo prompts)
-  docker compose exec -u root ag3ntum-api \
+  docker compose exec -T -u root ag3ntum-api \
     python3 src/cli/create_user.py \
     --username="$USERNAME" \
     --email="$EMAIL" \
@@ -823,7 +823,7 @@ function delete_user() {
   fi
 
   # Run delete_user.py inside container as root (needs elevated permissions)
-  docker compose exec -u root ag3ntum-api \
+  docker compose exec -T -u root ag3ntum-api \
     python3 src/cli/delete_user.py \
     --username="$USERNAME" \
     $FORCE
@@ -855,7 +855,7 @@ run_ui_tests() {
   # Check if node_modules needs reinstalling (platform mismatch between host and container)
   # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux)
   echo "Checking node_modules platform compatibility..."
-  NEEDS_REINSTALL=$(docker compose exec ag3ntum-web sh -c '
+  NEEDS_REINSTALL=$(docker compose exec -T ag3ntum-web sh -c '
     if [ ! -d /src/web_terminal_client/node_modules ]; then
       echo "missing"
     elif [ ! -d /src/web_terminal_client/node_modules/@rollup ]; then
@@ -869,7 +869,7 @@ run_ui_tests() {
 
   if [[ "${NEEDS_REINSTALL}" != "ok" ]]; then
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
-    docker compose exec ag3ntum-web sh -c '
+    docker compose exec -T ag3ntum-web sh -c '
       cd /src/web_terminal_client && \
       rm -rf node_modules package-lock.json && \
       npm install --no-fund --no-audit
@@ -879,7 +879,7 @@ run_ui_tests() {
   # Run vite build first to catch Babel transpilation errors
   # (Vitest uses esbuild which is more permissive than Babel)
   echo "Running vite build to verify transpilation..."
-  if ! docker compose exec ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
     echo ""
     echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
     return 1
@@ -889,11 +889,7 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  if [ -t 0 ]; then
-    docker compose exec ag3ntum-web npm run test:run
-  else
-    docker compose exec ag3ntum-web npm run test:run
-  fi
+  docker compose exec -T ag3ntum-web npm run test:run
   return $?
 }
 
@@ -1364,7 +1360,7 @@ ROLLBACK_ENV=0
 # Build the web frontend (catches Babel transpilation errors early)
 echo ""
 echo "=== Building Web Frontend ==="
-if ! docker compose exec ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
   echo ""
   echo "ERROR: Vite build failed. Check for transpilation errors."
   exit 1
