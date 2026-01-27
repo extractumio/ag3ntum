@@ -34,8 +34,14 @@ export interface AgentMessageBlockProps {
   subagentExpanded: Set<string>;
   onToggleSubagent: (id: string) => void;
   status?: string;
-  structuredStatus?: ResultStatus;
-  structuredError?: string;
+  /** Computed message status based on tool call outcomes */
+  messageStatus?: ResultStatus;
+  /** Error message from failed tools in this message */
+  messageErrorMessage?: string;
+  /** Agent-provided status of the overall user request */
+  requestStatus?: ResultStatus;
+  /** Agent-provided error message if request cannot be completed */
+  requestErrorMessage?: string;
   comments?: string;
   commentsExpanded?: boolean;
   onToggleComments?: () => void;
@@ -63,8 +69,10 @@ export function AgentMessageBlock({
   subagentExpanded,
   onToggleSubagent,
   status,
-  structuredStatus,
-  structuredError,
+  messageStatus,
+  messageErrorMessage,
+  requestStatus: _requestStatus,
+  requestErrorMessage,
   comments,
   commentsExpanded,
   onToggleComments,
@@ -87,40 +95,36 @@ export function AgentMessageBlock({
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
   const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
-  const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
+
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
   // Show trailing wait spinner when message content is complete but session is still running
   // This indicates "more processing happening" even when tools are running (they have their own spinners too)
   const showTrailingWait = Boolean(displayContent) && !isStreaming && sessionRunning;
 
-  const hasRightContent = toolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
-
-  // Determine if right panel should be shown
-  // Desktop: always show unless collapsed (even if empty)
-  // Mobile: only show when expanded AND has content (no point showing empty panel on mobile)
-  let showRightPanel = false;
-  if (isMobile) {
-    showRightPanel = hasRightContent && mobileExpanded;
-  } else {
-    showRightPanel = !rightPanelCollapsed;
-  }
-
-  // Separate AskUserQuestion tools from other tools - they render inline in message
-  // Handle both native SDK tool name and MCP tool name
-  const askUserQuestionTools = toolCalls.filter(t =>
-    t.tool === 'AskUserQuestion' || t.tool === 'mcp__ag3ntum__AskUserQuestion'
-  );
-  const otherToolCalls = toolCalls.filter(t =>
-    t.tool !== 'AskUserQuestion' && t.tool !== 'mcp__ag3ntum__AskUserQuestion'
-  );
+  // Separate AskUserQuestion tools (render inline) from other tools (render in right panel)
+  const isAskUserQuestion = (tool: ToolCallView) =>
+    tool.tool === 'AskUserQuestion' || tool.tool === 'mcp__ag3ntum__AskUserQuestion';
+  const askUserQuestionTools = toolCalls.filter(isAskUserQuestion);
+  const otherToolCalls = toolCalls.filter(t => !isAskUserQuestion(t));
 
   const hasOtherRightContent = otherToolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
+
+  // Desktop: always show unless collapsed; Mobile: only show when expanded AND has content
+  const showRightPanel = isMobile ? (hasOtherRightContent && mobileExpanded) : !rightPanelCollapsed;
+
+  // Determine icon status class based on message status (computed from tool outcomes)
+  const getIconStatusClass = (): string => {
+    if (messageStatus === 'complete') return 'icon-status-complete';
+    if (messageStatus === 'partial') return 'icon-status-partial';
+    if (messageStatus === 'failed' || messageStatus === 'cancelled') return 'icon-status-failed';
+    return '';
+  };
 
   return (
     <div className={`message-block agent-message ${statusClass} ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
-        <span className="message-icon">◆</span>
+        <span className={`message-icon ${getIconStatusClass()}`}>◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
         {/* Message stats badges */}
@@ -175,13 +179,20 @@ export function AgentMessageBlock({
             {!displayContent && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
-            {((structuredStatusLabel && structuredStatus === 'failed') || isMeaningfulError(structuredError)) && (
-              <div className="agent-structured-meta">
-                {structuredStatusLabel && structuredStatus === 'failed' && (
-                  <div className="agent-structured-status">Status: {structuredStatusLabel}</div>
+            {/* Error messages only - status is shown via icon color */}
+            {(isMeaningfulError(messageErrorMessage) || isMeaningfulError(requestErrorMessage)) && (
+              <div className="agent-status-meta">
+                {isMeaningfulError(messageErrorMessage) && (
+                  <div className="agent-status-error message-error">
+                    <span className="error-label">Tool Error:</span>
+                    <span className="error-value">{messageErrorMessage}</span>
+                  </div>
                 )}
-                {isMeaningfulError(structuredError) && (
-                  <div className="agent-structured-error">Error: {structuredError}</div>
+                {isMeaningfulError(requestErrorMessage) && (
+                  <div className="agent-status-error request-error">
+                    <span className="error-label">Request Error:</span>
+                    <span className="error-value">{requestErrorMessage}</span>
+                  </div>
                 )}
               </div>
             )}

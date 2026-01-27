@@ -1165,7 +1165,7 @@ async def get_result(
     result_files: set[str] = set()
     status_value = "FAILED"
     error_message = ""
-    structured_status: Optional[str] = None
+    request_status: Optional[str] = None
 
     for event in events:
         if event.get("type") == "message":
@@ -1176,14 +1176,14 @@ async def get_result(
             else:
                 final_message = "".join(message_buffer) + text
                 message_buffer = []
-            if structured_status is None:
-                structured_status = data.get("structured_status")
-                if structured_status:
-                    structured_status = str(structured_status).upper()
+            if request_status is None:
+                request_status = data.get("request_status")
+                if request_status:
+                    request_status = str(request_status).upper()
             if not error_message:
-                structured_error = data.get("structured_error")
-                if structured_error:
-                    error_message = str(structured_error)
+                request_error = data.get("request_error_message")
+                if request_error:
+                    error_message = str(request_error)
 
         if event.get("type") == "error":
             error_message = str(event.get("data", {}).get("message", ""))
@@ -1219,7 +1219,7 @@ async def get_result(
 
     return ResultResponse(
         session_id=session_id,
-        status=structured_status or status_value,
+        status=request_status or status_value,
         error=error_message,
         comments="",
         output=final_message,

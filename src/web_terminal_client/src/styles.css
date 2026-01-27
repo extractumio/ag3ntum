@@ -1148,6 +1148,105 @@ body,
 }
 
 /* =============================================================================
+ * DUAL STATUS DISPLAY (Message + Request status)
+ * ============================================================================= */
+
+.agent-status-meta {
+  margin-top: var(--spacing-md);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  align-items: flex-start;
+}
+
+.agent-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-md);
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.agent-status-badge .status-label {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.agent-status-badge .status-value {
+  font-weight: 600;
+}
+
+/* Message status (turn-level, computed from tool outcomes) */
+.agent-status-badge.message-status {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.agent-status-badge.message-status.status-complete .status-value {
+  color: var(--color-success);
+}
+
+.agent-status-badge.message-status.status-partial .status-value {
+  color: var(--color-warning);
+}
+
+.agent-status-badge.message-status.status-failed .status-value,
+.agent-status-badge.message-status.status-error .status-value {
+  color: var(--color-error);
+}
+
+/* Request status (overall task progress, agent-provided) */
+.agent-status-badge.request-status {
+  background: rgba(126, 200, 212, 0.1);
+  border: 1px solid rgba(126, 200, 212, 0.2);
+}
+
+.agent-status-badge.request-status.status-complete .status-value {
+  color: var(--color-cyan);
+}
+
+.agent-status-badge.request-status.status-partial .status-value {
+  color: var(--color-yellow);
+}
+
+.agent-status-badge.request-status.status-failed .status-value,
+.agent-status-badge.request-status.status-error .status-value {
+  color: var(--color-error);
+}
+
+/* Status error messages */
+.agent-status-error {
+  width: 100%;
+  margin-top: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  background: rgba(255, 100, 100, 0.08);
+  border-left: 3px solid var(--color-error);
+}
+
+.agent-status-error .error-label {
+  color: var(--color-error);
+  font-weight: 600;
+  margin-right: var(--spacing-xs);
+}
+
+.agent-status-error .error-value {
+  color: var(--color-text-muted);
+}
+
+.agent-status-error.message-error {
+  background: rgba(255, 100, 100, 0.06);
+}
+
+.agent-status-error.request-error {
+  background: rgba(255, 100, 100, 0.1);
+  border-left-width: 4px;
+}
+
+/* =============================================================================
  * RESULT SECTION
  * ============================================================================= */
 
@@ -1270,6 +1369,19 @@ body,
 
 .message-icon {
   color: var(--color-text-muted);
+}
+
+/* Icon status colors - reflects message status from tool outcomes */
+.message-icon.icon-status-complete {
+  color: var(--color-green);
+}
+
+.message-icon.icon-status-partial {
+  color: var(--color-yellow);
+}
+
+.message-icon.icon-status-failed {
+  color: var(--color-red);
 }
 
 .message-sender {
@@ -1692,6 +1804,7 @@ body,
 
 .subagent-icon {
   font-size: var(--font-sm);
+  margin-right: var(--spacing-xs);
 }
 
 .subagent-name {

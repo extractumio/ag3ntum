@@ -27,9 +27,14 @@ export type ConversationItem =
       status?: ResultStatus;
       comments?: string;
       files?: string[];
-      structuredStatus?: ResultStatus;
-      structuredError?: string;
-      structuredFields?: Record<string, string>;
+      /** Computed message status based on tool call outcomes */
+      messageStatus?: ResultStatus;
+      /** Error message from failed tools in this message */
+      messageErrorMessage?: string;
+      /** Agent-provided status of the overall user request */
+      requestStatus?: ResultStatus;
+      /** Agent-provided error message if request cannot be completed */
+      requestErrorMessage?: string;
       isStreaming?: boolean;
     }
   | {
@@ -113,6 +118,12 @@ export type TodoItem = {
 export type StructuredMessage = {
   body: string;
   fields: Record<string, string>;
+  /** Request status from agent frontmatter */
   status?: ResultStatus;
+  /** Request error message from agent frontmatter */
   error?: string;
+  /** Message status (computed by backend from tool outcomes) */
+  messageStatus?: ResultStatus;
+  /** Message error message (first tool failure) */
+  messageErrorMessage?: string;
 };

@@ -131,9 +131,9 @@ function parseStructuredMessage(text: string): StructuredMessage {
         if (body.startsWith('\n')) {
           body = body.slice(1);
         }
-        const statusRaw = fields.status;
+        const statusRaw = fields.request_status;
         const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-        const error = fields.error ?? undefined;
+        const error = fields.request_error_message ?? undefined;
         return { body, fields, status, error };
       }
     }
@@ -149,9 +149,9 @@ function parseStructuredMessage(text: string): StructuredMessage {
         bodyLines.pop();
       }
       const body = bodyLines.join('\n');
-      const statusRaw = fields.status;
+      const statusRaw = fields.request_status;
       const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-      const error = fields.error ?? undefined;
+      const error = fields.request_error_message ?? undefined;
       return { body, fields, status, error };
     }
   }
@@ -362,23 +362,23 @@ describe('parseStructuredMessage', () => {
   describe('header at start', () => {
     it('parses message with header at start', () => {
       const text = `---
-Status: complete
-Error: none
+request_status: complete
+request_error_message: none
 ---
 This is the body content.`;
 
       const result = parseStructuredMessage(text);
 
       expect(result.status).toBe('complete');
-      expect(result.fields.status).toBe('complete');
-      expect(result.fields.error).toBe('none');
+      expect(result.fields.request_status).toBe('complete');
+      expect(result.fields.request_error_message).toBe('none');
       expect(result.body).toBe('This is the body content.');
     });
 
     it('extracts status and error fields', () => {
       const text = `---
-Status: failed
-Error: Connection timeout
+request_status: failed
+request_error_message: Connection timeout
 ---
 Body text`;
 
@@ -394,7 +394,7 @@ Body text`;
       const text = `This is the body content.
 
 ---
-Status: complete
+request_status: complete
 ---`;
 
       const result = parseStructuredMessage(text);
@@ -424,7 +424,7 @@ Status: complete
 
   describe('fenced code blocks', () => {
     it('handles fenced content', () => {
-      const text = '```\n---\nStatus: complete\n---\nBody\n```';
+      const text = '```\n---\nrequest_status: complete\n---\nBody\n```';
       const result = parseStructuredMessage(text);
 
       // Should parse the header
