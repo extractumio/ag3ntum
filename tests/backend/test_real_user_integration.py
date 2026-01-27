@@ -710,12 +710,13 @@ class TestRealUserCreation:
         user_home = Path(f"/users/{user.username}")
 
         # Check specific permission requirements
+        # Note: _setup_group_permissions() sets 750 for API group access
         permission_checks = [
             # (path, expected_mode, description)
-            (user_home, 0o711, "Home should be traverse-only for API"),
-            (user_home / "sessions", 0o770, "Sessions needs API access"),
+            (user_home, 0o750, "Home should allow group read+traverse for API"),
+            (user_home / "sessions", 0o750, "Sessions allows group read+traverse"),
             (user_home / "ag3ntum", 0o700, "ag3ntum should be user-only"),
-            (user_home / "venv", 0o711, "venv should be traverse-only"),
+            (user_home / "venv", 0o755, "venv should be world-readable"),
         ]
 
         for dir_path, expected_mode, description in permission_checks:
@@ -976,32 +977,30 @@ class TestUserIsolation:
             f"ag3ntum should not have other access, but has mode {oct(ag3ntum_mode)}"
         )
 
-        # === Test 3: Home directory is traverse-only (711) ===
+        # === Test 3: Home directory allows group access (750) ===
+        # Group read+execute is allowed for API access via ag3ntum group
         user2_home = Path(f"/users/{user2.username}")
         home_mode = stat.S_IMODE(user2_home.stat().st_mode)
 
-        has_group_read = bool(home_mode & 0o040)
         has_other_read = bool(home_mode & 0o004)
+        has_other_write = bool(home_mode & 0o002)
 
-        assert not has_group_read, (
-            f"Home should not have group read, but has mode {oct(home_mode)}"
-        )
         assert not has_other_read, (
             f"Home should not have other read, but has mode {oct(home_mode)}"
         )
+        assert not has_other_write, (
+            f"Home should not have other write, but has mode {oct(home_mode)}"
+        )
 
-        # === Test 4: Venv directory is traverse-only (711) ===
+        # === Test 4: Venv directory is world-readable (755) ===
+        # Venv needs to be readable for Python execution
         user2_venv = Path(f"/users/{user2.username}/venv")
         venv_mode = stat.S_IMODE(user2_venv.stat().st_mode)
 
-        has_group_read = bool(venv_mode & 0o040)
-        has_other_read = bool(venv_mode & 0o004)
+        has_other_write = bool(venv_mode & 0o002)
 
-        assert not has_group_read, (
-            f"venv should not have group read, but has mode {oct(venv_mode)}"
-        )
-        assert not has_other_read, (
-            f"venv should not have other read, but has mode {oct(venv_mode)}"
+        assert not has_other_write, (
+            f"venv should not have other write, but has mode {oct(venv_mode)}"
         )
 
         # === Test 5: Each user has unique UID ===

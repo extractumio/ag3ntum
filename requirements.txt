@@ -1,6 +1,6 @@
 # Install with: pip install -r requirements.txt
 
-claude-agent-sdk==0.1.20
+claude-agent-sdk==0.1.23
 jinja2==3.1.6
 pydantic==2.12.5
 pyyaml==6.0.3

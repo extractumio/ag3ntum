@@ -32,10 +32,10 @@ DEFAULT_RULES_PATH = Path(__file__).parent.parent.parent / "config" / "security"
 # Trusted skill script paths - commands executing scripts from these paths bypass security filters
 # These paths are verified within the sandboxed environment (bwrap) and are read-only mounted
 # See permissions.yaml for mount configuration (global_skills, user_skills, user_venv)
-# NOTE: Mounts are consistent with Docker mounts to ensure symlinks work in both environments
+# SECURITY: user_skills is a per-user mount to prevent cross-user access
 TRUSTED_SKILL_PATHS = (
     "/skills/",       # Global skills directory (read-only, contains .claude/skills/<skill_name>/)
-    "/users/",        # Users directory (read-only, contains <username>/.claude/skills/<skill_name>/)
+    "/user-skills/",  # User skills directory (read-only, per-user mount for isolation)
     "/venv/",         # User's Python venv (read-only mount at /venv)
 )
 

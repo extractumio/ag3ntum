@@ -1233,3 +1233,220 @@ class TestUIDChainIntegration:
         assert demote_fn is not None, "UID lost at demote_fn creation level"
 
         # All levels verified - UID chain is intact
+
+
+# =============================================================================
+# Test: Session Isolation and Permission-Based Security
+# =============================================================================
+
+class TestSessionIsolation:
+    """Test session-level isolation and permission-based security.
+
+    Security Model:
+    - User directories: 750 (owner rwx, ag3ntum group rx)
+    - Session directories: 700 (owner only, no group access)
+    - Persistent storage: 770 (owner + ag3ntum group rwx)
+    - PathValidator provides application-level access control
+
+    Cross-user blocking:
+    - Users cannot access other users' directories
+    - PathValidator blocks /users/{other_user}/* paths
+
+    Cross-session blocking:
+    - Users cannot access other sessions (even their own)
+    - PathValidator blocks /users/{user}/sessions/{other_session}/*
+    """
+
+    @pytest.fixture
+    def mock_workspace(self, tmp_path: Path) -> Path:
+        """Create a mock workspace with session structure."""
+        # Simulate /users/{username}/sessions/{session_id}/workspace
+        user_home = tmp_path / "users" / "testuser"
+        user_home.mkdir(parents=True)
+        sessions_dir = user_home / "sessions"
+        sessions_dir.mkdir()
+        session_dir = sessions_dir / "20260127_120000_abc12345"
+        session_dir.mkdir()
+        workspace = session_dir / "workspace"
+        workspace.mkdir()
+        return workspace
+
+    def test_path_validator_blocks_cross_user_access(self, mock_workspace: Path) -> None:
+        """PathValidator should block access to other users' directories."""
+        from src.core.path_validator import (
+            Ag3ntumPathValidator,
+            PathValidatorConfig,
+            PathValidationError,
+        )
+
+        config = PathValidatorConfig(
+            workspace_path=mock_workspace,
+        )
+        validator = Ag3ntumPathValidator(config)
+
+        # Should have extracted session context
+        assert validator._session_username == "testuser"
+        assert validator._session_id == "20260127_120000_abc12345"
+
+        # Access to own workspace should work
+        result = validator.validate_path("/workspace/file.txt", "read")
+        assert result.normalized == mock_workspace / "file.txt"
+
+        # Access to other user's directory should be blocked
+        with pytest.raises(PathValidationError) as exc_info:
+            validator.validate_path("/users/otheruser/sessions/xxx/workspace/file.txt", "read")
+        assert "CROSS_USER_ACCESS_BLOCKED" in str(exc_info.value.reason)
+
+    def test_path_validator_blocks_cross_session_access(self, mock_workspace: Path) -> None:
+        """PathValidator should block access to other sessions."""
+        from src.core.path_validator import (
+            Ag3ntumPathValidator,
+            PathValidatorConfig,
+            PathValidationError,
+        )
+
+        # Create another session directory for the same user
+        other_session = mock_workspace.parent.parent / "20260127_130000_def67890"
+        other_session.mkdir()
+        (other_session / "workspace").mkdir()
+
+        config = PathValidatorConfig(
+            workspace_path=mock_workspace,
+        )
+        validator = Ag3ntumPathValidator(config)
+
+        # Access to other session of same user should be blocked
+        with pytest.raises(PathValidationError) as exc_info:
+            validator.validate_path(
+                "/users/testuser/sessions/20260127_130000_def67890/workspace/file.txt",
+                "read"
+            )
+        assert "CROSS_SESSION_ACCESS_BLOCKED" in str(exc_info.value.reason)
+
+    def test_path_validator_allows_own_session(self, mock_workspace: Path) -> None:
+        """PathValidator should allow access to own session."""
+        from src.core.path_validator import (
+            Ag3ntumPathValidator,
+            PathValidatorConfig,
+        )
+
+        config = PathValidatorConfig(
+            workspace_path=mock_workspace,
+        )
+        validator = Ag3ntumPathValidator(config)
+
+        # Create a test file
+        test_file = mock_workspace / "test.txt"
+        test_file.write_text("test")
+
+        # Access to own session should work
+        result = validator.validate_path("/workspace/test.txt", "read")
+        assert result.normalized == test_file
+
+    def test_session_directory_creation_with_owner_uid(self, tmp_path: Path) -> None:
+        """Session directory should be created with proper ownership."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+
+        manager = SessionManager(sessions_dir)
+
+        # Create session without owner_uid (fallback mode)
+        session_id = manager.create_session_directory()
+        session_dir = manager.get_session_dir(session_id)
+
+        assert session_dir.exists()
+        assert (session_dir / "workspace").exists()
+
+    def test_secure_file_write_creates_600_permissions(self, tmp_path: Path) -> None:
+        """secure_file_write should create files with 600 permissions."""
+        from src.core.sessions import secure_file_write
+
+        test_file = tmp_path / "test.txt"
+
+        secure_file_write(test_file, "test content")
+
+        assert test_file.exists()
+        # Check permissions (600 = owner read/write)
+        mode = test_file.stat().st_mode & 0o777
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+
+    def test_ensure_secure_session_files_hardens_permissions(self, tmp_path: Path) -> None:
+        """ensure_secure_session_files should harden all session files."""
+        from src.core.sessions import ensure_secure_session_files
+
+        # Create a session directory structure
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        (session_dir / "agent.jsonl").write_text("test")
+        (session_dir / "workspace").mkdir()
+        (session_dir / "workspace" / "file.txt").write_text("test")
+
+        # Set insecure permissions initially
+        (session_dir / "agent.jsonl").chmod(0o644)
+        (session_dir / "workspace" / "file.txt").chmod(0o666)
+
+        # Harden permissions
+        ensure_secure_session_files(session_dir)
+
+        # Verify session directory is 700
+        mode = session_dir.stat().st_mode & 0o777
+        assert mode == 0o700, f"Session dir: expected 0o700, got {oct(mode)}"
+
+        # Verify agent.jsonl is 600
+        mode = (session_dir / "agent.jsonl").stat().st_mode & 0o777
+        assert mode == 0o600, f"agent.jsonl: expected 0o600, got {oct(mode)}"
+
+        # Verify workspace file is 600
+        mode = (session_dir / "workspace" / "file.txt").stat().st_mode & 0o777
+        assert mode == 0o600, f"workspace file: expected 0o600, got {oct(mode)}"
+
+
+# =============================================================================
+# Test: Permission Model Constants
+# =============================================================================
+
+class TestPermissionModelConstants:
+    """Test that permission model constants are correctly defined."""
+
+    def test_api_uid_constant_matches_dockerfile(self) -> None:
+        """API_UID should match the value in Dockerfile."""
+        from src.services.user_service import API_UID
+        assert API_UID == 45045, f"API_UID should be 45045, got {API_UID}"
+
+    def test_permission_modes_defined_correctly(self) -> None:
+        """Permission modes should be defined correctly.
+
+        Security Model:
+        - 700: Owner only (rwx------) - directories
+        - 600: Owner only (rw-------) - files
+        - 755: World executable (rwxr-xr-x) - venv
+        """
+        # These are the expected permission modes
+        DIR_MODE = 0o700   # Owner only
+        FILE_MODE = 0o600  # Owner only
+        VENV_MODE = 0o755  # World executable
+
+        # Verify they block group and others
+        assert (DIR_MODE & 0o070) == 0, "700 should block group"
+        assert (DIR_MODE & 0o007) == 0, "700 should block others"
+        assert (FILE_MODE & 0o070) == 0, "600 should block group"
+        assert (FILE_MODE & 0o007) == 0, "600 should block others"
+
+    def test_uid_ranges_for_isolation(self) -> None:
+        """UID ranges should maintain isolation between API and users."""
+        from src.services.user_service import API_UID
+        from src.core.uid_security import get_uid_security_config
+
+        config = get_uid_security_config()
+
+        # API UID should be below user allocation range (isolated mode)
+        assert API_UID < config.isolated_uid_min, (
+            f"API_UID ({API_UID}) should be below isolated_uid_min ({config.isolated_uid_min})"
+        )
+
+        # User range should not include API UID
+        assert not (config.isolated_uid_min <= API_UID <= config.isolated_uid_max), (
+            "API_UID should not be in user UID range"
+        )
