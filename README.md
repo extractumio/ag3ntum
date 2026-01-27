@@ -172,25 +172,13 @@ Each layer operates independently. Even if one is bypassed, others contain the d
 
 ## Quick Start
 
-See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete VPS deployment instructions.
-
 ```bash
-# Clone and configure
-git clone https://github.com/extractumio/ag3ntum.git
-cd ag3ntum
-
-# Add your Anthropic API key
-cp config/secrets.yaml.template config/secrets.yaml
-# Edit config/secrets.yaml with your key
-
-# Build and deploy
-./run.sh rebuild --no-cache
-
-# Create admin user
-./run.sh create-user --username=admin --email=admin@example.com --password=YOUR_PASSWORD --admin
-
-# Access Web UI at http://localhost:50080
+curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/main/install.sh | bash
 ```
+
+This will clone the repository, configure defaults, and build the containers.
+
+See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete deployment instructions including API key setup and user creation.
 
 ---
 

@@ -20,7 +20,6 @@ Consult the architectural documentation in @DOCUMENTS/TECHNICAL whenever you nee
 ### Key URLs (after `./run.sh build`)
 - **Web UI**: http://localhost:50080
 - **API**: http://localhost:40080
-- **API Docs**: http://localhost:40080/api/docs
 
 ### Project Identity
 - **Name**: Ag3ntum

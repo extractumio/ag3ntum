@@ -171,7 +171,6 @@ First build takes 5-10 minutes. Subsequent builds are faster.
 
 Open in your browser:
 - **Web UI:** http://localhost:50080
-- **API Docs:** http://localhost:40080/api/docs
 
 Login with the email and password you created.
 

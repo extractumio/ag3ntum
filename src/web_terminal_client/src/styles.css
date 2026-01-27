@@ -706,20 +706,14 @@ body,
   font-size: var(--font-md);
 }
 
-.header-icon {
-  color: var(--color-accent-primary);
-  font-size: var(--font-xl);
+.header-logo-link {
+  display: flex;
+  align-items: center;
 }
 
-.header-label {
-  color: var(--color-text-bright);
-  font-weight: 700;
-  letter-spacing: 0.4px;
-}
-
-.header-label a {
-  color: var(--color-accent-primary);
-  text-decoration: none;
+.header-logo {
+  height: 28px;
+  width: auto;
 }
 
 .header-divider {

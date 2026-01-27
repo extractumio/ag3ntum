@@ -13,7 +13,8 @@ fi
 
 if [ ! -w "node_modules" ]; then
     echo "Fixing node_modules permissions (first run)..."
-    sudo chown -R "$(id -u):$(id -g)" node_modules
+    # Use absolute path to match sudoers rule: /src/web_terminal_client/*
+    sudo chown -R "$(id -u):$(id -g)" /src/web_terminal_client/node_modules
 fi
 
 # Check if node_modules needs (re)installation
