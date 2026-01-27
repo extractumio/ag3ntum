@@ -229,6 +229,12 @@ class SandboxExecutor:
             # It creates a new user namespace where we can set custom UIDs
             if self._linux_uid is not None or self._linux_gid is not None:
                 cmd.append("--unshare-user")
+                # Map the user's UID/GID so workspace files appear with correct ownership
+                # Without this, host UIDs appear as 65534 (overflow) inside the namespace
+                # Format: --uid-map <inside_uid> <outside_uid> <count>
+                cmd.extend(["--uid-map", str(self._linux_uid), str(self._linux_uid), "1"])
+                if self._linux_gid is not None:
+                    cmd.extend(["--gid-map", str(self._linux_gid), str(self._linux_gid), "1"])
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",

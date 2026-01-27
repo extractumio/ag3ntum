@@ -458,10 +458,11 @@ class ClaudeAgent:
         - Bash tool runs INSIDE bwrap sandbox
         - Both environments now have CONSISTENT mounts (see permissions.yaml):
           - /skills = ./skills (same in both Docker and bwrap)
-          - /users = ./users (same in both Docker and bwrap)
+          - /user-skills = per-user skills mount (same in both Docker and bwrap)
 
-        Symlink paths: /skills/.claude/skills/foo, /users/bar/.claude/skills/foo
+        Symlink paths: /skills/.claude/skills/foo, /user-skills/foo
         These work in both MCP tools and Bash.
+        SECURITY: User skills are per-user mounts to prevent cross-user access.
 
         Args:
             session_id: The session ID for workspace access.
@@ -488,17 +489,14 @@ class ClaudeAgent:
         # Create symlinks pointing to DOCKER paths (not bwrap sandbox paths)
         # MCP tools run outside bwrap and see Docker's filesystem:
         #   - Global skills: /skills/.claude/skills/<skill_name>
-        #   - User skills: /users/<username>/.claude/skills/<skill_name>
+        #   - User skills: /user-skills/<skill_name> (mounted from /users/<username>/.claude/skills)
         for skill_name, source_path in skill_sources.items():
             link_path = skills_target / skill_name
 
-            # Determine Docker path based on skill source
             # User skills override global, so check user first
             if user_skills_base and str(source_path).startswith(str(user_skills_base)):
-                # User skill - Docker path: /users/<username>/.claude/skills/<skill_name>
-                docker_path = Path("/users") / username / ".claude" / "skills" / skill_name
+                docker_path = Path("/user-skills") / skill_name
             else:
-                # Global skill - Docker path: /skills/.claude/skills/<skill_name>
                 docker_path = Path("/skills") / ".claude" / "skills" / skill_name
 
             try:
@@ -513,15 +511,18 @@ class ClaudeAgent:
             f"-> {skills_target}"
         )
 
-    def _cleanup_session(self, session_id: str) -> None:
+    def _cleanup_session(self, session_id: str, owner_uid: Optional[int] = None) -> None:
         """
         Clean up session resources after agent run completes.
 
         Removes copied skills from workspace to save disk space.
-        Session metadata is preserved.
+        Session metadata is preserved. Also hardens file permissions
+        to ensure session isolation.
 
         Args:
             session_id: The session ID to clean up.
+            owner_uid: Optional owner UID for permission hardening.
+                       If not provided, gets owner from directory ownership.
         """
         # Remove skills folder from workspace
         self._session_manager.cleanup_workspace_skills(session_id)
@@ -532,6 +533,26 @@ class ClaudeAgent:
 
         # Clean up PathValidator for this session
         cleanup_path_validator(session_id)
+
+        # SECURITY: Harden session file permissions after agent run
+        # This ensures all files created during execution have proper 700/600 permissions
+        # with owner-only access (true session isolation)
+        try:
+            from .sessions import ensure_secure_session_files
+            session_dir = self._session_manager.get_session_dir(session_id)
+
+            # Get owner_uid from directory if not provided
+            if owner_uid is None:
+                try:
+                    stat = session_dir.stat()
+                    owner_uid = stat.st_uid
+                except OSError:
+                    pass
+
+            ensure_secure_session_files(session_dir, owner_uid)
+        except Exception as e:
+            # Don't fail cleanup on permission hardening failure
+            logger.warning(f"Failed to harden session permissions for {session_id}: {e}")
 
     def _build_options(
         self,
@@ -736,17 +757,15 @@ class ClaudeAgent:
         #
         # IMPORTANT: Skills paths must be DOCKER paths (not bwrap paths) because
         # MCP tools (Read, Write, etc.) run outside bwrap and see the Docker filesystem.
-        # Docker mounts: ./skills:/skills, ./users:/users
-        # So global skills are at /skills/.claude/skills/ and user skills at /users/<user>/.claude/skills/
+        # Docker mounts: ./skills:/skills, /users/{username}/.claude/skills:/user-skills
+        # So global skills are at /skills/.claude/skills/ and user skills at /user-skills/
         try:
             global_skills = None
             user_skills = None
             if self._config.enable_skills:
-                # Global skills: /skills/.claude/skills/
                 global_skills = Path("/skills/.claude/skills")
-                # User skills: /users/<username>/.claude/skills/
                 if username:
-                    user_skills = Path(f"/users/{username}/.claude/skills")
+                    user_skills = Path("/user-skills")
 
             # External mount paths (Docker container paths)
             # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*

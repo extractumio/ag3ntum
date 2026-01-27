@@ -19,7 +19,7 @@ they appear inside the bubblewrap sandbox:
     /workspace/external/rw/name/file.txt    - Read-write external mount
     /venv/bin/python3             - User's Python virtual environment
     /skills/.claude/skills/name/  - Global skills
-    /users/{username}/.claude/skills/  - User skills
+    /user-skills/name/            - User skills (per-user mount for isolation)
 
 These paths are the CANONICAL representation used throughout the system.
 
@@ -273,9 +273,9 @@ class SandboxPathContext:
         if not self.venv_docker:
             self.venv_docker = f"/users/{self.username}/venv"
         if not self.user_skills_sandbox:
-            self.user_skills_sandbox = f"/users/{self.username}/.claude/skills"
+            self.user_skills_sandbox = "/user-skills"
         if not self.user_skills_docker:
-            self.user_skills_docker = f"/users/{self.username}/.claude/skills"
+            self.user_skills_docker = "/user-skills"
         # persistent_sandbox is always /workspace/external/persistent (hardcoded above)
         if not self.persistent_docker:
             self.persistent_docker = f"/users/{self.username}/ag3ntum/persistent"

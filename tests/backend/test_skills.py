@@ -80,7 +80,7 @@ class TestSkillDiscovery:
             # Simulate some discovered skills
             mock_discover.return_value = {
                 "meow": Path("/skills/.claude/skills/meow"),
-                "user-skill": Path(f"/users/{test_user['username']}/.claude/skills/user-skill"),
+                "user-skill": Path("/user-skills/user-skill"),  # Per-user mount path
             }
 
             with patch("src.api.routes.skills.SkillManager") as mock_manager_cls:

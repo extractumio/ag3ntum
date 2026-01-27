@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import SESSIONS_DIR
 from ..core.sessions import SessionManager, generate_session_id
-from ..db.models import Session
+from ..db.models import Session, User
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +168,15 @@ class SessionService:
         model: Optional[str] = None,
     ) -> Session:
         """
-        Create a new session atomically.
+        Create a new session atomically with secure isolation.
 
         Creates both a database record and the session directory.
         If either operation fails, both are rolled back.
+
+        Security Properties:
+        - Session directories have 700 permissions (owner only, no group access)
+        - Only the sandboxed process (running as owner_uid) can access
+        - PathValidator provides application-level cross-session isolation
 
         Args:
             db: Database session.
@@ -192,11 +197,19 @@ class SessionService:
         file_session_created = False
 
         try:
+            # Look up user to get their Linux UID for permission isolation
+            user_result = await db.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            owner_uid = user.linux_uid if user else None
+
             # Create SessionManager for this user's sessions directory
             session_manager = SessionManager(sessions_dir)
 
-            # Create session directory
-            session_manager.create_session_directory(session_id)
+            # Create session directory with strict isolation (700 permissions)
+            # This ensures only the owner (sandboxed process) can access
+            session_manager.create_session_directory(session_id, owner_uid=owner_uid)
             file_session_created = True
 
             # Extract username from sessions_dir (/users/{username}/sessions)

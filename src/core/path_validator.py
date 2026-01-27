@@ -375,6 +375,23 @@ class Ag3ntumPathValidator:
             name: path.resolve() for name, path in config.user_mounts_rw.items()
         }
 
+        # Extract session context from workspace path for cross-user/cross-session blocking
+        # Path format: .../users/{username}/sessions/{session_id}/workspace
+        # Note: /users/ may appear anywhere in path (e.g., /tmp/test/users/... in tests)
+        self._session_username: str | None = None
+        self._session_id: str | None = None
+        workspace_str = str(config.workspace_path)
+        users_idx = workspace_str.find("/users/")
+        if users_idx >= 0:
+            # Extract the portion starting from /users/
+            users_path = workspace_str[users_idx:]
+            parts = users_path.split("/")
+            # parts[0] = "", parts[1] = "users", parts[2] = username, ...
+            if len(parts) >= 3:
+                self._session_username = parts[2]
+            if len(parts) >= 5 and parts[3] == "sessions":
+                self._session_id = parts[4]
+
     def validate_path(
         self,
         path: str,
@@ -407,6 +424,41 @@ class Ag3ntumPathValidator:
                 path=path,
                 reason=f"Path normalization failed: {e}",
             )
+
+        # Step 1.5: SECURITY - Block cross-user and cross-session access FIRST
+        # This prevents agents from accessing other users' or other sessions' data
+        # Must run before boundary check to give specific error messages
+        norm_str = str(normalized)
+
+        # Cross-user access blocking
+        if self._session_username and "/users/" in norm_str:
+            path_username = self._extract_path_component(norm_str, "/users/")
+            if path_username and path_username != self._session_username:
+                # Check if this is an allowed exception (e.g., skills)
+                is_allowed = (
+                    (self.global_skills and self._is_within_boundary(normalized, self.global_skills)) or
+                    (self.user_skills and self._is_within_boundary(normalized, self.user_skills))
+                )
+                if not is_allowed:
+                    self._log_blocked(path, operation, f"Cross-user access blocked: {path_username}")
+                    raise PathValidationError(
+                        f"Access to other users' directories is not allowed: {path}",
+                        path=path,
+                        reason="CROSS_USER_ACCESS_BLOCKED",
+                    )
+
+        # Cross-session access blocking (same user, different session)
+        if self._session_username and self._session_id:
+            sessions_pattern = f"/users/{self._session_username}/sessions/"
+            if sessions_pattern in norm_str:
+                path_session_id = self._extract_path_component(norm_str, sessions_pattern)
+                if path_session_id and path_session_id != self._session_id:
+                    self._log_blocked(path, operation, f"Cross-session access blocked: {path_session_id}")
+                    raise PathValidationError(
+                        f"Access to other sessions is not allowed: {path}",
+                        path=path,
+                        reason="CROSS_SESSION_ACCESS_BLOCKED",
+                    )
 
         # Step 2: Check boundary (workspace, skills, or external mount directories)
         # Paths can be within:
@@ -884,6 +936,23 @@ class Ag3ntumPathValidator:
                 f"PATH_VALIDATOR: ALLOWED {operation.upper()} "
                 f"'{original}' -> '{normalized}'"
             )
+
+    def _extract_path_component(self, path_str: str, pattern: str) -> str | None:
+        """
+        Extract the first path component after a pattern.
+
+        Args:
+            path_str: The path string to search
+            pattern: The pattern to find (e.g., "/users/")
+
+        Returns:
+            The first component after the pattern, or None if not found
+        """
+        idx = path_str.find(pattern)
+        if idx < 0:
+            return None
+        remaining = path_str[idx + len(pattern):]
+        return remaining.split("/")[0] if remaining else None
 
     def _is_within_boundary(self, path: Path, boundary: Path) -> bool:
         """

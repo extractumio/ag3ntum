@@ -67,6 +67,7 @@ RUN echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /src/web_terminal_client/*' >> /etc/sudoers.d/ag3ntum && \
     echo '# bwrap is required for sandbox execution' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/bwrap *' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod * /users/*' >> /etc/sudoers.d/ag3ntum && \
     chmod 440 /etc/sudoers.d/ag3ntum
 
 ENV VIRTUAL_ENV=/opt/venv

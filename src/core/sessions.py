@@ -8,12 +8,20 @@ Each session has an isolated workspace with:
 
 NOTE: All session metadata is stored in SQLite database (Session model),
 NOT in files. This module only manages directory structure.
+
+SECURITY: Session directories are created with strict isolation:
+- Permissions: 700 (owner only, no group access)
+- Only the owner (sandboxed process running as user's UID) can access
+- Even the API cannot access session directories after creation
+- PathValidator provides application-level cross-session isolation
 """
 import logging
+import os
 import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from .exceptions import SessionError
 
@@ -49,13 +57,26 @@ class SessionManager:
 
     def create_session_directory(
         self,
-        session_id: str | None = None
+        session_id: str | None = None,
+        owner_uid: Optional[int] = None,
     ) -> str:
         """
-        Create the directory structure for a new session.
+        Create the directory structure for a new session with STRICT isolation.
+
+        Session directories have 700 permissions - only the owner can access.
+        This provides true session isolation even from the API after creation.
+
+        Security Properties:
+        - Permissions: 700 (owner only, no group access)
+        - API cannot access session directories after creation
+        - Only the sandboxed process (running as owner_uid) can access
+        - Other users have no access (mode 700)
+        - Other sessions of same user have no access (separate directories)
 
         Args:
             session_id: Optional session ID. If None, generates one.
+            owner_uid: UID to set as owner (for permission isolation).
+                       If None, uses current process owner (less secure).
 
         Returns:
             The session ID (generated or provided).
@@ -64,14 +85,39 @@ class SessionManager:
             session_id = generate_session_id()
 
         session_dir = self.get_session_dir(session_id)
-        session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create workspace subdirectory
+        # Create session directory with 700 permissions (owner only)
+        # Session directories have strict owner-only access for true isolation
+        self._create_session_directory_basic(session_dir, owner_uid)
+
+        logger.info(f"Created session directory: {session_id} (owner_uid={owner_uid})")
+        return session_id
+
+    def _create_session_directory_basic(
+        self,
+        session_dir: Path,
+        owner_uid: Optional[int] = None,
+    ) -> None:
+        """
+        Create session directory with 700 permissions (owner only).
+
+        Args:
+            session_dir: Path to the session directory
+            owner_uid: Optional UID to set as owner
+        """
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_dir.chmod(0o700)
+
         workspace = session_dir / "workspace"
         workspace.mkdir(exist_ok=True)
+        workspace.chmod(0o700)
 
-        logger.info(f"Created session directory: {session_id}")
-        return session_id
+        if owner_uid is not None:
+            try:
+                os.chown(session_dir, owner_uid, owner_uid)
+                os.chown(workspace, owner_uid, owner_uid)
+            except OSError as e:
+                logger.warning(f"Could not set ownership to {owner_uid}: {e}")
 
     def get_session_dir(self, session_id: str) -> Path:
         """
@@ -371,3 +417,98 @@ def generate_session_id() -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     uid = uuid.uuid4().hex[:8]
     return f"{ts}_{uid}"
+
+
+def secure_file_write(
+    file_path: Path,
+    content: bytes | str,
+    owner_uid: Optional[int] = None,
+    mode: int = 0o600,
+) -> None:
+    """
+    Write a file with secure permissions (owner-only access).
+
+    This function is used for writing sensitive files in session directories
+    (like agent.jsonl) with strict permissions that only allow owner access.
+
+    Security Properties:
+    - File permissions: 600 by default (owner read/write only)
+    - No group or world access
+    - Ownership: Set to owner_uid if provided
+
+    Args:
+        file_path: Path to write to
+        content: Content to write (bytes or str)
+        owner_uid: UID to set as owner (optional)
+        mode: File permission mode (default: 600 = owner read/write only)
+    """
+    # Write content
+    if isinstance(content, str):
+        file_path.write_text(content)
+    else:
+        file_path.write_bytes(content)
+
+    # Set permissions BEFORE ownership (in case we lose access after chown)
+    file_path.chmod(mode)
+
+    # Set ownership if provided
+    if owner_uid is not None:
+        try:
+            os.chown(file_path, owner_uid, owner_uid)
+        except OSError as e:
+            logger.warning(f"Could not set ownership of {file_path} to {owner_uid}: {e}")
+
+    # Files in sessions are owner-only (no group access)
+
+
+def _secure_path(path: Path, mode: int, owner_uid: Optional[int]) -> None:
+    """Helper to set permissions and ownership on a path."""
+    try:
+        path.chmod(mode)
+        if owner_uid:
+            os.chown(path, owner_uid, owner_uid)
+    except OSError:
+        pass
+
+
+def ensure_secure_session_files(
+    session_dir: Path,
+    owner_uid: Optional[int] = None,
+) -> None:
+    """
+    Ensure all session files have secure permissions after agent run.
+
+    Session files have strict owner-only access for true isolation.
+    This is called after agent execution to harden any files created
+    during the run (which may have default umask permissions).
+
+    Security Properties:
+    - Directories: 700 (owner only)
+    - Files: 600 (owner read/write only)
+
+    Args:
+        session_dir: Path to the session directory
+        owner_uid: UID to set as owner (optional)
+    """
+    if not session_dir.exists():
+        return
+
+    # Secure session directory and sensitive files
+    _secure_path(session_dir, 0o700, owner_uid)
+
+    # Secure sensitive root files
+    for sensitive_file in ["agent.jsonl", ".claude.json"]:
+        file_path = session_dir / sensitive_file
+        if file_path.exists():
+            _secure_path(file_path, 0o600, owner_uid)
+
+    # Recursively secure workspace directory
+    workspace = session_dir / "workspace"
+    if workspace.exists():
+        for root, dirs, files in os.walk(workspace):
+            root_path = Path(root)
+            _secure_path(root_path, 0o700, owner_uid)
+            for f in files:
+                _secure_path(root_path / f, 0o600, owner_uid)
+
+    logger.debug(f"Secured session files: {session_dir} (owner_uid={owner_uid})")

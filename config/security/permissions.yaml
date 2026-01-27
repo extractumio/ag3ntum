@@ -196,14 +196,16 @@ sandbox:
       target: "/skills"
       mode: ro
 
-    # User skills - mounted at /users path (read-only)
-    # IMPORTANT: Mount the WHOLE users directory to be consistent with Docker's
-    # ./users:/users mount. This ensures symlinks work in both environments.
-    # Access as: /users/{username}/.claude/skills/<skill_name>/script.py
+    # User skills - mounted at /user-skills path (read-only)
+    # SECURITY: Only mount the user's OWN skills directory, not the entire /users tree.
+    # This prevents cross-user data access where one user could read another's files.
+    # Access as: /user-skills/<skill_name>/script.py
+    # Optional: may not exist if user has no custom skills yet
     user_skills:
-      source: "/users"
-      target: "/users"
+      source: "/users/{username}/.claude/skills"
+      target: "/user-skills"
       mode: ro
+      optional: true
 
     # =========================================================================
     # EXTERNAL MOUNTS - User-mounted folders from host system
@@ -240,19 +242,19 @@ sandbox:
       mode: rw
       optional: true
 
-    # Per-user persistent storage
+    # Per-user persistent storage - ISOLATED per user
     # This directory survives across sessions and is unique to each user.
     # Created during user registration and verified during session setup.
     #
-    # IMPORTANT: We mount this as an OVERLAY on the /users path (same source/target).
-    # This is necessary because bwrap cannot mount to a path INSIDE another mount
-    # when both are Docker bind mounts. The workspace has a symlink
-    # ./external/persistent -> /users/{username}/ag3ntum/persistent
-    # which resolves through the /users mount. The overlay makes it writable.
+    # SECURITY: This mount only exposes the current user's persistent directory.
+    # Other users' persistent storage is NOT visible in the sandbox.
+    # Access as: /persistent/<filename> or via workspace symlink ./external/persistent/
+    # Directory has 770 permissions (owner + ag3ntum group can read/write)
     persistent_storage:
       source: "/users/{username}/ag3ntum/persistent"
-      target: "/users/{username}/ag3ntum/persistent"
+      target: "/persistent"
       mode: rw
+      optional: true
 
     # =========================================================================
     # GIT REPOSITORY SUPPORT - SSH and Git configuration
@@ -293,7 +295,7 @@ sandbox:
     - "/workspace"
     - "/mounts/rw"                  # Global read-write external mounts (symlink target)
     - "/mounts/user-rw"             # Per-user read-write external mounts (symlink target)
-    - "/users/{username}/ag3ntum/persistent" # Per-user persistent storage (overlay mount)
+    - "/persistent"                 # Per-user persistent storage (isolated per-user mount)
   readonly_paths:
     - "/venv"                       # User's Python venv (read-only)
     - "/skills"                     # Global skills directory

@@ -60,7 +60,7 @@ def _is_path_writable(path: Path) -> tuple[bool, str]:
                 return False, "File is read-only (no write permission)"
 
             # Also try to open for writing to verify actual access
-            # This catches cases like immutable files or ACLs
+            # This catches cases like immutable files or other access restrictions
             with open(path, 'a') as f:
                 pass
             return True, ""
