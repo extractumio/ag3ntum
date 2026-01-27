@@ -2534,14 +2534,14 @@ class EventingTracer(TracerBase):
         self._stream_header_expected: Optional[bool] = None
         self._stream_header_wrapped = False
         self._stream_structured_fields: Optional[dict[str, str]] = None
-        self._stream_structured_status: Optional[str] = None
-        self._stream_structured_error: Optional[str] = None
         self._stream_full_text = ""
         self._stream_active = False
         self._last_stream_full_text = ""
         self._suppress_next_message = False
         # Track working directory for post-completion security scanning
         self._working_dir: Optional[str] = None
+        # Track tool outcomes per message for computed message_status
+        self._message_tool_outcomes: list[dict[str, Any]] = []
 
     def emit_event(
         self,
@@ -2738,6 +2738,17 @@ class EventingTracer(TracerBase):
         duration_ms: int,
         is_error: bool
     ) -> None:
+        # Track tool outcome for message_status computation
+        error_msg = None
+        if is_error:
+            error_msg = str(result)[:200] if result else "Tool failed"
+        self._message_tool_outcomes.append({
+            "tool_name": tool_name,
+            "tool_id": tool_id,
+            "is_error": is_error,
+            "error_message": error_msg,
+        })
+
         self._tracer.on_tool_complete(
             tool_name=tool_name,
             tool_id=tool_id,
@@ -2755,6 +2766,29 @@ class EventingTracer(TracerBase):
                 "is_error": is_error,
             },
         )
+
+    def _compute_message_status(self) -> tuple[str, Optional[str]]:
+        """
+        Compute message_status and message_error based on tool outcomes in this message.
+
+        Returns:
+            Tuple of (message_status, message_error_message)
+        """
+        if not self._message_tool_outcomes:
+            return ("COMPLETE", None)
+
+        errors = [t for t in self._message_tool_outcomes if t["is_error"]]
+        if not errors:
+            return ("COMPLETE", None)
+
+        first_error = errors[0]["error_message"]
+        if len(errors) == len(self._message_tool_outcomes):
+            return ("FAILED", first_error)
+        return ("PARTIAL", first_error)
+
+    def _reset_message_tool_tracking(self) -> None:
+        """Reset tool tracking for the next message."""
+        self._message_tool_outcomes = []
 
     def on_thinking(self, thinking_text: str, is_partial: bool = False) -> None:
         self._tracer.on_thinking(thinking_text, is_partial=is_partial)
@@ -2777,9 +2811,11 @@ class EventingTracer(TracerBase):
                 {
                     "text": body_text,
                     "is_partial": True,
-                    "structured_fields": None,
-                    "structured_status": None,
-                    "structured_error": None,
+                    # Partial messages don't have status yet
+                    "message_status": None,
+                    "message_error_message": None,
+                    "request_status": None,
+                    "request_error_message": None,
                 },
                 persist_event=False,
             )
@@ -2797,12 +2833,22 @@ class EventingTracer(TracerBase):
                 self._stream_full_text += body_text
 
             structured_fields = self._stream_structured_fields
-            structured_status = self._stream_structured_status
-            structured_error = self._stream_structured_error
             full_text = self._stream_full_text
             if not body_text and not full_text:
                 self._reset_stream_state()
+                self._reset_message_tool_tracking()
                 return
+
+            # Compute message status from tool outcomes
+            message_status, message_error = self._compute_message_status()
+
+            # Get request status from agent's frontmatter
+            request_status = None
+            request_error = None
+            if structured_fields:
+                request_status = structured_fields.get("request_status")
+                request_error = structured_fields.get("request_error_message")
+
             self._tracer.on_message(full_text, is_partial=False)
             self.emit_event(
                 "message",
@@ -2810,14 +2856,16 @@ class EventingTracer(TracerBase):
                     "text": body_text,
                     "full_text": full_text,
                     "is_partial": False,
-                    "structured_fields": structured_fields,
-                    "structured_status": structured_status,
-                    "structured_error": structured_error,
+                    "message_status": message_status,
+                    "message_error_message": message_error,
+                    "request_status": request_status,
+                    "request_error_message": request_error,
                 },
             )
             self._last_stream_full_text = full_text
             self._suppress_next_message = bool(full_text.strip())
             self._reset_stream_state()
+            self._reset_message_tool_tracking()
             return
 
         if not text.strip():
@@ -2833,34 +2881,41 @@ class EventingTracer(TracerBase):
 
         self._tracer.on_message(text, is_partial=False)
         structured_fields = None
-        structured_status = None
-        structured_error = None
 
         fields, body = parse_structured_output(text)
         if fields:
             structured_fields = fields
-            structured_status = fields.get("status")
-            structured_error = fields.get("error")
             text = body
+
+        # Compute message status from tool outcomes
+        message_status, message_error = self._compute_message_status()
+
+        # Get request status from agent's frontmatter
+        request_status = None
+        request_error = None
+        if structured_fields:
+            request_status = structured_fields.get("request_status")
+            request_error = structured_fields.get("request_error_message")
 
         self.emit_event(
             "message",
             {
                 "text": text,
                 "is_partial": False,
-                "structured_fields": structured_fields,
-                "structured_status": structured_status,
-                "structured_error": structured_error,
+                "message_status": message_status,
+                "message_error_message": message_error,
+                "request_status": request_status,
+                "request_error_message": request_error,
             },
         )
+        # Reset tool tracking after message
+        self._reset_message_tool_tracking()
 
     def _reset_stream_state(self) -> None:
         self._stream_header_buffer = ""
         self._stream_header_expected = None
         self._stream_header_wrapped = False
         self._stream_structured_fields = None
-        self._stream_structured_status = None
-        self._stream_structured_error = None
         self._stream_full_text = ""
         self._stream_active = False
 
@@ -2921,8 +2976,6 @@ class EventingTracer(TracerBase):
                 fields[key] = value
 
         self._stream_structured_fields = fields or None
-        self._stream_structured_status = fields.get("status") if fields else None
-        self._stream_structured_error = fields.get("error") if fields else None
         self._stream_header_expected = False
 
         body_lines = lines[header_end_index + 1 :]

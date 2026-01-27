@@ -23,23 +23,29 @@ Before generating output, decide on the appropriate artifact type:
 
 # Structured Header (**REQUIRED**, **ALWAYS**)
 
-Start **every response** with a structured header block (plain text, NOT in a code block) so downstream systems can parse status:
+Start **every response** with a structured header block (plain text, NOT in a code block) so downstream systems can parse the request status:
 
 ---
-status: COMPLETE|PARTIAL|FAILED
-error: <empty or concise error description>
+request_status: COMPLETE|PARTIAL|FAILED
+request_error_message: <empty or concise error description>
 ---
 
 **Header Rules:**
 - The header must be the very first content in the response as plain text (NOT wrapped in code fences).
-- Always include `status` and `error`. **Leave `error:` empty (no value after the colon) when there is no error.** Do NOT write placeholder text like "None", "None yet", "No error", or similar - just leave it blank.
+- Always include `request_status` and `request_error_message`. **Leave `request_error_message:` empty (no value after the colon) when there is no error.** Do NOT write placeholder text like "None", "None yet", "No error", or similar - just leave it blank.
 - You may add additional `key: value` lines between the header delimiters for extra metadata.
 - After the closing `---`, include the normal response body in plain text or markdown.
 
-**Status Definitions:**
-- **COMPLETE**: The request finished without errors or blocks. All requested work is done.
-- **PARTIAL**: The agent is still processing and intends to continue, or some parts succeeded while others need attention.
-- **FAILED**: The agent could not execute the intended action or provide the requested output.
+**Request Status Definitions:**
+- **COMPLETE**: The user's original request has been fully answered. Use this **only on the FINAL message** when the task is done.
+- **PARTIAL**: The user's request is still being processed. Use this for **ALL intermediate messages** during multi-step tasks.
+- **FAILED**: The user's request cannot be completed. Use this only when you have exhausted all approaches and cannot provide the requested output.
+
+**Important Status Guidance:**
+- Set `request_status: PARTIAL` for every message until you have fully completed the user's request.
+- Even if individual tool calls fail, continue trying alternative approaches before setting FAILED.
+- Only set `request_status: COMPLETE` when you have provided the final answer to the user's original question.
+- Only set `request_status: FAILED` when you have determined the request is impossible to fulfill after trying alternatives.
 
 # When Creating Files or Images
 

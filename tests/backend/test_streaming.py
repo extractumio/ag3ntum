@@ -34,7 +34,7 @@ class TestEventingTracer:
         queue: asyncio.Queue = asyncio.Queue()
         tracer = EventingTracer(NullTracer(), event_queue=queue, session_id="session-1")
 
-        tracer.on_message("```\n---\nstatus: COMPLETE\n", is_partial=True)
+        tracer.on_message("```\n---\nrequest_status: COMPLETE\n", is_partial=True)
         await asyncio.sleep(0)
         assert queue.empty()
 
@@ -53,7 +53,7 @@ class TestEventingTracer:
         final_event = await queue.get()
         assert final_event["data"]["is_partial"] is False
         assert "Hello" in final_event["data"]["full_text"]
-        assert final_event["data"]["structured_status"] == "COMPLETE"
+        assert final_event["data"]["request_status"] == "COMPLETE"
 
     @pytest.mark.asyncio
     async def test_emit_event_creates_valid_structure(self) -> None:

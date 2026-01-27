@@ -81,23 +81,6 @@ export function isMeaningfulError(error: string | undefined | null): boolean {
   return normalized !== '' && !ERROR_PLACEHOLDERS.has(normalized);
 }
 
-export function coerceStructuredFields(value: unknown): Record<string, string> | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length === 0) {
-    return null;
-  }
-  const fields: Record<string, string> = {};
-  entries.forEach(([key, fieldValue]) => {
-    if (typeof fieldValue === 'string') {
-      fields[key.toLowerCase()] = fieldValue;
-    }
-  });
-  return Object.keys(fields).length > 0 ? fields : null;
-}
-
 /**
  * Extract fields from a header block between start and end indices.
  */
@@ -206,9 +189,9 @@ export function parseStructuredMessage(text: string): StructuredMessage {
         if (body.startsWith('\n')) {
           body = body.slice(1);
         }
-        const statusRaw = fields.status;
+        const statusRaw = fields.request_status;
         const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-        const error = fields.error ?? undefined;
+        const error = fields.request_error_message ?? undefined;
         return { body, fields, status, error };
       }
     }
@@ -226,9 +209,9 @@ export function parseStructuredMessage(text: string): StructuredMessage {
         bodyLines.pop();
       }
       const body = bodyLines.join('\n');
-      const statusRaw = fields.status;
+      const statusRaw = fields.request_status;
       const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-      const error = fields.error ?? undefined;
+      const error = fields.request_error_message ?? undefined;
       return { body, fields, status, error };
     }
   }

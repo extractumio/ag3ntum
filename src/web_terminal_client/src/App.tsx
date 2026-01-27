@@ -81,7 +81,6 @@ const TERMINAL_STATUSES = new Set(['complete', 'completed', 'partial', 'failed',
 import { useElapsedTime, useSpinnerFrame } from './hooks';
 import {
   blockAltKeyHotkeys,
-  coerceStructuredFields,
   copyAsMarkdown,
   copyAsRichText,
   extractFilePaths,
@@ -1339,8 +1338,10 @@ function AgentMessageBlock({
   subagentExpanded,
   onToggleSubagent,
   status,
-  structuredStatus,
-  structuredError,
+  messageStatus,
+  messageErrorMessage,
+  requestStatus: _requestStatus,
+  requestErrorMessage,
   comments,
   commentsExpanded,
   onToggleComments,
@@ -1366,8 +1367,10 @@ function AgentMessageBlock({
   subagentExpanded: Set<string>;
   onToggleSubagent: (id: string) => void;
   status?: string;
-  structuredStatus?: ResultStatus;
-  structuredError?: string;
+  messageStatus?: ResultStatus;
+  messageErrorMessage?: string;
+  requestStatus?: ResultStatus;
+  requestErrorMessage?: string;
   comments?: string;
   commentsExpanded?: boolean;
   onToggleComments?: () => void;
@@ -1390,7 +1393,6 @@ function AgentMessageBlock({
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
   const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
-  const structuredStatusLabel = structuredStatus === 'failed' ? getStatusLabel(structuredStatus) : '';
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
   // Show trailing wait spinner when message content is complete but session is still running
@@ -1420,10 +1422,18 @@ function AgentMessageBlock({
 
   const hasOtherRightContent = otherToolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
 
+  // Determine icon status class based on message status (computed from tool outcomes)
+  const getIconStatusClass = (): string => {
+    if (messageStatus === 'complete') return 'icon-status-complete';
+    if (messageStatus === 'partial') return 'icon-status-partial';
+    if (messageStatus === 'failed' || messageStatus === 'cancelled') return 'icon-status-failed';
+    return '';
+  };
+
   return (
     <div className={`message-block agent-message ${statusClass} ${isMobile ? 'mobile-layout' : ''} ${rightPanelCollapsed && !isMobile ? 'right-collapsed' : ''}`}>
       <div className="message-header">
-        <span className="message-icon">◆</span>
+        <span className={`message-icon ${getIconStatusClass()}`}>◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
         {/* Message stats badges */}
@@ -1478,13 +1488,20 @@ function AgentMessageBlock({
             {!displayContent && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}
-            {((structuredStatusLabel && structuredStatus === 'failed') || isMeaningfulError(structuredError)) && (
-              <div className="agent-structured-meta">
-                {structuredStatusLabel && structuredStatus === 'failed' && (
-                  <div className="agent-structured-status">Status: {structuredStatusLabel}</div>
+            {/* Error messages only - status is shown via icon color */}
+            {(isMeaningfulError(messageErrorMessage) || isMeaningfulError(requestErrorMessage)) && (
+              <div className="agent-status-meta">
+                {isMeaningfulError(messageErrorMessage) && (
+                  <div className="agent-status-error message-error">
+                    <span className="error-label">Tool Error:</span>
+                    <span className="error-value">{messageErrorMessage}</span>
+                  </div>
                 )}
-                {isMeaningfulError(structuredError) && (
-                  <div className="agent-structured-error">Error: {structuredError}</div>
+                {isMeaningfulError(requestErrorMessage) && (
+                  <div className="agent-status-error request-error">
+                    <span className="error-label">Request Error:</span>
+                    <span className="error-value">{requestErrorMessage}</span>
+                  </div>
                 )}
               </div>
             )}
@@ -3768,7 +3785,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           const text = String(event.data.text ?? '');
           const fullText = typeof event.data.full_text === 'string' ? event.data.full_text : '';
           const isPartial = Boolean(event.data.is_partial);
-          const eventStructuredFields = coerceStructuredFields(event.data.structured_fields);
 
           if (isPartial) {
             streamBuffer += text;
@@ -3802,7 +3818,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             break;
           }
 
-          if (!fullText && !text && !eventStructuredFields && !streamBuffer) {
+          if (!fullText && !text && !streamBuffer) {
             break;
           }
 
@@ -3820,31 +3836,29 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           streamBuffer = '';
           // Always parse to strip the structured header from the body
           const parsedMessage = parseStructuredMessage(finalText);
-          const structuredInfo = eventStructuredFields
-            ? {
-                body: parsedMessage.body, // Use parsed body (header stripped)
-                fields: eventStructuredFields,
-                status: (() => {
-                  const statusRaw = typeof event.data.structured_status === 'string'
-                    ? event.data.structured_status
-                    : eventStructuredFields.status;
-                  return statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
-                })(),
-                error: (() => {
-                  const errorRaw = typeof event.data.structured_error === 'string'
-                    ? event.data.structured_error
-                    : eventStructuredFields.error;
-                  return errorRaw ?? undefined;
-                })(),
-              }
-            : parsedMessage;
-          const bodyText = structuredInfo.body;
+
+          // Parse dual status fields from event
+          const messageStatus = typeof event.data.message_status === 'string'
+            ? (normalizeStatus(event.data.message_status) as ResultStatus)
+            : undefined;
+          const messageErrorMessage = typeof event.data.message_error_message === 'string'
+            ? event.data.message_error_message
+            : undefined;
+          const requestStatus = typeof event.data.request_status === 'string'
+            ? (normalizeStatus(event.data.request_status) as ResultStatus)
+            : undefined;
+          const requestErrorMessage = typeof event.data.request_error_message === 'string'
+            ? event.data.request_error_message
+            : undefined;
+
+          const bodyText = parsedMessage.body;
 
           if (currentStreamMessage && currentStreamMessage.type === 'agent_message') {
             currentStreamMessage.content = bodyText;
-            currentStreamMessage.structuredStatus = structuredInfo.status;
-            currentStreamMessage.structuredError = structuredInfo.error;
-            currentStreamMessage.structuredFields = structuredInfo.fields;
+            currentStreamMessage.messageStatus = messageStatus;
+            currentStreamMessage.messageErrorMessage = messageErrorMessage;
+            currentStreamMessage.requestStatus = requestStatus;
+            currentStreamMessage.requestErrorMessage = requestErrorMessage;
             // Keep streaming indicator true - will be set false by tool_start, subagent_start, or agent_complete
             (currentStreamMessage as { isStreaming?: boolean }).isStreaming = true;
             lastAgentMessage = currentStreamMessage;
@@ -3858,9 +3872,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               content: bodyText,
               toolCalls: existing?.toolCalls ?? pendingTools,
               subagents: existing?.subagents ?? pendingSubagents,
-              structuredStatus: structuredInfo.status,
-              structuredError: structuredInfo.error,
-              structuredFields: structuredInfo.fields,
+              messageStatus,
+              messageErrorMessage,
+              requestStatus,
+              requestErrorMessage,
               // Keep streaming indicator true - will be set false by tool_start, subagent_start, or agent_complete
               isStreaming: true,
             };
@@ -3886,13 +3901,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             const parsedStream = parseStructuredMessage(streamBuffer.trim());
             currentStreamMessage.content = parsedStream.body;
             if (parsedStream.status) {
-              currentStreamMessage.structuredStatus = parsedStream.status;
+              currentStreamMessage.requestStatus = parsedStream.status;
             }
             if (parsedStream.error) {
-              currentStreamMessage.structuredError = parsedStream.error;
+              currentStreamMessage.requestErrorMessage = parsedStream.error;
             }
-            if (Object.keys(parsedStream.fields).length > 0) {
-              currentStreamMessage.structuredFields = parsedStream.fields;
+            // Set messageStatus if not already set (agent completed successfully = complete)
+            if (!currentStreamMessage.messageStatus) {
+              currentStreamMessage.messageStatus = statusValue;
             }
             (currentStreamMessage as { isStreaming?: boolean }).isStreaming = false;
             lastAgentMessage = currentStreamMessage;
@@ -3908,6 +3924,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               content: '',
               toolCalls: pendingTools,
               subagents: pendingSubagents,
+              messageStatus: statusValue,
               isStreaming: false,
             };
             items.push(toolMessage);
@@ -3926,7 +3943,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           });
 
           if (lastAgentMessage && lastAgentMessage.type === 'agent_message') {
-            lastAgentMessage.status = lastAgentMessage.structuredStatus ?? statusValue;
+            lastAgentMessage.status = lastAgentMessage.requestStatus ?? statusValue;
             (lastAgentMessage as { isStreaming?: boolean }).isStreaming = false;
           }
 
@@ -4642,8 +4659,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                           subagentExpanded={expandedSubagents}
                           onToggleSubagent={toggleSubagent}
                           status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
-                          structuredStatus={item.structuredStatus}
-                          structuredError={item.structuredError}
+                          messageStatus={item.messageStatus}
+                          messageErrorMessage={item.messageErrorMessage}
+                          requestStatus={item.requestStatus}
+                          requestErrorMessage={item.requestErrorMessage}
                           comments={item.comments}
                           commentsExpanded={expandedComments.has(item.id)}
                           onToggleComments={() => toggleComments(item.id)}
