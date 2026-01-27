@@ -3,6 +3,13 @@ set -e
 
 cd /src/web_terminal_client
 
+# Ensure web_terminal_client directory is writable
+# Vite creates temporary .mjs files when loading vite.config.ts
+if [ ! -w "." ]; then
+    echo "Fixing web_terminal_client permissions..."
+    sudo chown -R "$(id -u):$(id -g)" .
+fi
+
 # Ensure node_modules directory exists and is writable
 # Named Docker volumes are created with root ownership by default
 # Fix ownership on first use so npm can write to it
