@@ -22,7 +22,8 @@ RESERVED_NAMES=("persistent" "ro" "rw" "external")
 
 # Directories that container needs to WRITE to (need ownership fix on Linux)
 # Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
-WRITABLE_DIRS=("logs" "data" "users")
+# src/web_terminal_client needs write access for Vite's temp files during dev mode
+WRITABLE_DIRS=("logs" "data" "users" "src/web_terminal_client")
 
 # Directories that container only READS from (just need to exist)
 READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests")
