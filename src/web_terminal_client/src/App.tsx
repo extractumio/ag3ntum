@@ -4547,8 +4547,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       <header className="terminal-header">
         <div className="header-top">
           <div className="header-title">
-            <span className="header-icon">◆</span>
-            <span className="header-label"><a href="/" className="primary-text">AG3NTUM</a></span>
+            <a href="/" className="header-logo-link">
+              <img src="/agentum_logo.png" alt="Ag3ntum" className="header-logo" />
+            </a>
             <span className="header-divider">│</span>
             <span className="header-meta">user: {user?.username || 'unknown'}</span>
             <button
