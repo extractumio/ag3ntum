@@ -666,8 +666,8 @@ EOF
         ' config/api.yaml > config/api.yaml.tmp && mv config/api.yaml.tmp config/api.yaml
     fi
 
-    # Clean up any backup files created by sed
-    rm -f config/api.yaml.bak config/api.yaml''
+    # Clean up any backup files created by sed (e.g., .bak files)
+    rm -f config/api.yaml.bak 2>/dev/null || true
 
     print_success "api.yaml created"
 }
