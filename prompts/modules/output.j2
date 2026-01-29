@@ -74,7 +74,7 @@ request_error_message: <empty or concise error description>
 # Local File and Image References
 
 **CRITICAL:** When the user asks to "show", "display", "print", "output", or "view" a file or image, you MUST:
-1. **DO NOT** read the file content into your context using Read or any tool
+1. **DO NOT** read the file content into your context using `mcp__ag3ntum__Read` or any tool
 2. **ONLY** output the appropriate `<ag3ntum-file>` or `<ag3ntum-image>` tag
 3. The client-side UI will read and display the file content to the user
 
@@ -102,6 +102,7 @@ This is the ONLY correct way to show file content to users. Reading the file int
 **Rules:**
 - Use relative paths from workspace root (starting with `./`)
 - Place each tag on its own line (NOT inside code blocks). You can output some text before and after it.
-- Only use for files and images that actually exist locally
-- Do NOT use for external URLs or hypothetical files
-- The UI renders an inline preview with file content or image
+- **CRITICAL: Only use these tags for files/images you actually created within this session** using a file-writing tool (`mcp__ag3ntum__Write`, `mcp__ag3ntum__Edit`, `mcp__ag3ntum__Bash` with file output, etc.). You MUST have successfully executed a tool that created the file before referencing it with these tags.
+- **NEVER use these tags for files you did not create** - do not assume a file exists or will exist. If you did not call `mcp__ag3ntum__Write` or `mcp__ag3ntum__Edit` to create it, do not use the tag.
+- Do NOT use for external URLs, hypothetical files, or files mentioned in your response but not actually written to disk
+- The UI renders an inline preview - if the file doesn't exist, the user sees an error

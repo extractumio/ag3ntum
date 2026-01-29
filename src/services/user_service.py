@@ -311,8 +311,9 @@ class UserService:
           /users/{username}/           # 750 (owner rwx, group rx)
           ├── .claude/                 # 770 (owner rwx, group rwx for API)
           │   └── skills/              # 770 (API can write skills)
-          ├── ag3ntum/                 # 700 (owner only, protects secrets.yaml)
-          │   └── persistent/          # 770 (group rwx for API writes)
+          ├── ag3ntum/                 # 750 (group rx for API traverse to persistent/)
+          │   ├── persistent/          # 770 (group rwx for API writes)
+          │   └── secrets.yaml         # 600 (owner only, protects API keys)
           ├── sessions/                # 770 (API can create session dirs)
           │   └── {session_id}/        # 700 (owner only, true isolation)
           └── venv/                    # 755 (needs to be executable by sandbox)
@@ -322,6 +323,7 @@ class UserService:
         - PathValidator blocks cross-user access (CROSS_USER_ACCESS_BLOCKED)
         - PathValidator blocks cross-session access (CROSS_SESSION_ACCESS_BLOCKED)
         - Session directories are owner-only (700)
+        - secrets.yaml is owner-only (600) even though ag3ntum/ is group-traversable
         """
         home_dir = Path(f"/users/{username}")
 
@@ -425,13 +427,14 @@ class UserService:
             )
 
             # Set venv to 755 (needs to be executable by sandbox)
+            # Note: Don't check exists() here - after chown, home_dir is 700 for user
+            # and API can't stat venv. Just run chmod - it will succeed or fail gracefully.
             venv_dir = home_dir / "venv"
-            if venv_dir.exists():
-                subprocess.run(
-                    ["sudo", "chmod", "-R", "755", str(venv_dir)],
-                    check=True,
-                    capture_output=True,
-                )
+            subprocess.run(
+                ["sudo", "chmod", "-R", "755", str(venv_dir)],
+                check=False,  # Don't fail if venv doesn't exist
+                capture_output=True,
+            )
 
             # Re-apply 700 to other directories after chown
             subprocess.run(
@@ -640,7 +643,9 @@ class UserService:
         Permission Model:
         - User is added to ag3ntum group
         - User directories get 750 (owner rwx, group rx)
+        - ag3ntum/ dir gets 750 (traverse for group to access persistent/)
         - Persistent storage gets 770 (owner rwx, group rwx for API writes)
+        - secrets.yaml stays 600 (owner only, protects API keys)
         - Session directories get 700 (owner only, no group access)
         - API (also in ag3ntum group) can access via group permissions
 
@@ -671,7 +676,6 @@ class UserService:
             )
 
             # Set group permissions on subdirectories that API needs to access
-            # NOTE: ag3ntum is NOT included - it stays 700 to protect secrets.yaml
             # These directories need 770 (rwx for group) because the API user (in ag3ntum group)
             # must be able to CREATE files/directories here (e.g., session directories)
             for subdir in [".claude", "sessions"]:
@@ -692,9 +696,33 @@ class UserService:
                         capture_output=True,
                     )
 
+            # ag3ntum directory: needs group traverse permission (750) so API can access persistent/
+            # secrets.yaml inside is protected by its own 600 permissions
+            ag3ntum_dir = home_dir / "ag3ntum"
+            if ag3ntum_dir.exists():
+                # Set group ownership to ag3ntum (but NOT recursive - don't change secrets.yaml)
+                subprocess.run(
+                    ["sudo", "chgrp", "ag3ntum", str(ag3ntum_dir)],
+                    check=True,
+                    capture_output=True,
+                )
+                # 750 = rwx for owner, r-x for group (traverse only), none for others
+                subprocess.run(
+                    ["sudo", "chmod", "750", str(ag3ntum_dir)],
+                    check=True,
+                    capture_output=True,
+                )
+
             # persistent dir needs write access for group
             persistent_dir = home_dir / "ag3ntum" / "persistent"
             if persistent_dir.exists():
+                # Set group ownership to ag3ntum
+                subprocess.run(
+                    ["sudo", "chgrp", "-R", "ag3ntum", str(persistent_dir)],
+                    check=True,
+                    capture_output=True,
+                )
+                # 770 = rwx for owner, rwx for group, none for others
                 subprocess.run(
                     ["sudo", "chmod", "770", str(persistent_dir)],
                     check=True,

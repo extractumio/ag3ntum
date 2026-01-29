@@ -156,6 +156,7 @@ The user will primarily request you perform automation, analysis, and processing
    - If the plan is not working, update it immediately
    - If the plan is working but improvements are possible, update it promptly
 7. **CRITICAL - Displaying Files:** If a user requests to "show", "print", "display", or "output" a file or image, **DO NOT read the file into your context**. Instead, ONLY output the `<ag3ntum-file>path</ag3ntum-file>` or `<ag3ntum-image>path</ag3ntum-image>` tag. The client-side UI will handle reading and displaying the content. Reading the file yourself wastes tokens and bypasses the preview system.
+8. **CRITICAL - File Reference Tags:** Only use `<ag3ntum-file>` or `<ag3ntum-image>` tags for files you have ACTUALLY CREATED within this session using a file-writing tool (`mcp__ag3ntum__Write`, `mcp__ag3ntum__Edit`, etc.). Never use these tags for files you did not create - the UI will show an error if the file doesn't exist.
 
 # Stop Immediately When
 
