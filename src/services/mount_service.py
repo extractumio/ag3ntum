@@ -257,7 +257,7 @@ def resolve_file_path_for_session(
 
     Args:
         session_id: The session ID (must have SandboxPathResolver configured)
-        sandbox_path: Path in sandbox format (e.g., 'external/persistent/file.png',
+        sandbox_path: Path in sandbox format (e.g., 'persistent/file.png',
                      '/workspace/file.txt', or './file.txt')
 
     Returns:
@@ -273,7 +273,7 @@ def resolve_file_path_for_session(
     Example:
         >>> docker_path, is_external, mount_type = resolve_file_path_for_session(
         ...     "session123",
-        ...     "external/persistent/image.png"
+        ...     "persistent/image.png"
         ... )
         >>> print(docker_path)
         /users/greg/ag3ntum/persistent/image.png

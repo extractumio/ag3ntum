@@ -14,7 +14,7 @@ All paths in Ag3ntum are expressed in "sandbox path" format - the paths as
 they appear inside the bubblewrap sandbox:
 
     /workspace/file.txt           - Main workspace file
-    /workspace/external/persistent/img.png  - Persistent storage
+    /workspace/persistent/img.png - Persistent storage
     /workspace/external/ro/name/file.csv    - Read-only external mount
     /workspace/external/rw/name/file.txt    - Read-write external mount
     /venv/bin/python3             - User's Python virtual environment
@@ -28,7 +28,7 @@ Docker Paths (Translation Target):
 When code runs in Docker (not inside bwrap), paths must be translated:
 
     /workspace/file.txt → /users/{user}/sessions/{sid}/workspace/file.txt
-    /workspace/external/persistent/img.png → /users/{user}/ag3ntum/persistent/img.png
+    /workspace/persistent/img.png → /users/{user}/ag3ntum/persistent/img.png
     /workspace/external/ro/name/file.csv → /mounts/ro/name/file.csv
     /venv/bin/python3 → /users/{user}/venv/bin/python3
 
@@ -81,6 +81,22 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Path Utilities
+# =============================================================================
+
+def _strip_relative_prefix(path: str) -> str:
+    """
+    Strip './' prefix from path without affecting hidden directories.
+
+    NOTE: Do NOT use lstrip("./") - it strips ALL '.' and '/' characters,
+    which corrupts hidden directories like ".tmp" → "tmp".
+    """
+    if path.startswith("./"):
+        return path[2:]
+    return path
 
 
 # =============================================================================
@@ -246,9 +262,9 @@ class SandboxPathContext:
     user_skills_docker: str = ""  # Set in __post_init__
 
     # Persistent storage
-    # Agent sees: /workspace/external/persistent (symlink in sandbox)
+    # Agent sees: /workspace/persistent (symlink in sandbox pointing to /persistent)
     # Docker sees: /users/{user}/ag3ntum/persistent (actual directory)
-    persistent_sandbox: str = "/workspace/external/persistent"
+    persistent_sandbox: str = "/workspace/persistent"
     persistent_docker: str = ""  # Set in __post_init__
 
     # External mounts bases
@@ -276,7 +292,7 @@ class SandboxPathContext:
             self.user_skills_sandbox = "/user-skills"
         if not self.user_skills_docker:
             self.user_skills_docker = "/user-skills"
-        # persistent_sandbox is always /workspace/external/persistent (hardcoded above)
+        # persistent_sandbox is always /workspace/persistent (hardcoded above)
         if not self.persistent_docker:
             self.persistent_docker = f"/users/{self.username}/ag3ntum/persistent"
 
@@ -456,7 +472,8 @@ class SandboxPathResolver:
         Handles:
         - Relative paths: ./foo, foo → /workspace/foo
         - Workspace paths: /workspace/foo → /workspace/foo
-        - External mount shortcuts: external/persistent/foo → /workspace/external/persistent/foo
+        - Persistent shortcut: persistent/foo → /workspace/persistent/foo
+        - External mount shortcuts: external/ro/foo → /workspace/external/ro/foo
         - Path normalization: /workspace/./foo/../bar → /workspace/bar
 
         Args:
@@ -485,16 +502,10 @@ class SandboxPathResolver:
         p = PurePosixPath(path)
         path_str = str(p)
 
-        # Handle relative paths
+        # Handle relative paths - prepend /workspace
         if not p.is_absolute():
-            # Check for external mount shortcuts (external/persistent/...)
-            if path_str.startswith("external/") or path_str.startswith("./external/"):
-                clean_path = path_str.lstrip("./")
-                path_str = f"/workspace/{clean_path}"
-            else:
-                # Regular relative path - relative to /workspace
-                clean_path = path_str.lstrip("./")
-                path_str = f"/workspace/{clean_path}"
+            clean_path = _strip_relative_prefix(path_str)
+            path_str = f"/workspace/{clean_path}"
             p = PurePosixPath(path_str)
 
         # Resolve . and .. components
@@ -535,15 +546,25 @@ class SandboxPathResolver:
         # Normalize first
         normalized = self.normalize(sandbox_path)
 
+        # Handle persistent storage at workspace root
+        # Agent sees: /workspace/persistent/foo (symlink to /persistent in sandbox)
+        # Docker sees: /users/{user}/ag3ntum/persistent/foo
+        if normalized.startswith("/workspace/persistent/") or normalized == "/workspace/persistent":
+            if normalized == "/workspace/persistent":
+                return self._context.persistent_docker
+            suffix = normalized[len("/workspace/persistent/"):]
+            return f"{self._context.persistent_docker}/{suffix}"
+
         # Handle special workspace external paths
-        # Agent sees: /workspace/external/persistent/foo
-        # This is a symlink that resolves to: /users/{user}/ag3ntum/persistent/foo
-        # Both sandbox and Docker see the same path for persistent storage
         if normalized.startswith("/workspace/external/"):
             external_part = normalized[len("/workspace/external/"):]
 
             if external_part.startswith("persistent/") or external_part == "persistent":
-                # Map to persistent storage path
+                # DEPRECATED: /workspace/external/persistent/* is deprecated
+                # Use /workspace/persistent/* instead
+                logger.warning(
+                    f"Deprecated path: {sandbox_path}. Use ./persistent/ instead of ./external/persistent/"
+                )
                 suffix = external_part[len("persistent"):].lstrip("/")
                 if suffix:
                     return f"{self._context.persistent_docker}/{suffix}"
@@ -653,13 +674,13 @@ class SandboxPathResolver:
         if mount:
             return mount.docker_to_sandbox(normalized)
 
-        # Check for special paths that might be in persistent/external storage
-        # These have the same path in both contexts
+        # Check for persistent storage path
+        # Docker: /users/{user}/ag3ntum/persistent/* -> Sandbox: /workspace/persistent/*
         if normalized.startswith(self._context.persistent_docker):
             suffix = normalized[len(self._context.persistent_docker):].lstrip("/")
             if suffix:
-                return f"/workspace/external/persistent/{suffix}"
-            return "/workspace/external/persistent"
+                return f"/workspace/persistent/{suffix}"
+            return "/workspace/persistent"
 
         raise PathResolutionError(
             f"Docker path not within any allowed mount: {docker_path}",
@@ -812,7 +833,7 @@ class SandboxPathResolver:
 
         def replace_persistent(match: re.Match) -> str:
             suffix = match.group(1) or ""
-            return f"/workspace/external/persistent{suffix}"
+            return f"/workspace/persistent{suffix}"
 
         result = persistent_pattern.sub(replace_persistent, result)
 

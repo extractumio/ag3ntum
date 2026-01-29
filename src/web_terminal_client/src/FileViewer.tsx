@@ -898,6 +898,15 @@ export function ImageViewerModal({
     }
   }, [imageUrl]);
 
+  // Handle show in explorer with proper event handling
+  const handleShowInExplorerClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (onShowInExplorer) {
+      onShowInExplorer();
+      onClose(); // Close modal so user can see the File Explorer
+    }
+  }, [onShowInExplorer, onClose]);
+
   if (!isOpen) return null;
 
   return (
@@ -928,7 +937,7 @@ export function ImageViewerModal({
               <button
                 type="button"
                 className="image-viewer-modal-action-btn"
-                onClick={onShowInExplorer}
+                onClick={handleShowInExplorerClick}
                 title="Show in File Explorer"
               >
                 <FolderIcon />

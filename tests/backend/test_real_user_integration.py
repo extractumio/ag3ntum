@@ -603,7 +603,11 @@ class TestRealUserCreation:
         user_service: UserService,
         real_session_factory: async_sessionmaker[AsyncSession],
     ) -> AsyncGenerator[tuple[User, str], None]:
-        """Create a real test user and clean up after test."""
+        """Create a real test user and clean up after test.
+
+        Note: Uses skip_venv_install=True for faster test execution.
+        Tests that need full venv should use created_user_with_venv fixture.
+        """
         username = generate_test_username()
         password = "TestPass123!"
         email = f"{username}@test.example.com"
@@ -615,6 +619,37 @@ class TestRealUserCreation:
                 email=email,
                 password=password,
                 role="user",
+                skip_venv_install=True,  # Skip pip install for faster tests
+            )
+
+        yield user, password
+
+        # Cleanup
+        await cleanup_test_user(user_service, real_session_factory, username)
+
+    @pytest_asyncio.fixture
+    async def created_user_with_venv(
+        self,
+        user_service: UserService,
+        real_session_factory: async_sessionmaker[AsyncSession],
+    ) -> AsyncGenerator[tuple[User, str], None]:
+        """Create a real test user WITH full venv installation.
+
+        Use this fixture for tests that need actual pip packages installed.
+        This is slower than created_user but necessary for venv verification tests.
+        """
+        username = generate_test_username()
+        password = "TestPass123!"
+        email = f"{username}@test.example.com"
+
+        async with real_session_factory() as session:
+            user = await user_service.create_user(
+                db=session,
+                username=username,
+                email=email,
+                password=password,
+                role="user",
+                skip_venv_install=False,  # Full venv installation
             )
 
         yield user, password
@@ -714,7 +749,7 @@ class TestRealUserCreation:
         permission_checks = [
             # (path, expected_mode, description)
             (user_home, 0o750, "Home should allow group read+traverse for API"),
-            (user_home / "sessions", 0o750, "Sessions allows group read+traverse"),
+            (user_home / "sessions", 0o770, "Sessions allows group rwx for API to create session dirs"),
             (user_home / "ag3ntum", 0o700, "ag3ntum should be user-only"),
             (user_home / "venv", 0o755, "venv should be world-readable"),
         ]
@@ -728,9 +763,12 @@ class TestRealUserCreation:
                 )
 
     @pytest.mark.asyncio
-    async def test_venv_installed_with_python(self, created_user: tuple[User, str]) -> None:
-        """Verify venv has working Python interpreter."""
-        user, _ = created_user
+    async def test_venv_installed_with_python(self, created_user_with_venv: tuple[User, str]) -> None:
+        """Verify venv has working Python interpreter.
+
+        Uses created_user_with_venv fixture because this test requires full pip install.
+        """
+        user, _ = created_user_with_venv
         venv_python = Path(f"/users/{user.username}/venv/bin/python3")
 
         assert venv_python.exists(), f"Python not found in venv: {venv_python}"
@@ -749,9 +787,12 @@ class TestRealUserCreation:
         assert "Python" in result.stdout
 
     @pytest.mark.asyncio
-    async def test_venv_has_required_packages(self, created_user: tuple[User, str]) -> None:
-        """Verify venv has required packages installed."""
-        user, _ = created_user
+    async def test_venv_has_required_packages(self, created_user_with_venv: tuple[User, str]) -> None:
+        """Verify venv has required packages installed.
+
+        Uses created_user_with_venv fixture because this test requires full pip install.
+        """
+        user, _ = created_user_with_venv
         venv_pip = Path(f"/users/{user.username}/venv/bin/pip")
 
         if not venv_pip.exists():
@@ -834,6 +875,7 @@ class TestPersistentStorageAccess:
                 username=username,
                 email=f"{username}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         # Create a test file in persistent storage
@@ -908,6 +950,7 @@ class TestUserIsolation:
                 username=username1,
                 email=f"{username1}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         async with real_session_factory() as session:
@@ -916,6 +959,7 @@ class TestUserIsolation:
                 username=username2,
                 email=f"{username2}@test.example.com",
                 password="TestPass456!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         # Create test files in each user's persistent storage
@@ -1035,6 +1079,7 @@ class TestSandboxIsolation:
                 username=username,
                 email=f"{username}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         yield user
@@ -1168,6 +1213,7 @@ class TestMountAccess:
                 username=username,
                 email=f"{username}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         yield user
@@ -1324,6 +1370,7 @@ class TestSandboxRealExecution:
                 username=username,
                 email=f"{username}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         yield user
@@ -1569,6 +1616,7 @@ class TestSandboxUserIsolation:
                 username=username1,
                 email=f"{username1}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         async with real_session_factory() as session:
@@ -1577,6 +1625,7 @@ class TestSandboxUserIsolation:
                 username=username2,
                 email=f"{username2}@test.example.com",
                 password="TestPass123!",
+                skip_venv_install=True,  # Skip pip install for faster tests
             )
 
         # Create a test file in user2's workspace

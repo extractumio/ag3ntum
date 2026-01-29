@@ -82,6 +82,7 @@ class UserService:
         password: str,
         role: str = "user",
         uid_mode: Optional[UIDMode] = None,
+        skip_venv_install: bool = False,
     ) -> User:
         """
         Create a new user with Linux account.
@@ -103,6 +104,7 @@ class UserService:
             password: User password (will be hashed)
             role: User role (default: "user")
             uid_mode: Override UID mode for this user (default: use global config)
+            skip_venv_install: Skip pip install in venv (faster for tests that don't need packages)
 
         Raises:
             ValueError: If user already exists, creation fails, or UID validation fails
@@ -146,7 +148,7 @@ class UserService:
 
         # Create Linux user with sudo
         try:
-            self._create_linux_user(username, linux_uid)
+            self._create_linux_user(username, linux_uid, skip_venv_install=skip_venv_install)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to create Linux user {username}: {e}")
             raise ValueError(f"Failed to create Linux user: {e}")
@@ -213,7 +215,7 @@ class UserService:
             min_uid = self.uid_config.direct_uid_min
             max_uid = self.uid_config.direct_uid_max
 
-        # Check for existing users in the target range
+        # Get highest existing UID from database in target range
         result = await db.execute(
             select(User.linux_uid)
             .where(User.linux_uid >= min_uid)
@@ -227,6 +229,20 @@ class UserService:
             next_uid = max_existing + 1
         else:
             next_uid = min_uid
+
+        # Also check system users (handles case where database and /etc/passwd
+        # are out of sync, e.g., during tests with in-memory database)
+        system_uids = self._get_system_uids_in_range(min_uid, max_uid)
+
+        # If the next UID is already in use by the system, find the next available
+        while next_uid in system_uids:
+            next_uid += 1
+            if next_uid > max_uid:
+                raise ValueError(
+                    f"UID range exhausted for mode {effective_mode.value}. "
+                    f"Range [{min_uid}, {max_uid}] is full."
+                )
+                break
 
         # Verify we haven't exceeded the range
         if next_uid > max_uid:
@@ -242,7 +258,43 @@ class UserService:
 
         return next_uid
 
-    def _create_linux_user(self, username: str, uid: int) -> None:
+    def _get_system_uids_in_range(self, min_uid: int, max_uid: int) -> set[int]:
+        """Get all existing system UIDs in the specified range.
+
+        Reads /etc/passwd to find UIDs that are already in use by the system.
+        This handles cases where the database and system users are out of sync,
+        such as during tests with an in-memory database.
+
+        Args:
+            min_uid: Minimum UID of range to check
+            max_uid: Maximum UID of range to check
+
+        Returns:
+            Set of UIDs that exist in /etc/passwd within the range
+        """
+        system_uids: set[int] = set()
+        try:
+            result = subprocess.run(
+                ["getent", "passwd"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split(":")
+                    if len(parts) >= 3:
+                        try:
+                            uid = int(parts[2])
+                            if min_uid <= uid <= max_uid:
+                                system_uids.add(uid)
+                        except ValueError:
+                            continue
+        except Exception as e:
+            logger.warning(f"Could not read system UIDs from /etc/passwd: {e}")
+        return system_uids
+
+    def _create_linux_user(self, username: str, uid: int, skip_venv_install: bool = False) -> None:
         """
         Create Linux user with sudo useradd and set up group-based permissions.
 
@@ -257,11 +309,11 @@ class UserService:
 
         Directory Structure:
           /users/{username}/           # 750 (owner rwx, group rx)
-          ├── .claude/                 # 750 (owner rwx, group rx)
-          │   └── skills/              # 750 (API reads, owner writes)
-          ├── ag3ntum/                 # 750 (owner rwx, group rx)
+          ├── .claude/                 # 770 (owner rwx, group rwx for API)
+          │   └── skills/              # 770 (API can write skills)
+          ├── ag3ntum/                 # 700 (owner only, protects secrets.yaml)
           │   └── persistent/          # 770 (group rwx for API writes)
-          ├── sessions/                # 750 (API can list)
+          ├── sessions/                # 770 (API can create session dirs)
           │   └── {session_id}/        # 700 (owner only, true isolation)
           └── venv/                    # 755 (needs to be executable by sandbox)
 
@@ -346,7 +398,7 @@ class UserService:
                     "Files in this directory persist across sessions.\n\n"
                     "## Access from Agent Sessions\n"
                     "```\n"
-                    "./external/persistent/  OR  /persistent/\n"
+                    "./persistent/  OR  /persistent/\n"
                     "```\n\n"
                     "## Use Cases\n"
                     "- Cache data you want to reuse between sessions\n"
@@ -355,7 +407,7 @@ class UserService:
                 )
 
             # Create user-specific Python venv
-            self._create_user_venv(home_dir, username)
+            self._create_user_venv(home_dir, username, skip_venv_install=skip_venv_install)
 
             # Create user secrets.yaml from template (inside ag3ntum, so private)
             self._create_user_secrets(home_dir, username)
@@ -416,7 +468,7 @@ class UserService:
 
         logger.info(f"Created/Updated Linux user {username} with UID {uid}")
 
-    def _create_user_venv(self, home_dir: Path, username: str) -> None:
+    def _create_user_venv(self, home_dir: Path, username: str, skip_venv_install: bool = False) -> None:
         """
         Create user-specific Python virtual environment.
 
@@ -428,6 +480,7 @@ class UserService:
         Args:
             home_dir: User's home directory path
             username: Username for logging
+            skip_venv_install: Skip pip install (faster for tests that don't need packages)
         """
         venv_dir = home_dir / "venv"
         requirements_file = home_dir / "requirements.txt"
@@ -465,21 +518,24 @@ class UserService:
                     f"created minimal requirements for {username}"
                 )
 
-            # Install requirements into the venv
-            pip_path = venv_dir / "bin" / "pip"
-            if requirements_file.exists():
-                logger.info(f"Installing requirements for {username}...")
-                result = subprocess.run(
-                    [str(pip_path), "install", "-r", str(requirements_file)],
-                    capture_output=True,
-                    timeout=300,  # 5 minute timeout for pip install
-                )
-                if result.returncode != 0:
-                    logger.warning(
-                        f"pip install had issues for {username}: {result.stderr.decode()[:500]}"
+            # Install requirements into the venv (skip if skip_venv_install=True for faster tests)
+            if skip_venv_install:
+                logger.info(f"Skipping pip install for {username} (skip_venv_install=True)")
+            else:
+                pip_path = venv_dir / "bin" / "pip"
+                if requirements_file.exists():
+                    logger.info(f"Installing requirements for {username}...")
+                    result = subprocess.run(
+                        [str(pip_path), "install", "-r", str(requirements_file)],
+                        capture_output=True,
+                        timeout=300,  # 5 minute timeout for pip install
                     )
-                else:
-                    logger.info(f"Installed requirements for {username}")
+                    if result.returncode != 0:
+                        logger.warning(
+                            f"pip install had issues for {username}: {result.stderr.decode()[:500]}"
+                        )
+                    else:
+                        logger.info(f"Installed requirements for {username}")
 
             # Set permissions - venv should be readable but owned by user
             venv_dir.chmod(0o755)
@@ -616,16 +672,22 @@ class UserService:
 
             # Set group permissions on subdirectories that API needs to access
             # NOTE: ag3ntum is NOT included - it stays 700 to protect secrets.yaml
+            # These directories need 770 (rwx for group) because the API user (in ag3ntum group)
+            # must be able to CREATE files/directories here (e.g., session directories)
             for subdir in [".claude", "sessions"]:
                 subdir_path = home_dir / subdir
                 if subdir_path.exists():
+                    # Set group ownership recursively
                     subprocess.run(
                         ["sudo", "chgrp", "-R", "ag3ntum", str(subdir_path)],
                         check=True,
                         capture_output=True,
                     )
+                    # 770 = rwx for owner (user), rwx for group (ag3ntum), none for others
+                    # The API user needs write access to create session directories
+                    # Use -R to also set permissions on subdirectories (e.g., .claude/skills)
                     subprocess.run(
-                        ["sudo", "chmod", "750", str(subdir_path)],
+                        ["sudo", "chmod", "-R", "770", str(subdir_path)],
                         check=True,
                         capture_output=True,
                     )

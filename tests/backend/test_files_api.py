@@ -2,7 +2,7 @@
 Tests for Files API path normalization and security validation.
 
 These tests ensure that sandbox-format paths from agent messages
-(e.g., /workspace/external/persistent/file.txt) are correctly
+(e.g., /workspace/persistent/file.txt) are correctly
 normalized before being processed by the file API.
 """
 import pytest

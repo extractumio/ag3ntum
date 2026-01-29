@@ -25,7 +25,7 @@ Consult the architectural documentation in @DOCUMENTS/TECHNICAL whenever you nee
 - **Name**: Ag3ntum
 - **Language**: Python 3.13+
 - **License**: AGPL-3.0
-- **Core SDK**: claude-agent-sdk 0.1.20
+- **Core SDK**: claude-agent-sdk 0.1.23
 - **Security Model**: 6-layer defense-in-depth with UID isolation
 
 ---
@@ -276,6 +276,26 @@ File Explorer automatically redacts sensitive data:
 - `tests/core-tests/conftest.py` - Core test fixtures
 - All tests use `asyncio_mode = auto`
 
+### Test Results Log
+
+Test output is automatically saved to `logs/latest-test-results.log`:
+
+- **Overwritten** on each test run (not appended)
+- Contains **full pytest output** including failures and tracebacks
+- Includes **timestamp** of when tests started
+- Shows both console output AND saves to file simultaneously
+
+```bash
+# View last test results
+cat logs/latest-test-results.log
+
+# Search for failures in last run
+grep -A 10 "FAILED\|ERROR" logs/latest-test-results.log
+
+# Watch log file during test run
+tail -f logs/latest-test-results.log
+```
+
 ---
 
 ## Common Tasks & How-To
@@ -395,8 +415,9 @@ grep -r "error" users/greg/sessions/*/agent.jsonl
 |------|---------|----------|
 | `backend.log` | API server, routes, services | API/backend debugging |
 | `agent_cli.log` | CLI agent execution | CLI debugging |
+| `latest-test-results.log` | Full pytest output from last `./run.sh test` | Test debugging |
 
-**Log Rotation**: 10MB max, 5 backup files (`.1`, `.2`, etc.)
+**Log Rotation**: 10MB max, 5 backup files (`.1`, `.2`, etc.) - Note: `latest-test-results.log` is overwritten each run.
 
 **Viewing Logs**:
 ```bash

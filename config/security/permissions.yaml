@@ -217,7 +217,7 @@ sandbox:
     # Agent accesses them as:
     #   ./external/ro/{name}/    - Read-only external mounts
     #   ./external/rw/{name}/    - Read-write external mounts
-    #   ./external/persistent/   - Per-user persistent storage
+    #   ./persistent/            - Per-user persistent storage (at workspace root)
 
     # Read-only external mounts from host
     # Optional: may not exist if no --mount-ro options were used
@@ -248,7 +248,7 @@ sandbox:
     #
     # SECURITY: This mount only exposes the current user's persistent directory.
     # Other users' persistent storage is NOT visible in the sandbox.
-    # Access as: /persistent/<filename> or via workspace symlink ./external/persistent/
+    # Access as: /persistent/<filename> or via workspace symlink ./persistent/
     # Directory has 770 permissions (owner + ag3ntum group can read/write)
     persistent_storage:
       source: "/users/{username}/ag3ntum/persistent"

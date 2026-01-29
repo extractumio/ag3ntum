@@ -102,9 +102,9 @@ class TestSandboxPathContext:
         assert ctx.workspace_docker == "/users/testuser/sessions/test-session-123/workspace"
         assert ctx.venv_sandbox == "/venv"
         assert ctx.venv_docker == "/users/testuser/venv"
-        # Agent sees persistent storage via symlink at /workspace/external/persistent
+        # Agent sees persistent storage via symlink at /workspace/persistent
         # Docker path is the actual directory
-        assert ctx.persistent_sandbox == "/workspace/external/persistent"
+        assert ctx.persistent_sandbox == "/workspace/persistent"
         assert ctx.persistent_docker == "/users/testuser/ag3ntum/persistent"
 
     def test_mounts_are_built(self, basic_context):
@@ -165,8 +165,11 @@ class TestPathNormalization:
 
     def test_external_mount_paths(self, resolver):
         """Test normalizing external mount paths."""
-        # Relative external paths
-        assert resolver.normalize("external/persistent/img.png") == "/workspace/external/persistent/img.png"
+        # Relative persistent paths (persistent is at workspace root)
+        assert resolver.normalize("persistent/img.png") == "/workspace/persistent/img.png"
+        assert resolver.normalize("./persistent/data.json") == "/workspace/persistent/data.json"
+
+        # Relative external paths (ro/rw are under external/)
         assert resolver.normalize("./external/ro/data.csv") == "/workspace/external/ro/data.csv"
 
         # Absolute external paths
@@ -197,6 +200,123 @@ class TestPathNormalization:
 
 
 # =============================================================================
+# Hidden Directory Path Tests (Regression tests for lstrip bug)
+# =============================================================================
+
+class TestHiddenDirectoryPaths:
+    """
+    Tests for hidden directory handling.
+
+    REGRESSION TESTS: These tests specifically guard against the bug where
+    lstrip("./") was used to strip relative path prefixes, which incorrectly
+    stripped leading dots from hidden directories like ".tmp" → "tmp".
+
+    The fix uses explicit prefix stripping instead of lstrip().
+    """
+
+    def test_hidden_directory_without_prefix(self, resolver):
+        """Test that hidden directories without ./ prefix are preserved."""
+        # .tmp/cmd/file.txt should become /workspace/.tmp/cmd/file.txt
+        # NOT /workspace/tmp/cmd/file.txt (which is what the bug produced)
+        assert resolver.normalize(".tmp/cmd/file.txt") == "/workspace/.tmp/cmd/file.txt"
+        assert resolver.normalize(".hidden/data.json") == "/workspace/.hidden/data.json"
+        assert resolver.normalize(".config/settings.yaml") == "/workspace/.config/settings.yaml"
+
+    def test_hidden_directory_with_prefix(self, resolver):
+        """Test that hidden directories with ./ prefix are preserved."""
+        # ./.tmp/cmd/file.txt should become /workspace/.tmp/cmd/file.txt
+        assert resolver.normalize("./.tmp/cmd/file.txt") == "/workspace/.tmp/cmd/file.txt"
+        assert resolver.normalize("./.hidden/data.json") == "/workspace/.hidden/data.json"
+
+    def test_hidden_file_in_root(self, resolver):
+        """Test that hidden files in root are preserved."""
+        assert resolver.normalize(".gitignore") == "/workspace/.gitignore"
+        assert resolver.normalize("./.gitignore") == "/workspace/.gitignore"
+        assert resolver.normalize(".env") == "/workspace/.env"
+
+    def test_hidden_directory_translation(self, resolver):
+        """Test that hidden directories translate correctly to Docker paths."""
+        # This is the actual bug case: .tmp/cmd/file.txt
+        docker_path = resolver.sandbox_to_docker(".tmp/cmd/file.txt")
+        assert docker_path == "/users/testuser/sessions/test-session-123/workspace/.tmp/cmd/file.txt"
+
+        docker_path = resolver.sandbox_to_docker("./.tmp/cmd/file.txt")
+        assert docker_path == "/users/testuser/sessions/test-session-123/workspace/.tmp/cmd/file.txt"
+
+    def test_hidden_vs_current_directory(self, resolver):
+        """Test distinguishing between hidden dirs and current dir marker."""
+        # "./" is current directory prefix, should be stripped
+        assert resolver.normalize("./file.txt") == "/workspace/file.txt"
+
+        # ".hidden" is a hidden directory, should be preserved
+        assert resolver.normalize(".hidden") == "/workspace/.hidden"
+
+        # ".hidden/file.txt" - hidden directory with file
+        assert resolver.normalize(".hidden/file.txt") == "/workspace/.hidden/file.txt"
+
+    def test_multiple_hidden_directories(self, resolver):
+        """Test paths with multiple hidden directory components."""
+        assert resolver.normalize(".a/.b/.c/file.txt") == "/workspace/.a/.b/.c/file.txt"
+        assert resolver.normalize("./.a/.b/file.txt") == "/workspace/.a/.b/file.txt"
+
+    def test_hidden_directory_with_dots_and_dotdot(self, resolver):
+        """Test hidden directories combined with . and .. components."""
+        # .tmp/./cmd/file.txt - . should be removed, .tmp preserved
+        assert resolver.normalize(".tmp/./cmd/file.txt") == "/workspace/.tmp/cmd/file.txt"
+
+        # .tmp/../.other/file.txt - .tmp and .. cancel, .other preserved
+        assert resolver.normalize(".tmp/../.other/file.txt") == "/workspace/.other/file.txt"
+
+    def test_absolute_hidden_paths(self, resolver):
+        """Test absolute paths with hidden directories."""
+        assert resolver.normalize("/workspace/.tmp/file.txt") == "/workspace/.tmp/file.txt"
+        assert resolver.normalize("/workspace/.hidden/data.json") == "/workspace/.hidden/data.json"
+
+    def test_hidden_external_mount_path(self, resolver):
+        """Test hidden directories in external mount paths."""
+        # External mounts can also have hidden directories
+        assert resolver.normalize("./external/ro/.hidden/file.txt") == "/workspace/external/ro/.hidden/file.txt"
+        assert resolver.normalize("external/rw/.cache/data.bin") == "/workspace/external/rw/.cache/data.bin"
+
+    def test_hidden_persistent_path(self, resolver):
+        """Test hidden directories in persistent storage paths."""
+        assert resolver.normalize("persistent/.cache/file.txt") == "/workspace/persistent/.cache/file.txt"
+        assert resolver.normalize("./persistent/.hidden/data.json") == "/workspace/persistent/.hidden/data.json"
+
+    def test_lstrip_bug_regression(self, resolver):
+        """
+        Explicit regression test for the lstrip("./") bug.
+
+        The bug: using path_str.lstrip("./") to strip "./" prefix.
+        lstrip() removes ALL occurrences of any character in the string,
+        not just the substring "./".
+
+        Example:
+            ".tmp/file.txt".lstrip("./") == "tmp/file.txt"  # WRONG!
+            Should be ".tmp/file.txt" after removing only "./" prefix.
+        """
+        # These specific cases were failing before the fix
+        test_cases = [
+            # (input, expected_output)
+            (".tmp/cmd/20260129-151604-911c2012ab1e.txt",
+             "/workspace/.tmp/cmd/20260129-151604-911c2012ab1e.txt"),
+            (".cache/pip/wheels/file.whl",
+             "/workspace/.cache/pip/wheels/file.whl"),
+            (".local/share/data.db",
+             "/workspace/.local/share/data.db"),
+            (".npm/_cacache/index.json",
+             "/workspace/.npm/_cacache/index.json"),
+        ]
+
+        for input_path, expected in test_cases:
+            actual = resolver.normalize(input_path)
+            assert actual == expected, (
+                f"lstrip bug regression: normalize({input_path!r}) "
+                f"returned {actual!r}, expected {expected!r}"
+            )
+
+
+# =============================================================================
 # Sandbox to Docker Translation Tests
 # =============================================================================
 
@@ -215,11 +335,11 @@ class TestSandboxToDocker:
 
     def test_persistent_storage_path(self, resolver):
         """Test translating persistent storage paths."""
-        docker_path = resolver.sandbox_to_docker("/workspace/external/persistent/img.png")
+        docker_path = resolver.sandbox_to_docker("/workspace/persistent/img.png")
         assert docker_path == "/users/testuser/ag3ntum/persistent/img.png"
 
         # Also test with relative path
-        docker_path = resolver.sandbox_to_docker("external/persistent/data.json")
+        docker_path = resolver.sandbox_to_docker("persistent/data.json")
         assert docker_path == "/users/testuser/ag3ntum/persistent/data.json"
 
     def test_external_ro_path(self, resolver):
@@ -290,7 +410,7 @@ class TestDockerToSandbox:
         sandbox_path = resolver.docker_to_sandbox(
             "/users/testuser/ag3ntum/persistent/img.png"
         )
-        assert sandbox_path == "/workspace/external/persistent/img.png"
+        assert sandbox_path == "/workspace/persistent/img.png"
 
     def test_venv_path(self, resolver):
         """Test translating Docker venv paths to sandbox."""
@@ -320,8 +440,8 @@ class TestMountTypeDetection:
 
     def test_persistent_mount_type(self, resolver):
         """Test detecting persistent storage mount type."""
-        assert resolver.get_mount_type("/workspace/external/persistent/img.png") == "persistent"
-        assert resolver.get_mount_type("external/persistent/data.json") == "persistent"
+        assert resolver.get_mount_type("/workspace/persistent/img.png") == "persistent"
+        assert resolver.get_mount_type("persistent/data.json") == "persistent"
 
     def test_external_ro_mount_type(self, resolver):
         """Test detecting external read-only mount type."""
@@ -353,7 +473,7 @@ class TestWritability:
 
     def test_persistent_is_writable(self, resolver):
         """Test that persistent storage is writable."""
-        assert resolver.is_path_writable("external/persistent/img.png") is True
+        assert resolver.is_path_writable("persistent/img.png") is True
 
     def test_external_rw_is_writable(self, resolver):
         """Test that external rw mount is writable."""
@@ -394,7 +514,7 @@ class TestErrorMessageTranslation:
         """Test translating persistent path in error message."""
         error = "Permission denied: /users/testuser/ag3ntum/persistent/file.png"
         translated = resolver.translate_error_paths(error)
-        assert "/workspace/external/persistent/file.png" in translated
+        assert "/workspace/persistent/file.png" in translated
 
     def test_preserve_non_path_text(self, resolver):
         """Test that non-path text is preserved."""
@@ -585,7 +705,7 @@ class TestEdgeCases:
 
     def test_persistent_root_path(self, resolver):
         """Test handling persistent storage root path."""
-        docker_path = resolver.sandbox_to_docker("/workspace/external/persistent")
+        docker_path = resolver.sandbox_to_docker("/workspace/persistent")
         assert docker_path == "/users/testuser/ag3ntum/persistent"
 
     def test_external_ro_root_path(self, resolver):
@@ -654,12 +774,12 @@ class TestIntegration:
 
     def test_full_flow_persistent_storage(self, resolver):
         """Test complete flow for persistent storage file."""
-        # Start with relative external path
-        sandbox_path = "external/persistent/generated_image.png"
+        # Start with relative persistent path
+        sandbox_path = "persistent/generated_image.png"
 
         # Normalize
         normalized = resolver.normalize(sandbox_path)
-        assert normalized == "/workspace/external/persistent/generated_image.png"
+        assert normalized == "/workspace/persistent/generated_image.png"
 
         # Translate to Docker
         docker_path = resolver.sandbox_to_docker(normalized)

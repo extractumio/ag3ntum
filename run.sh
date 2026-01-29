@@ -572,7 +572,7 @@ EOF
 # External mounts are available in agent sessions at:
 #   Read-only:  /workspace/external/ro/{name}/
 #   Read-write: /workspace/external/rw/{name}/
-#   Persistent: /workspace/external/persistent/
+#   Persistent: /workspace/persistent/
 services:
   ag3ntum-api:
     volumes:
@@ -680,7 +680,7 @@ EOF
     done
   fi
   echo "Persistent storage (always available):"
-  echo "  ./external/persistent/"
+  echo "  ./persistent/"
   echo ""
 }
 
@@ -954,13 +954,32 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  docker compose exec -T ag3ntum-web npm run test:run
+  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web npm run test:run
   return $?
 }
 
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests ==="
+
+  # Set up test logging - output goes to both console and log file
+  TEST_LOG_FILE="logs/latest-test-results.log"
+  mkdir -p logs
+
+  # Initialize log file with header
+  {
+    echo "========================================"
+    echo "Test Run: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================"
+    echo ""
+  } > "$TEST_LOG_FILE"
+
+  # Helper function to run commands with tee (preserves exit code)
+  run_with_log() {
+    # Run command, tee to log file, preserve exit code
+    "$@" 2>&1 | tee -a "$TEST_LOG_FILE"
+    return "${PIPESTATUS[0]}"
+  }
 
   # Use test compose override for test runs
   # This mounts test sudoers and uses test entrypoint
@@ -1105,45 +1124,45 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}"
       echo ""
 
-      # Run backend tests in container (use -t only if TTY available)
+      # Run backend tests in container with logging
       # Use || true to prevent set -e from exiting on test failures
       BACKEND_RESULT=0
       if [[ -z "${UI_ONLY}" ]]; then
-        if [ -t 0 ]; then
-          ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
-        else
-          ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
-        fi
+        run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
       fi
 
       # Run UI tests unless backend-only
       UI_RESULT=0
       if [[ -z "${BACKEND_ONLY}" ]]; then
-        echo ""
-        run_ui_tests
-        UI_RESULT=$?
+        echo "" | tee -a "$TEST_LOG_FILE"
+        run_ui_tests 2>&1 | tee -a "$TEST_LOG_FILE"
+        UI_RESULT=${PIPESTATUS[0]}
       fi
 
-      # Print summary for quick mode
-      echo ""
-      echo "========================================"
-      echo "=== QUICK TEST SUMMARY ==="
-      echo "========================================"
-      if [[ -z "${UI_ONLY}" ]]; then
-        if [[ ${BACKEND_RESULT} -eq 0 ]]; then
-          echo "  ✓ Backend tests:  PASSED"
-        else
-          echo "  ✗ Backend tests:  FAILED"
+      # Print summary for quick mode (to console and log)
+      {
+        echo ""
+        echo "========================================"
+        echo "=== QUICK TEST SUMMARY ==="
+        echo "========================================"
+        if [[ -z "${UI_ONLY}" ]]; then
+          if [[ ${BACKEND_RESULT} -eq 0 ]]; then
+            echo "  ✓ Backend tests:  PASSED"
+          else
+            echo "  ✗ Backend tests:  FAILED"
+          fi
         fi
-      fi
-      if [[ -z "${BACKEND_ONLY}" ]]; then
-        if [[ ${UI_RESULT} -eq 0 ]]; then
-          echo "  ✓ UI tests:       PASSED"
-        else
-          echo "  ✗ UI tests:       FAILED"
+        if [[ -z "${BACKEND_ONLY}" ]]; then
+          if [[ ${UI_RESULT} -eq 0 ]]; then
+            echo "  ✓ UI tests:       PASSED"
+          else
+            echo "  ✗ UI tests:       FAILED"
+          fi
         fi
-      fi
-      echo "========================================"
+        echo "========================================"
+        echo ""
+        echo "Test results saved to: ${TEST_LOG_FILE}"
+      } | tee -a "$TEST_LOG_FILE"
 
       # Restore container to production mode
       echo ""
@@ -1151,33 +1170,26 @@ if [[ "${ACTION}" == "test" ]]; then
       docker compose up -d ag3ntum-api
 
       if [[ ${BACKEND_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
+        echo "" | tee -a "$TEST_LOG_FILE"
+        echo "Some tests failed!" | tee -a "$TEST_LOG_FILE"
         exit 1
       fi
       exit 0
     else
       # Full mode: run backend tests with --run-e2e, then other tests without it
-      echo "Running ALL tests (backend with E2E + security + other tests)..."
-      echo ""
+      echo "Running ALL tests (backend with E2E + security + other tests)..." | tee -a "$TEST_LOG_FILE"
+      echo "" | tee -a "$TEST_LOG_FILE"
 
       # First run: backend tests with --run-e2e flag
-      # Use || to capture exit code without triggering set -e
-      echo "=== Running backend tests (with E2E) ==="
+      echo "=== Running backend tests (with E2E) ===" | tee -a "$TEST_LOG_FILE"
       BACKEND_RESULT=0
-      if [ -t 0 ]; then
-        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
-      else
-        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
-      fi
+      run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
 
       # Second run: security tests (no --run-e2e flag)
-      echo ""
-      echo "=== Running security tests ==="
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running security tests ===" | tee -a "$TEST_LOG_FILE"
       SECURITY_RESULT=0
-      if [ -t 0 ]; then
-        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
-      else
-        ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
-      fi
+      run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
 
       # Check for other test directories and run them
       OTHER_DIRS=$(${COMPOSE_TEST} exec ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
@@ -1190,14 +1202,10 @@ if [[ "${ACTION}" == "test" ]]; then
             # Check if directory has any test files
             HAS_TESTS=$(${COMPOSE_TEST} exec ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
             if [[ -n "${HAS_TESTS}" ]]; then
-              echo ""
-              echo "=== Running ${dir_name} tests ==="
+              echo "" | tee -a "$TEST_LOG_FILE"
+              echo "=== Running ${dir_name} tests ===" | tee -a "$TEST_LOG_FILE"
               DIR_RESULT=0
-              if [ -t 0 ]; then
-                ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
-              else
-                ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
-              fi
+              run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
               if [[ ${DIR_RESULT} -ne 0 ]]; then
                 OTHER_RESULT=1
               fi
@@ -1209,41 +1217,46 @@ if [[ "${ACTION}" == "test" ]]; then
       # Run UI tests if not backend-only mode
       UI_RESULT=0
       if [[ -z "${BACKEND_ONLY}" ]]; then
-        echo ""
-        run_ui_tests || UI_RESULT=$?
+        echo "" | tee -a "$TEST_LOG_FILE"
+        run_ui_tests 2>&1 | tee -a "$TEST_LOG_FILE"
+        UI_RESULT=${PIPESTATUS[0]}
       fi
 
-      # Print combined summary
-      echo ""
-      echo "========================================"
-      echo "=== COMBINED TEST SUMMARY ==="
-      echo "========================================"
+      # Print combined summary (to console and log)
       TOTAL_BACKEND=$(${COMPOSE_TEST} exec ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
-      echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
-      echo ""
-      if [[ ${BACKEND_RESULT} -eq 0 ]]; then
-        echo "  ✓ Backend tests:  PASSED"
-      else
-        echo "  ✗ Backend tests:  FAILED"
-      fi
-      if [[ ${SECURITY_RESULT} -eq 0 ]]; then
-        echo "  ✓ Security tests: PASSED"
-      else
-        echo "  ✗ Security tests: FAILED"
-      fi
-      if [[ ${OTHER_RESULT} -eq 0 ]]; then
-        echo "  ✓ Other tests:    PASSED"
-      else
-        echo "  ✗ Other tests:    FAILED"
-      fi
-      if [[ -z "${BACKEND_ONLY}" ]]; then
-        if [[ ${UI_RESULT} -eq 0 ]]; then
-          echo "  ✓ UI tests:       PASSED"
+      {
+        echo ""
+        echo "========================================"
+        echo "=== COMBINED TEST SUMMARY ==="
+        echo "========================================"
+        echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
+        echo ""
+        if [[ ${BACKEND_RESULT} -eq 0 ]]; then
+          echo "  ✓ Backend tests:  PASSED"
         else
-          echo "  ✗ UI tests:       FAILED"
+          echo "  ✗ Backend tests:  FAILED"
         fi
-      fi
-      echo "========================================"
+        if [[ ${SECURITY_RESULT} -eq 0 ]]; then
+          echo "  ✓ Security tests: PASSED"
+        else
+          echo "  ✗ Security tests: FAILED"
+        fi
+        if [[ ${OTHER_RESULT} -eq 0 ]]; then
+          echo "  ✓ Other tests:    PASSED"
+        else
+          echo "  ✗ Other tests:    FAILED"
+        fi
+        if [[ -z "${BACKEND_ONLY}" ]]; then
+          if [[ ${UI_RESULT} -eq 0 ]]; then
+            echo "  ✓ UI tests:       PASSED"
+          else
+            echo "  ✗ UI tests:       FAILED"
+          fi
+        fi
+        echo "========================================"
+        echo ""
+        echo "Test results saved to: ${TEST_LOG_FILE}"
+      } | tee -a "$TEST_LOG_FILE"
 
       # Restore container to production mode
       echo ""
@@ -1252,12 +1265,12 @@ if [[ "${ACTION}" == "test" ]]; then
 
       # Exit with error if any test suite failed
       if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
-        echo ""
-        echo "Some tests failed!"
+        echo "" | tee -a "$TEST_LOG_FILE"
+        echo "Some tests failed!" | tee -a "$TEST_LOG_FILE"
         exit 1
       fi
-      echo ""
-      echo "All tests passed!"
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "All tests passed!" | tee -a "$TEST_LOG_FILE"
       exit 0
     fi
   fi
@@ -1265,16 +1278,26 @@ if [[ "${ACTION}" == "test" ]]; then
   # Add default flags (only reached for --subset mode)
   PYTEST_ARGS+=("-v" "--tb=short")
 
-  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}"
-  echo ""
+  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}" | tee -a "$TEST_LOG_FILE"
+  echo "" | tee -a "$TEST_LOG_FILE"
 
-  # Run tests in container (use -t only if TTY available)
-  if [ -t 0 ]; then
-    ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-  else
-    ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-  fi
+  # Run tests in container with logging
+  run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   TEST_EXIT_CODE=$?
+
+  # Print result summary
+  {
+    echo ""
+    echo "========================================"
+    if [[ ${TEST_EXIT_CODE} -eq 0 ]]; then
+      echo "Tests PASSED"
+    else
+      echo "Tests FAILED"
+    fi
+    echo "========================================"
+    echo ""
+    echo "Test results saved to: ${TEST_LOG_FILE}"
+  } | tee -a "$TEST_LOG_FILE"
 
   # Restore container to production mode (without test sudoers)
   echo ""

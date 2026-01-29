@@ -17,6 +17,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
   FileViewer,
   FileViewerModal,
+  ImageViewerModal,
   toFileViewerData,
   isSupportedTextFile,
   isSupportedImageFile,
@@ -541,6 +542,227 @@ describe('FileViewer', () => {
       // Should truncate and display
       const header = screen.getByText(/\.txt/);
       expect(header).toBeInTheDocument();
+    });
+  });
+
+  // ==========================================================================
+  // ImageViewerModal - Show in File Explorer
+  // ==========================================================================
+  describe('ImageViewerModal', () => {
+    const defaultProps = {
+      imageUrl: 'blob:http://localhost/test-image-123',
+      fileName: 'test-image.png',
+      isOpen: true,
+      onClose: vi.fn(),
+    };
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('renders modal when isOpen is true', () => {
+      const { container } = render(<ImageViewerModal {...defaultProps} />);
+
+      expect(container.querySelector('.image-viewer-modal-overlay')).toBeInTheDocument();
+      expect(container.querySelector('.image-viewer-modal')).toBeInTheDocument();
+    });
+
+    it('does not render when isOpen is false', () => {
+      const { container } = render(<ImageViewerModal {...defaultProps} isOpen={false} />);
+
+      expect(container.querySelector('.image-viewer-modal-overlay')).not.toBeInTheDocument();
+    });
+
+    it('displays file name in header', () => {
+      render(<ImageViewerModal {...defaultProps} fileName="my-photo.jpg" />);
+
+      expect(screen.getByText('my-photo.jpg')).toBeInTheDocument();
+    });
+
+    it('displays image dimensions when provided', () => {
+      render(<ImageViewerModal {...defaultProps} dimensions={{ width: 1024, height: 768 }} />);
+
+      expect(screen.getByText('1024 x 768')).toBeInTheDocument();
+    });
+
+    it('renders the image with correct src', () => {
+      render(<ImageViewerModal {...defaultProps} />);
+
+      const img = screen.getByRole('img');
+      expect(img).toHaveAttribute('src', 'blob:http://localhost/test-image-123');
+    });
+
+    it('closes on Escape key press', () => {
+      const onClose = vi.fn();
+      render(<ImageViewerModal {...defaultProps} onClose={onClose} />);
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('closes when clicking overlay', async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const { container } = render(<ImageViewerModal {...defaultProps} onClose={onClose} />);
+
+      const overlay = container.querySelector('.image-viewer-modal-overlay');
+      await user.click(overlay!);
+
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('does not close when clicking modal content', async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const { container } = render(<ImageViewerModal {...defaultProps} onClose={onClose} />);
+
+      const modal = container.querySelector('.image-viewer-modal');
+      await user.click(modal!);
+
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    describe('Show in File Explorer button', () => {
+      it('renders when onShowInExplorer is provided', () => {
+        const onShowInExplorer = vi.fn();
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onShowInExplorer={onShowInExplorer} />
+        );
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        expect(explorerButton).toBeInTheDocument();
+      });
+
+      it('does not render when onShowInExplorer is not provided', () => {
+        const { container } = render(<ImageViewerModal {...defaultProps} />);
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        expect(explorerButton).not.toBeInTheDocument();
+      });
+
+      it('calls onShowInExplorer when clicked', async () => {
+        const user = userEvent.setup();
+        const onShowInExplorer = vi.fn();
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onShowInExplorer={onShowInExplorer} />
+        );
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        await user.click(explorerButton!);
+
+        expect(onShowInExplorer).toHaveBeenCalled();
+      });
+
+      it('closes modal after clicking Show in File Explorer', async () => {
+        const user = userEvent.setup();
+        const onShowInExplorer = vi.fn();
+        const onClose = vi.fn();
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onShowInExplorer={onShowInExplorer} onClose={onClose} />
+        );
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        await user.click(explorerButton!);
+
+        expect(onClose).toHaveBeenCalled();
+      });
+
+      it('calls onShowInExplorer before closing modal', async () => {
+        const user = userEvent.setup();
+        const callOrder: string[] = [];
+        const onShowInExplorer = vi.fn(() => callOrder.push('showInExplorer'));
+        const onClose = vi.fn(() => callOrder.push('close'));
+
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onShowInExplorer={onShowInExplorer} onClose={onClose} />
+        );
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        await user.click(explorerButton!);
+
+        expect(callOrder).toEqual(['showInExplorer', 'close']);
+      });
+
+      it('stops event propagation to prevent overlay close handler', async () => {
+        const user = userEvent.setup();
+        const onShowInExplorer = vi.fn();
+        const onClose = vi.fn();
+
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onShowInExplorer={onShowInExplorer} onClose={onClose} />
+        );
+
+        const explorerButton = container.querySelector('button[title="Show in File Explorer"]');
+        await user.click(explorerButton!);
+
+        // onClose should only be called once (from the button handler, not from overlay)
+        expect(onClose).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('Download button', () => {
+      it('renders when onDownload is provided', () => {
+        const onDownload = vi.fn();
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onDownload={onDownload} />
+        );
+
+        const downloadButton = container.querySelector('button[title="Download"]');
+        expect(downloadButton).toBeInTheDocument();
+      });
+
+      it('does not render when onDownload is not provided', () => {
+        const { container } = render(<ImageViewerModal {...defaultProps} />);
+
+        const downloadButton = container.querySelector('button[title="Download"]');
+        expect(downloadButton).not.toBeInTheDocument();
+      });
+
+      it('calls onDownload when clicked', async () => {
+        const user = userEvent.setup();
+        const onDownload = vi.fn();
+        const { container } = render(
+          <ImageViewerModal {...defaultProps} onDownload={onDownload} />
+        );
+
+        const downloadButton = container.querySelector('button[title="Download"]');
+        await user.click(downloadButton!);
+
+        expect(onDownload).toHaveBeenCalled();
+      });
+    });
+
+    describe('Copy Image button', () => {
+      it('renders copy button', () => {
+        const { container } = render(<ImageViewerModal {...defaultProps} />);
+
+        const copyButton = container.querySelector('button[title*="Copy"]');
+        expect(copyButton).toBeInTheDocument();
+      });
+
+      it('shows "Copied!" state after successful copy', async () => {
+        const user = userEvent.setup();
+
+        // Mock fetch for blob copy
+        global.fetch = vi.fn().mockResolvedValue({
+          blob: () => Promise.resolve(new Blob(['test'], { type: 'image/png' })),
+        });
+
+        // Mock clipboard.write
+        const clipboardWriteSpy = vi.fn().mockResolvedValue(undefined);
+        Object.assign(navigator.clipboard, { write: clipboardWriteSpy });
+
+        const { container } = render(<ImageViewerModal {...defaultProps} />);
+
+        const copyButton = container.querySelector('button[title*="Copy"]');
+        await user.click(copyButton!);
+
+        await waitFor(() => {
+          const copiedButton = container.querySelector('button[title="Copied!"]');
+          expect(copiedButton).toBeInTheDocument();
+        });
+      });
     });
   });
 });

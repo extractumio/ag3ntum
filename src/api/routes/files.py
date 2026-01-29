@@ -386,7 +386,7 @@ def validate_and_resolve_path_for_session(
 
     Args:
         session_id: The session ID
-        sandbox_path: Path in sandbox format (e.g., 'external/persistent/file.png')
+        sandbox_path: Path in sandbox format (e.g., 'persistent/file.png')
         workspace_docker: Optional Docker workspace path for on-demand resolver config
         username: Optional username for on-demand resolver config
 
@@ -482,7 +482,7 @@ def normalize_path_for_mount_check(path: str) -> str:
         path: Path that may be in sandbox format or relative format
 
     Returns:
-        Normalized relative path (e.g., "external/persistent/file.txt")
+        Normalized relative path (e.g., "persistent/file.txt", "external/ro/data/file.csv")
     """
     normalized = path.replace("\\", "/")
 
@@ -513,6 +513,10 @@ def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
     # Normalize path separators and strip workspace prefix
     normalized = normalize_path_for_mount_check(relative_path)
 
+    # Check for persistent storage at workspace root (new location)
+    if normalized.startswith("persistent/") or normalized == "persistent":
+        return True, False, "persistent"
+
     # Check for external mount paths (order matters - more specific first)
     if normalized.startswith("external/user-ro/") or normalized == "external/user-ro":
         return True, True, "user-ro"
@@ -523,6 +527,7 @@ def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
     elif normalized.startswith("external/rw/") or normalized == "external/rw":
         return True, False, "rw"
     elif normalized.startswith("external/persistent/") or normalized == "external/persistent":
+        # DEPRECATED: external/persistent is deprecated, use persistent/ instead
         return True, False, "persistent"
     elif normalized == "external":
         # The external directory itself
