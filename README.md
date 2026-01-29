@@ -1,6 +1,6 @@
 # Ag3ntum
 
-**Claude Code for your servers. Secure. Multi-user. Under your control.**
+**Server-safe Claude Code. Sandboxed. Multi-tenant. Self-hosted.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.13+-blue.svg" alt="Python 3.13+">
@@ -8,185 +8,104 @@
   <img src="https://img.shields.io/badge/Security-6%20Layer%20Defense-orange.svg" alt="Security">
 </p>
 
-Ag3ntum transforms Claude Code into a **self-hosted AI automation platform** that's actually safe to run on production servers. Deploy on your infrastructure, access via web browser, and let your team automate server management, document processing, and business workflows—without sending data to external clouds.
+Ag3ntum is a **secure-by-default, multi-user Claude Code deployment** for production servers. It wraps every agent action in 6 layers of defense-in-depth—Bubblewrap sandboxing, OS-enforced user isolation, command filtering, and automatic secrets redaction—so you can run AI automation alongside production workloads without risk.
 
-> **Enterprise AI capabilities. Startup economics.**
-> Pay only for Anthropic API usage—no platform fees, no per-seat licensing.
-
-![Ag3ntum UI Demo](./docs/artifacts/ag3ntum_ui.gif)
-
----
-
-## Why Ag3ntum?
-
-**Claude Code is powerful, but risky on servers.** It runs unsandboxed with full filesystem access—one wrong command and your production environment is compromised.
-
-**Ag3ntum makes it safe.** Six layers of defense-in-depth including Bubblewrap sandboxing, OS-enforced user isolation, 140+ command filters, and automatic secrets scanning mean you can deploy AI automation alongside production systems without fear.
-
-| Without Ag3ntum | With Ag3ntum |
-|-----------------|--------------|
-| Full filesystem access | Workspace-restricted |
-| No command filtering | 140+ dangerous patterns blocked |
-| Secrets exposed in environment | Sandboxed per-user secrets |
-| Secrets visible in file previews | Auto-redacted API keys and tokens |
-| All users share same UID | OS-enforced user isolation (UID 50000-60000) |
-| Files can be accidentally deleted | Read-only mounts + overwrite protection |
-| CLI-only access | Web UI + REST API |
-| Single user | Multi-tenant with isolation |
-| Black box execution | Full transparency—drill into every action |
-
----
-
-## Core Capabilities
-
-### Sandboxed Server Execution
-Every shell command runs inside Bubblewrap sandbox with UID/GID isolation. Process namespace isolation, filtered `/proc`, clearenv with explicit allowlists, seccomp profiles blocking privilege escalation. Safe to colocate with production.
-
-### Visual File Workflow
-Side-by-side chat and file explorer. Drag files from your PC, watch the agent create outputs in real-time, click to preview, download results. No CLI knowledge required.
-
-```
-┌────────────────────────────────┬─────────────────────────┐
-│      CONVERSATION              │    FILE EXPLORER        │
-│                                │                         │
-│  "Analyze the uploaded logs"   │  workspace/             │
-│                                │  ├── app.log            │
-│  [Tool: Ag3ntumRead ✓]         │  ├── report.md    ←NEW  │
-│                                │  └── data/              │
-│  "Found 12 errors..."          │                         │
-│                                │  [Drag files to upload] │
-└────────────────────────────────┴─────────────────────────┘
-```
-
-### Multi-Format Document Processing
-Not just code files—process business documents:
-- **PDF** with auto-OCR for scanned pages
-- **Office** (DOCX, XLSX, PPTX)
-- **Archives** (ZIP, TAR, 7z) with security scanning
-- **Tabular data** (CSV, Excel, Parquet)
-
-### Remote API Control
-Full REST API with real-time Server-Sent Events. Build dashboards, integrate with CI/CD, trigger from webhooks, monitor from anywhere.
-
-```bash
-# Start a task
-curl -X POST /sessions/run -d '{"prompt": "Analyze server logs"}'
-
-# Stream events in real-time
-curl /sessions/{id}/events  # SSE stream
-
-# Human-in-the-loop approval
-curl -X POST /sessions/{id}/answer -d '{"answer": "approved"}'
-```
-
-### Complete Execution Transparency
-Drill down into every tool call, command, and subagent. See exact shell commands, exit codes, output files. Nothing hidden—full audit trail for compliance.
-
-### Multi-Tenant Architecture with OS-Enforced Isolation
-JWT authentication, isolated workspaces, per-user API keys, separated session history. Teams share one deployment while maintaining complete isolation.
-
-**User-Level Isolation:** Each user runs under their own Linux UID (50000-60000 range). This is enforced by the kernel via seccomp profiles—not just prompts. Even if one user's sandbox is compromised, they cannot access another user's files or processes.
-
-### True Read-Only File Access
-Grant the agent read-only access to your files with **OS-level enforcement**. Docker `:ro` mounts and Bubblewrap `--ro-bind` ensure files cannot be modified—no matter what the agent attempts. Your source documents stay untouched while the agent analyzes them.
-
-```
-External Files (Protected)        Agent View
-────────────────────────         ─────────────
-/Users/greg/Documents/    ──►    workspace/external/ro/
-  ├── contracts/                   ├── contracts/  [READ-ONLY]
-  ├── financials/                  ├── financials/ [READ-ONLY]
-  └── reports.xlsx                 └── reports.xlsx [READ-ONLY]
-```
-
-### Safe File Updates (Overwrite Protection)
-Prevent accidental data loss with intelligent file update safeguards:
-- **Auto-backup** before overwriting existing files
-- **Confirmation prompts** for high-risk modifications
-- **Clear tool semantics**: `Write` creates new, `Edit` modifies existing
-- **Audit trail** for all file changes with before/after states
-
----
-
-## Use Cases
-
-| Scenario | What Ag3ntum Does |
-|----------|-------------------|
-| **VPS Administration** | Automated log analysis, config management, security audits—sandboxed |
-| **Document Processing** | Extract data from invoices, analyze reports, transform spreadsheets |
-| **Business Automation** | API integrations, data pipelines, report generation |
-| **DevOps Workflows** | CI/CD assistance, infrastructure analysis, automated troubleshooting |
-
----
-
-## Security Architecture
-
-```
-User Request
-     │
-     ▼
-┌─────────────────────────────────┐
-│  Layer 0: Inbound WAF           │  ← Request size limits, DoS prevention
-├─────────────────────────────────┤
-│  Layer 1: Docker Container      │  ← Host boundary
-├─────────────────────────────────┤
-│  Layer 2: Bubblewrap + UID      │  ← Process isolation + user isolation
-├─────────────────────────────────┤
-│  Layer 3: Ag3ntum Tools         │  ← PathValidator for file operations
-├─────────────────────────────────┤
-│  Layer 4: Command Filter        │  ← 140+ pattern blocks
-├─────────────────────────────────┤
-│  Layer 5: Security Middleware   │  ← HTTP headers, CSP, secrets scanning
-├─────────────────────────────────┤
-│  Layer 6: Prompts               │  ← Agent behavioral guidance
-└─────────────────────────────────┘
-     │
-     ▼
-  Safe Execution
-```
-
-Each layer operates independently. Even if one is bypassed, others contain the damage.
-
-**UID/GID Isolation:** Each user runs under their own UID (50000-60000 range). This is OS-enforced via seccomp profiles—root access is **impossible**, not just discouraged.
-
-**Automatic Secrets Scanning:** File Explorer automatically redacts API keys, tokens, and passwords before display. Same-length replacement preserves formatting while protecting credentials.
-
-**Blocked by default:** `rm -rf`, `sudo`, `chmod 777`, `docker exec`, `nsenter`, path traversal, environment leakage, `/proc` enumeration, and 130+ more patterns.
-
-### Why Ag3ntum Sandboxed > Claude Code Dockerized
-
-| Protection | What It Prevents |
-|------------|------------------|
-| **OS-enforced user isolation** | Each user runs under unique UID; kernel blocks cross-user access |
-| **Root access impossible** | Seccomp profiles block setuid to root at kernel level |
-| **Invisible execution** | Agents see zero other processes, preventing reconnaissance attacks |
-| **Escape-proof** | Container detection blocked; agents can't identify they're sandboxed |
-| **Credential lockdown** | No sudo access, login history, or system user enumeration |
-| **Secrets auto-redaction** | API keys hidden in file previews before user sees them |
-| **Injection-resistant** | No writable PATH directories eliminates binary hijacking |
-| **Ephemeral by design** | Clean tmpfs root with no Docker fingerprints |
-
-*Verified via comparative security audits: 6-layer defense-in-depth with UID isolation reduces attack surface by 50%+ compared to plain Docker containers.*
-
----
-
-## Quick Start
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/main/install.sh | bash
 ```
 
-This will clone the repository, configure defaults, and build the containers.
+Then open **http://localhost:50080** | See [QUICK-START-GUIDE.md](QUICK-START-GUIDE.md) for API key setup and user creation.
 
-See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete deployment instructions including API key setup and user creation.
+---
+
+## Why Ag3ntum over Claude Code?
+
+Claude Code is powerful but runs unsandboxed with full filesystem access. One wrong command can compromise your server.
+
+| Production Risk | Claude Code | Ag3ntum |
+|-----------------|-------------|---------|
+| **SSH key theft** (`~/.ssh/id_rsa`) | Full access | Not mounted in sandbox |
+| **AWS credential access** (`~/.aws/credentials`) | Full access | Not mounted |
+| **Cloud metadata (169.254.169.254)** | IAM keys exposed | Blocked |
+| **Environment variable dump** (`env`, `/proc/*/environ`) | All secrets visible | clearenv + filtered /proc |
+| **Cross-user file access** | Single UID, shared access | Per-user UID isolation (50000-60000) |
+| **Process enumeration** (`ps aux`) | All processes visible | Filtered /proc (only self) |
+| **Privilege escalation** (`sudo`, setuid) | Possible if configured | Seccomp blocks at kernel level |
+| **Persistence** (cron, authorized_keys, bashrc) | Full write access | Paths not mounted |
+| **Dangerous commands** (`rm -rf /`, `dd`, fork bombs) | No filtering | 140+ patterns blocked |
+| **Secrets in file previews** | Visible to user | Auto-redacted before display |
+| **Container escape** (docker socket, nsenter) | If socket mounted | Command filter blocks |
+| **Audit trail** | None | Full execution transparency |
+
+---
+
+## Key Features
+
+### 6-Layer Security Architecture
+
+```
+Request → WAF → Docker → Bubblewrap+UID → PathValidator → CommandFilter → SecureOutput
+```
+
+Each layer operates independently. Even if one is bypassed, others contain the breach.
+
+- **Bubblewrap sandbox** — Process namespace isolation, filtered `/proc`, seccomp profiles
+- **UID isolation** — Each user gets unique Linux UID; kernel enforces separation
+- **Command filtering** — 140+ patterns block `rm -rf`, `sudo`, `chmod 777`, `docker exec`, path traversal
+- **Secrets scanning** — API keys and tokens auto-redacted in file previews
+
+### Multi-Tenant Architecture
+
+- JWT authentication with isolated workspaces
+- Per-user API keys (sandboxed, not visible to other users)
+- Separate session history and file storage
+- Teams share one deployment with complete isolation
+
+### Web UI + REST API
+
+- Visual file explorer with drag-and-drop upload
+- Real-time SSE event streaming
+- Human-in-the-loop approval for sensitive operations
+- Full audit trail—drill into every tool call, command, and exit code
+
+### Document Processing
+
+PDF (with OCR), Office (DOCX/XLSX/PPTX), archives (ZIP/TAR/7z), and tabular data (CSV/Excel/Parquet).
+
+### Read-Only External Mounts
+
+Grant agents read-only access to host files via OS-enforced `:ro` mounts. Source documents stay untouched.
+
+---
+
+## Use Cases
+
+| Scenario | Capability |
+|----------|------------|
+| **Server Administration** | Log analysis, config management, security audits—sandboxed |
+| **Document Processing** | Invoice extraction, report analysis, spreadsheet transformation |
+| **Business Automation** | API integrations, data pipelines, scheduled workflows |
+| **DevOps** | CI/CD assistance, infrastructure analysis, automated troubleshooting |
+
+---
+
+## Architecture
+
+![Ag3ntum UI Demo](./docs/artifacts/ag3ntum_ui.gif)
+
+**Stack:** Python 3.13 + FastAPI + React 18 + SQLite + Redis
+
+**Core SDK:** claude-agent-sdk with custom MCP tools (`mcp__ag3ntum__*`)
+
+**Deployment:** Docker Compose with configurable external mounts
 
 ---
 
 ## License
 
-**Dual-licensed:**
-
-- **AGPL-3.0** — Open source projects and personal use
+- **AGPL-3.0** — Open source and personal use
 - **Commercial License** — Proprietary applications, SaaS, enterprise
 
 **Contact:** [info@extractum.io](mailto:info@extractum.io)
@@ -194,5 +113,5 @@ See **[QUICK-START-GUIDE.md](QUICK-START-GUIDE.md)** for complete deployment ins
 ---
 
 <p align="center">
-  <strong>Claude Code can run on a server. Ag3ntum makes it safe—with 6 layers of defense and OS-enforced user isolation.</strong>
+  <strong>Run Claude Code on production servers. Ag3ntum makes it safe.</strong>
 </p>
