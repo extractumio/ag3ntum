@@ -48,6 +48,7 @@ output.yaml
 design/
 
 coverage/
+.coverage
 
 .DS_Store
 
