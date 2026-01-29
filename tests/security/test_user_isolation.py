@@ -1359,8 +1359,13 @@ class TestSessionIsolation:
         assert session_dir.exists()
         assert (session_dir / "workspace").exists()
 
-    def test_secure_file_write_creates_600_permissions(self, tmp_path: Path) -> None:
-        """secure_file_write should create files with 600 permissions."""
+    def test_secure_file_write_creates_660_permissions(self, tmp_path: Path) -> None:
+        """secure_file_write should create files with 660 permissions.
+
+        Note: We use 0o660 (owner+group read/write) instead of 0o600 to allow
+        sandbox access. The sandbox runs as a different UID that shares the
+        same group, enabling file access within the session.
+        """
         from src.core.sessions import secure_file_write
 
         test_file = tmp_path / "test.txt"
@@ -1368,12 +1373,17 @@ class TestSessionIsolation:
         secure_file_write(test_file, "test content")
 
         assert test_file.exists()
-        # Check permissions (600 = owner read/write)
+        # Check permissions (660 = owner+group read/write)
         mode = test_file.stat().st_mode & 0o777
-        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+        assert mode == 0o660, f"Expected 0o660, got {oct(mode)}"
 
     def test_ensure_secure_session_files_hardens_permissions(self, tmp_path: Path) -> None:
-        """ensure_secure_session_files should harden all session files."""
+        """ensure_secure_session_files should harden all session files.
+
+        Note: We use 0o770 for directories and 0o660 for files to allow sandbox
+        access. The sandbox runs as a different UID that shares the same group,
+        enabling file access within the session.
+        """
         from src.core.sessions import ensure_secure_session_files
 
         # Create a session directory structure
@@ -1390,17 +1400,17 @@ class TestSessionIsolation:
         # Harden permissions
         ensure_secure_session_files(session_dir)
 
-        # Verify session directory is 700
+        # Verify session directory is 770 (owner+group rwx)
         mode = session_dir.stat().st_mode & 0o777
-        assert mode == 0o700, f"Session dir: expected 0o700, got {oct(mode)}"
+        assert mode == 0o770, f"Session dir: expected 0o770, got {oct(mode)}"
 
-        # Verify agent.jsonl is 600
+        # Verify agent.jsonl is 660 (owner+group rw)
         mode = (session_dir / "agent.jsonl").stat().st_mode & 0o777
-        assert mode == 0o600, f"agent.jsonl: expected 0o600, got {oct(mode)}"
+        assert mode == 0o660, f"agent.jsonl: expected 0o660, got {oct(mode)}"
 
-        # Verify workspace file is 600
+        # Verify workspace file is 660 (owner+group rw)
         mode = (session_dir / "workspace" / "file.txt").stat().st_mode & 0o777
-        assert mode == 0o600, f"workspace file: expected 0o600, got {oct(mode)}"
+        assert mode == 0o660, f"workspace file: expected 0o660, got {oct(mode)}"
 
 
 # =============================================================================
@@ -1419,20 +1429,25 @@ class TestPermissionModelConstants:
         """Permission modes should be defined correctly.
 
         Security Model:
-        - 700: Owner only (rwx------) - directories
-        - 600: Owner only (rw-------) - files
+        - 770: Owner+group (rwxrwx---) - directories (allows sandbox group access)
+        - 660: Owner+group (rw-rw----) - files (allows sandbox group access)
         - 755: World executable (rwxr-xr-x) - venv
+
+        Note: We use group permissions to allow the sandbox (running as a different
+        UID but same GID) to access session files and directories.
         """
         # These are the expected permission modes
-        DIR_MODE = 0o700   # Owner only
-        FILE_MODE = 0o600  # Owner only
+        DIR_MODE = 0o770   # Owner + group
+        FILE_MODE = 0o660  # Owner + group
         VENV_MODE = 0o755  # World executable
 
-        # Verify they block group and others
-        assert (DIR_MODE & 0o070) == 0, "700 should block group"
-        assert (DIR_MODE & 0o007) == 0, "700 should block others"
-        assert (FILE_MODE & 0o070) == 0, "600 should block group"
-        assert (FILE_MODE & 0o007) == 0, "600 should block others"
+        # Verify directories allow group access but block others
+        assert (DIR_MODE & 0o070) == 0o070, "770 should allow group"
+        assert (DIR_MODE & 0o007) == 0, "770 should block others"
+
+        # Verify files allow group access but block others
+        assert (FILE_MODE & 0o060) == 0o060, "660 should allow group rw"
+        assert (FILE_MODE & 0o007) == 0, "660 should block others"
 
     def test_uid_ranges_for_isolation(self) -> None:
         """UID ranges should maintain isolation between API and users."""

@@ -222,20 +222,25 @@ class SandboxExecutor:
         cmd = config.bwrap_path.split()
 
         # In Docker, we need to be careful about namespace operations
-        # Use --unshare-user --unshare-pid for basic isolation
-        # but avoid --unshare-all which requires pivot_root
+        # Use --unshare-pid for basic isolation but avoid --unshare-all which requires pivot_root
+        #
+        # IMPORTANT: Do NOT use --unshare-user when running via sudo bwrap!
+        # --unshare-user creates a new user namespace where:
+        # 1. Even root inside the namespace can't access host files owned by other UIDs
+        # 2. The UID mapping isn't set up, so host UIDs appear as 65534 (nobody)
+        # 3. This causes "Permission denied" when trying to bind-mount the workspace
+        #
+        # When using "sudo bwrap", the sudo provides root privileges to access any file,
+        # and --uid/--gid flags work directly without needing a user namespace.
         if nested_container:
-            # --unshare-user is required when using --uid/--gid flags
-            # It creates a new user namespace where we can set custom UIDs
-            if self._linux_uid is not None or self._linux_gid is not None:
+            # Check if we're using sudo - don't use --unshare-user with sudo
+            is_using_sudo = config.bwrap_path.startswith("sudo")
+
+            # Only use --unshare-user if NOT using sudo and NOT setting custom UID/GID
+            # When using sudo with --uid/--gid, the privilege drop happens via bwrap flags
+            if not is_using_sudo and self._linux_uid is None and self._linux_gid is None:
                 cmd.append("--unshare-user")
-                # Map the user's UID/GID so workspace files appear with correct ownership
-                # Without this, host UIDs appear as 65534 (overflow) inside the namespace
-                # Format: --uid-map <inside_uid> <outside_uid> <count>
-                #cmd.extend(["--uid-map", str(self._linux_uid), str(self._linux_uid), "1"])
-                # Commented out since it's not yet supported in bwrap
-                #if self._linux_gid is not None:
-                #    cmd.extend(["--gid-map", str(self._linux_gid), str(self._linux_gid), "1"])
+
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",

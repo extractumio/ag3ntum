@@ -9,10 +9,11 @@ Each session has an isolated workspace with:
 NOTE: All session metadata is stored in SQLite database (Session model),
 NOT in files. This module only manages directory structure.
 
-SECURITY: Session directories are created with strict isolation:
-- Permissions: 700 (owner only, no group access)
-- Only the owner (sandboxed process running as user's UID) can access
-- Even the API cannot access session directories after creation
+SECURITY: Session directories use shared access model:
+- Permissions: 770 (owner and group can read/write/execute)
+- Owner: sandbox user's UID (for files created by agent)
+- Group: same as owner UID (sandbox user's primary group)
+- This allows both API (via sudo bwrap root access) and sandbox to access
 - PathValidator provides application-level cross-session isolation
 """
 import logging
@@ -61,22 +62,24 @@ class SessionManager:
         owner_uid: Optional[int] = None,
     ) -> str:
         """
-        Create the directory structure for a new session with STRICT isolation.
+        Create the directory structure for a new session with shared access.
 
-        Session directories have 700 permissions - only the owner can access.
-        This provides true session isolation even from the API after creation.
+        Session directories use 770 permissions to allow both API (via sudo bwrap)
+        and sandbox processes to access files. Cross-session isolation is enforced
+        at the application level by PathValidator.
 
         Security Properties:
-        - Permissions: 700 (owner only, no group access)
-        - API cannot access session directories after creation
-        - Only the sandboxed process (running as owner_uid) can access
-        - Other users have no access (mode 700)
-        - Other sessions of same user have no access (separate directories)
+        - Permissions: 770 (owner and group can read/write/execute)
+        - Owner: sandbox user's UID (owner_uid) if provided
+        - Group: same as owner UID (sandbox user's primary group)
+        - API accesses via sudo bwrap (root), sandbox runs as owner_uid
+        - Cross-user isolation: PathValidator blocks cross-user access
+        - Cross-session isolation: separate directories + PathValidator
 
         Args:
             session_id: Optional session ID. If None, generates one.
-            owner_uid: UID to set as owner (for permission isolation).
-                       If None, uses current process owner (less secure).
+            owner_uid: UID to set as owner (for sandbox access).
+                       If None, directories owned by API process.
 
         Returns:
             The session ID (generated or provided).
@@ -86,8 +89,8 @@ class SessionManager:
 
         session_dir = self.get_session_dir(session_id)
 
-        # Create session directory with 700 permissions (owner only)
-        # Session directories have strict owner-only access for true isolation
+        # Create session directory with 770 permissions (owner + group access)
+        # This allows both API (via sudo) and sandbox (as owner) to access
         self._create_session_directory_basic(session_dir, owner_uid)
 
         logger.info(f"Created session directory: {session_id} (owner_uid={owner_uid})")
@@ -99,24 +102,39 @@ class SessionManager:
         owner_uid: Optional[int] = None,
     ) -> None:
         """
-        Create session directory with 700 permissions (owner only).
+        Create session directory with 770 permissions (owner + group access).
+
+        The 770 permissions allow:
+        - Owner (sandbox user): full read/write/execute access
+        - Group (sandbox user's group): full read/write/execute access
+        - API process: accesses via sudo bwrap (runs as root initially)
+
+        This is necessary because:
+        - API creates directories but can't chown without CAP_CHOWN
+        - Sandbox (bubblewrap) uses sudo to gain root for file access
+        - Files created by sandbox commands are owned by sandbox user
+        - API needs to read these files for File Browser, etc.
 
         Args:
             session_dir: Path to the session directory
-            owner_uid: Optional UID to set as owner
+            owner_uid: Optional UID to set as owner (also used as GID)
         """
         session_dir.mkdir(parents=True, exist_ok=True)
-        session_dir.chmod(0o700)
+        session_dir.chmod(0o770)
 
         workspace = session_dir / "workspace"
         workspace.mkdir(exist_ok=True)
-        workspace.chmod(0o700)
+        workspace.chmod(0o770)
 
         if owner_uid is not None:
             try:
+                # Set both owner and group to the sandbox user's UID
+                # (In Unix, GID often equals UID for user's primary group)
                 os.chown(session_dir, owner_uid, owner_uid)
                 os.chown(workspace, owner_uid, owner_uid)
             except OSError as e:
+                # chown may fail if API doesn't have CAP_CHOWN
+                # This is OK - sudo bwrap will still have root access
                 logger.warning(f"Could not set ownership to {owner_uid}: {e}")
 
     def get_session_dir(self, session_id: str) -> Path:
@@ -430,24 +448,24 @@ def secure_file_write(
     file_path: Path,
     content: bytes | str,
     owner_uid: Optional[int] = None,
-    mode: int = 0o600,
+    mode: int = 0o660,
 ) -> None:
     """
-    Write a file with secure permissions (owner-only access).
+    Write a file with shared access permissions.
 
-    This function is used for writing sensitive files in session directories
-    (like agent.jsonl) with strict permissions that only allow owner access.
+    This function is used for writing files in session directories
+    (like agent.jsonl) with permissions that allow both owner and group access.
 
     Security Properties:
-    - File permissions: 600 by default (owner read/write only)
-    - No group or world access
-    - Ownership: Set to owner_uid if provided
+    - File permissions: 660 by default (owner + group read/write)
+    - No world access
+    - Ownership: Set to owner_uid if provided (both UID and GID)
 
     Args:
         file_path: Path to write to
         content: Content to write (bytes or str)
         owner_uid: UID to set as owner (optional)
-        mode: File permission mode (default: 600 = owner read/write only)
+        mode: File permission mode (default: 660 = owner + group read/write)
     """
     # Write content
     if isinstance(content, str):
@@ -458,14 +476,12 @@ def secure_file_write(
     # Set permissions BEFORE ownership (in case we lose access after chown)
     file_path.chmod(mode)
 
-    # Set ownership if provided
+    # Set ownership if provided (both owner and group to sandbox user)
     if owner_uid is not None:
         try:
             os.chown(file_path, owner_uid, owner_uid)
         except OSError as e:
             logger.warning(f"Could not set ownership of {file_path} to {owner_uid}: {e}")
-
-    # Files in sessions are owner-only (no group access)
 
 
 def _secure_path(path: Path, mode: int, owner_uid: Optional[int]) -> None:
@@ -483,15 +499,16 @@ def ensure_secure_session_files(
     owner_uid: Optional[int] = None,
 ) -> None:
     """
-    Ensure all session files have secure permissions after agent run.
+    Ensure all session files have appropriate permissions after agent run.
 
-    Session files have strict owner-only access for true isolation.
-    This is called after agent execution to harden any files created
-    during the run (which may have default umask permissions).
+    Session files use shared access permissions (770/660) to allow both
+    API and sandbox processes to access them. Cross-session isolation
+    is enforced at the application level by PathValidator.
 
     Security Properties:
-    - Directories: 700 (owner only)
-    - Files: 600 (owner read/write only)
+    - Directories: 770 (owner + group)
+    - Files: 660 (owner + group read/write)
+    - Sensitive files (agent.jsonl, .claude.json): 660
 
     Args:
         session_dir: Path to the session directory
@@ -500,22 +517,22 @@ def ensure_secure_session_files(
     if not session_dir.exists():
         return
 
-    # Secure session directory and sensitive files
-    _secure_path(session_dir, 0o700, owner_uid)
+    # Secure session directory with shared access
+    _secure_path(session_dir, 0o770, owner_uid)
 
-    # Secure sensitive root files
+    # Secure sensitive root files (still need group read for API access)
     for sensitive_file in ["agent.jsonl", ".claude.json"]:
         file_path = session_dir / sensitive_file
         if file_path.exists():
-            _secure_path(file_path, 0o600, owner_uid)
+            _secure_path(file_path, 0o660, owner_uid)
 
-    # Recursively secure workspace directory
+    # Recursively secure workspace directory with shared access
     workspace = session_dir / "workspace"
     if workspace.exists():
         for root, dirs, files in os.walk(workspace):
             root_path = Path(root)
-            _secure_path(root_path, 0o700, owner_uid)
+            _secure_path(root_path, 0o770, owner_uid)
             for f in files:
-                _secure_path(root_path / f, 0o600, owner_uid)
+                _secure_path(root_path / f, 0o660, owner_uid)
 
     logger.debug(f"Secured session files: {session_dir} (owner_uid={owner_uid})")

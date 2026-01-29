@@ -750,7 +750,7 @@ class TestRealUserCreation:
             # (path, expected_mode, description)
             (user_home, 0o750, "Home should allow group read+traverse for API"),
             (user_home / "sessions", 0o770, "Sessions allows group rwx for API to create session dirs"),
-            (user_home / "ag3ntum", 0o700, "ag3ntum should be user-only"),
+            (user_home / "ag3ntum", 0o750, "ag3ntum allows group traverse to access persistent/"),
             (user_home / "venv", 0o755, "venv should be world-readable"),
         ]
 
@@ -992,12 +992,13 @@ class TestUserIsolation:
         """
         user1, user2 = two_isolated_users
 
-        # === Test 1: ag3ntum directory is owner-only (700) ===
+        # === Test 1: ag3ntum directory has mode 750 (owner rwx, group rx) ===
+        # Group rx access is needed for ag3ntum group to traverse into persistent/
         user2_ag3ntum = Path(f"/users/{user2.username}/ag3ntum")
         ag3ntum_mode = stat.S_IMODE(user2_ag3ntum.stat().st_mode)
 
-        assert ag3ntum_mode == 0o700, (
-            f"ag3ntum should have mode 700 (owner-only), but has {oct(ag3ntum_mode)}"
+        assert ag3ntum_mode == 0o750, (
+            f"ag3ntum should have mode 750 (group traverse for persistent/), but has {oct(ag3ntum_mode)}"
         )
 
         # Check ownership - should be owned by user2, not user1
@@ -1010,13 +1011,10 @@ class TestUserIsolation:
             "ag3ntum is owned by user1, which would allow access"
         )
 
-        # === Test 2: No group/other access on ag3ntum ===
-        has_group_access = bool(ag3ntum_mode & 0o070)
+        # === Test 2: No other access on ag3ntum (group access is allowed for API) ===
+        # Group rx is needed for ag3ntum group (API) to traverse to persistent/
         has_other_access = bool(ag3ntum_mode & 0o007)
 
-        assert not has_group_access, (
-            f"ag3ntum should not have group access, but has mode {oct(ag3ntum_mode)}"
-        )
         assert not has_other_access, (
             f"ag3ntum should not have other access, but has mode {oct(ag3ntum_mode)}"
         )
