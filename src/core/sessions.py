@@ -170,7 +170,9 @@ class SessionManager:
         - ./external/rw/{name} -> /mounts/rw/{name} (global read-write mounts)
         - ./external/user-ro/{name} -> {host_path} (per-user read-only mounts)
         - ./external/user-rw/{name} -> {host_path} (per-user read-write mounts)
-        - ./external/persistent -> /users/{username}/ag3ntum/persistent
+
+        Also creates persistent storage symlink:
+        - ./persistent -> /persistent (sandbox mount target)
 
         This allows both the File Browser UI and agent tools to see the same files.
 
@@ -322,39 +324,44 @@ class SessionManager:
         except Exception as e:
             logger.warning(f"Failed to load per-user mounts: {e}")
 
-        # Create persistent storage symlink
-        # The persistent directory is at {user_home}/ag3ntum/persistent
-        # where user_home is derived from the sessions directory (sessions_dir.parent)
-        # This is created during user registration, but we ensure it exists here too
-        persistent_link = external_dir / "persistent"
+        # Create persistent storage symlink at workspace root (not under external/)
+        # The persistent directory is at {user_home}/ag3ntum/persistent on the host,
+        # but inside bwrap sandbox it's mounted at /persistent (see permissions.yaml).
+        # The symlink must point to /persistent so that commands running INSIDE bwrap
+        # can access it correctly. Python file tools (Read/Write/Edit) run OUTSIDE bwrap
+        # and use PathValidator to translate paths.
+        persistent_link = workspace / "persistent"
         user_home = self._sessions_dir.parent  # e.g., /users/{username}/sessions -> /users/{username}
-        persistent_dir = user_home / "ag3ntum" / "persistent"
+        persistent_dir_host = user_home / "ag3ntum" / "persistent"  # Host path (for existence check)
+        persistent_dir_sandbox = Path("/persistent")  # Sandbox mount target (for symlink)
 
-        # Ensure the persistent directory exists
+        # Ensure the persistent directory exists on the host
         # FAIL FAST: If we can't create it, the session should fail - not silently skip
-        if not persistent_dir.exists():
+        if not persistent_dir_host.exists():
             try:
-                persistent_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Created persistent storage directory: {persistent_dir}")
+                persistent_dir_host.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created persistent storage directory: {persistent_dir_host}")
             except OSError as e:
                 raise SessionError(
-                    f"Failed to create persistent storage directory {persistent_dir}: {e}. "
+                    f"Failed to create persistent storage directory {persistent_dir_host}: {e}. "
                     "This directory is required for bwrap sandbox mounts."
                 )
 
-        # Create or fix the symlink
+        # Create or fix the symlink (points to sandbox mount target /persistent)
         try:
             if persistent_link.is_symlink():
-                if not persistent_link.exists():
-                    # Broken symlink - remove and recreate
+                current_target = persistent_link.readlink()
+                # Check if symlink points to the correct sandbox target
+                if current_target != persistent_dir_sandbox:
+                    # Wrong target (e.g., old host path) - recreate with correct target
                     persistent_link.unlink()
-                    persistent_link.symlink_to(persistent_dir)
-                    logger.debug(f"Fixed broken persistent symlink: {persistent_link}")
-                # else: symlink exists and is valid, nothing to do
+                    persistent_link.symlink_to(persistent_dir_sandbox)
+                    logger.debug(f"Fixed persistent symlink: {persistent_link} -> {persistent_dir_sandbox}")
+                # else: symlink exists and points to correct target, nothing to do
             elif not persistent_link.exists():
-                # No symlink - create it
-                persistent_link.symlink_to(persistent_dir)
-                logger.debug(f"Created persistent symlink: {persistent_link} -> {persistent_dir}")
+                # No symlink - create it pointing to sandbox mount target
+                persistent_link.symlink_to(persistent_dir_sandbox)
+                logger.debug(f"Created persistent symlink: {persistent_link} -> {persistent_dir_sandbox}")
         except OSError as e:
             raise SessionError(
                 f"Failed to create persistent storage symlink: {e}"

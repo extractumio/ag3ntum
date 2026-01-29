@@ -232,9 +232,10 @@ class SandboxExecutor:
                 # Map the user's UID/GID so workspace files appear with correct ownership
                 # Without this, host UIDs appear as 65534 (overflow) inside the namespace
                 # Format: --uid-map <inside_uid> <outside_uid> <count>
-                cmd.extend(["--uid-map", str(self._linux_uid), str(self._linux_uid), "1"])
-                if self._linux_gid is not None:
-                    cmd.extend(["--gid-map", str(self._linux_gid), str(self._linux_gid), "1"])
+                #cmd.extend(["--uid-map", str(self._linux_uid), str(self._linux_uid), "1"])
+                # Commented out since it's not yet supported in bwrap
+                #if self._linux_gid is not None:
+                #    cmd.extend(["--gid-map", str(self._linux_gid), str(self._linux_gid), "1"])
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",

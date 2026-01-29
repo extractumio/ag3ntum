@@ -19,7 +19,7 @@
 # Agent sees mounts at:
 #   - Read-only:  ./external/ro/{name}/
 #   - Read-write: ./external/rw/{name}/
-#   - Persistent: ./external/persistent/ (always per-user, auto-configured)
+#   - Persistent: ./persistent/ (always per-user, auto-configured)
 # =============================================================================
 
 # Global mounts - available to ALL users

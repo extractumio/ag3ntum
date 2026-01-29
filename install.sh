@@ -577,13 +577,28 @@ anthropic_api_key: ${ANTHROPIC_API_KEY}
 fernet_key: ${fernet_key}
 EOF
 
-    # Secure the file immediately
-    chmod 600 config/secrets.yaml
+    # Secure the file - owned by API user (UID 45045) with mode 600
+    # On Linux, the API container runs as UID 45045 and needs to read this file
+    local os_type
+    os_type="$(uname -s)"
+
+    if [[ "${os_type}" == "Darwin" ]] || [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
+        # macOS/Windows: Docker Desktop handles permissions - just secure the file
+        chmod 600 config/secrets.yaml
+    else
+        # Linux: Set ownership to API user (UID 45045) so container can read it
+        if [[ "$(id -u)" == "0" ]]; then
+            chown 45045:45045 config/secrets.yaml
+        else
+            sudo chown 45045:45045 config/secrets.yaml
+        fi
+        chmod 600 config/secrets.yaml
+    fi
 
     # Clear the variable from memory
     unset ANTHROPIC_API_KEY
 
-    print_success "secrets.yaml created (permissions: 600)"
+    print_success "secrets.yaml created (permissions: 600, owner: 45045)"
 }
 
 generate_api_yaml() {
@@ -834,7 +849,7 @@ generate_configuration() {
 # =============================================================================
 
 run_build() {
-    print_step "Building Ag3ntum"
+    print_step "Building AG3NTUM"
 
     # Ensure run.sh is executable
     if [[ ! -x "./run.sh" ]]; then
@@ -914,7 +929,7 @@ show_completion() {
 |_ _|_ __  ___| |_ __ _| | | __ _| |_(_) ___  _ __       / ___|___  _ __ ___  _ __ | | ___| |_ ___| |
  | || '_ \/ __| __/ _` | | |/ _` | __| |/ _ \| '_ \     | |   / _ \| '_ ` _ \| '_ \| |/ _ \ __/ _ \ |
  | || | | \__ \ || (_| | | | (_| | |_| | (_) | | | |    | |__| (_) | | | | | | |_) | |  __/ ||  __/_|
-|___|_| |_|___/\__\__,_|_|_|\__,_|\__|_|\___/|_| |_|    \____\___/|_| |_| |_| .__/|_|\___|\__\___(_)
+|___|_| |_|___/\__\__,_|_|_|\__,_|\__|_|\___/|_| |_|     \____\___/|_| |_| |_| .__/|_|\___|\__\___(_)
                                                                             |_|
 EOF
     printf "${NC}"

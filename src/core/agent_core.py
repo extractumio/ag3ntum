@@ -770,7 +770,7 @@ class ClaudeAgent:
             # External mount paths (Docker container paths)
             # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*
             # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
-            # Agent sees: /workspace/external/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
+            # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
             external_ro_base = Path("/mounts/ro")
             external_rw_base = Path("/mounts/rw")
             persistent_path = Path(f"/users/{username}/ag3ntum/persistent") if username else None

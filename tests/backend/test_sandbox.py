@@ -666,7 +666,7 @@ class TestOptionalMounts:
                 ),
                 "persistent": SandboxMount(
                     source="/nonexistent/persistent/path",
-                    target="/workspace/external/persistent",
+                    target="/persistent",
                     mode="rw",
                     optional=True,
                 ),
@@ -723,7 +723,7 @@ class TestOptionalMounts:
                 ),
                 "persistent": SandboxMount(
                     source=str(persistent),
-                    target="/workspace/external/persistent",
+                    target="/persistent",
                     mode="rw",
                     optional=True,
                 ),
@@ -736,7 +736,7 @@ class TestOptionalMounts:
 
         # When the path exists, it SHOULD be included
         assert str(persistent) in cmd_str
-        assert "/workspace/external/persistent" in cmd_str
+        assert "/persistent" in cmd_str
 
     def test_validate_mount_sources_excludes_optional_missing(
         self, workspace: Path, tmp_path: Path
@@ -822,8 +822,9 @@ class TestWorkspaceAndMountAccess:
         persistent.mkdir(parents=True)
         (persistent / "cache.json").write_text('{"cached": true}')
 
-        # Symlink for persistent inside workspace
-        (external / "persistent").symlink_to(persistent)
+        # Symlink for persistent at workspace root (not under external/)
+        # Agent accesses as ./persistent/ or /persistent/ (inside bwrap)
+        (workspace / "persistent").symlink_to(persistent)
 
         return {
             "workspace": workspace,
@@ -923,7 +924,7 @@ class TestWorkspaceAndMountAccess:
     ) -> None:
         """Agent can read from persistent storage."""
         result = validator.validate_path(
-            "/workspace/external/persistent/cache.json", "read"
+            "/persistent/cache.json", "read"
         )
         assert result.normalized.exists()
         assert result.is_readonly is False
@@ -933,7 +934,7 @@ class TestWorkspaceAndMountAccess:
     ) -> None:
         """Agent can write to persistent storage."""
         result = validator.validate_path(
-            "/workspace/external/persistent/new_cache.json", "write"
+            "/persistent/new_cache.json", "write"
         )
         assert result.is_readonly is False
 

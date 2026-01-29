@@ -28,11 +28,11 @@ These folders allow both reading and writing. Files you create or modify here wi
 {% endif %}
 
 {% if external_mounts.persistent %}
-## Persistent Storage (`./external/persistent/`)
+## Persistent Storage (`./persistent/`)
 
 This folder persists across sessions. Files you save here will be available in future sessions.
 
-**IMPORTANT:** When the user asks to save something "permanently", "persistently", "across sessions", or "for later use", **always save to `./external/persistent/`**.
+**IMPORTANT:** When the user asks to save something "permanently", "persistently", "across sessions", or "for later use", **always save to `./persistent/`**.
 
 **Use for:**
 - Files the user explicitly wants to keep permanently
@@ -68,7 +68,7 @@ These folders are mounted specifically for your user account, read-write:
 
 1. **Read-only access**: You cannot write to `./external/ro/` or `./external/user-ro/` paths. Attempts will fail with "read-only external mount" error.
 2. **Relative paths**: Access mounts using relative paths like `./external/ro/downloads/file.txt`.
-3. **File changes**: Changes to writable mounts and `./external/persistent/` are immediately visible to the host system.
+3. **File changes**: Changes to writable mounts and `./persistent/` are immediately visible to the host system.
 
 {% endif %}
 

@@ -170,7 +170,7 @@ class TestExternalMountNormalization:
         self, validator: Ag3ntumPathValidator, temp_mounts: dict[str, Path]
     ) -> None:
         """Persistent storage path is normalized correctly."""
-        result = validator._normalize_path("/workspace/external/persistent/cache.json")
+        result = validator._normalize_path("/workspace/persistent/cache.json")
         expected = temp_mounts["persistent"] / "cache.json"
         assert result == expected
 
@@ -259,7 +259,7 @@ class TestExternalMountValidation:
     ) -> None:
         """Writing to persistent storage should succeed."""
         result = validator.validate_path(
-            "/workspace/external/persistent/cache.json", "write"
+            "/workspace/persistent/cache.json", "write"
         )
         assert result.is_readonly is False
 
@@ -358,7 +358,7 @@ class TestMountTypeDetection:
         """Persistent storage path is detected correctly."""
         from src.api.routes.files import get_mount_info
 
-        is_external, is_readonly, mount_type = get_mount_info("external/persistent/cache.json")
+        is_external, is_readonly, mount_type = get_mount_info("persistent/cache.json")
         assert is_external is True
         assert is_readonly is False
         assert mount_type == "persistent"
@@ -459,7 +459,7 @@ class TestSandboxMountConfig:
 
         mount = SandboxMount(
             source="/users/{username}/ag3ntum/persistent",
-            target="/workspace/external/persistent",
+            target="/persistent",  # Mounted at /persistent inside sandbox
             mode="rw",
             optional=True,
         )

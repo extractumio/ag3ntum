@@ -39,7 +39,7 @@ Agent provides: /workspace/file.txt (sandbox path)
 Validator returns: /users/greg/sessions/xxx/workspace/file.txt (Docker path)
 
 For external mounts:
-- /workspace/external/persistent/* → /users/{user}/ag3ntum/persistent/*
+- /workspace/persistent/* → /users/{user}/ag3ntum/persistent/*
 - /workspace/external/ro/* → /mounts/ro/*
 - /workspace/external/rw/* → /mounts/rw/*
 """
@@ -263,7 +263,7 @@ class PathValidatorConfig(BaseModel):
     # These are Docker container paths (not bwrap paths).
     # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*
     # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
-    # Agent sees: /workspace/external/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
+    # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
 
     external_ro_base: Path | None = Field(
         default=None,
@@ -362,7 +362,7 @@ class Ag3ntumPathValidator:
         self.external_ro = config.external_ro_base.resolve() if config.external_ro_base else None
         # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
         self.external_rw = config.external_rw_base.resolve() if config.external_rw_base else None
-        # Agent sees: /workspace/external/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
+        # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
         self.persistent = config.persistent_path.resolve() if config.persistent_path else None
 
         # Per-user mount paths (resolved at session start)
@@ -649,8 +649,9 @@ class Ag3ntumPathValidator:
         External mount paths are translated as:
         - /workspace/external/ro/{name}/file -> /mounts/ro/{name}/file
         - /workspace/external/rw/{name}/file -> /mounts/rw/{name}/file
-        - /workspace/external/persistent/file -> /users/{username}/ag3ntum/persistent/file
+        - /workspace/persistent/file -> /users/{username}/ag3ntum/persistent/file
         - ./external/ro/{name}/file -> same translations
+        - ./persistent/file -> same translation
 
         This translation is critical because the Python file tools run OUTSIDE bwrap
         and need the real Docker filesystem paths.
@@ -658,13 +659,34 @@ class Ag3ntumPathValidator:
         p = PurePosixPath(path)
         path_str = str(p)
 
-        # First, normalize relative paths that reference external mounts
+        # First, normalize relative paths that reference external mounts or persistent
         if not p.is_absolute():
-            # Check if it's a relative external path like ./external/ro/...
+            # Check if it's a relative external path like ./external/ro/... or ./persistent/...
             if path_str.startswith("./external/") or path_str.startswith("external/"):
                 # Convert to absolute bwrap-style path
                 path_str = "/workspace/" + path_str.lstrip("./")
                 p = PurePosixPath(path_str)
+            elif path_str.startswith("./persistent/") or path_str.startswith("persistent/"):
+                # Convert to absolute bwrap-style path
+                path_str = "/workspace/" + path_str.lstrip("./")
+                p = PurePosixPath(path_str)
+
+        # Handle absolute /persistent/* path (bwrap sandbox internal path)
+        # /persistent/* -> /users/{username}/ag3ntum/persistent/*
+        # This is the path format agents see inside bwrap sandbox
+        if path_str.startswith("/persistent/") or path_str == "/persistent":
+            relative = path_str[len("/persistent/"):] if path_str != "/persistent" else ""
+            return self._resolve_persistent_path(path_str, relative, path)
+
+        # Handle agent paths that reference persistent storage (at workspace root, not under external/)
+        # /workspace/persistent/* -> /users/{username}/ag3ntum/persistent/*
+        if path_str.startswith("/workspace/persistent/") or path_str == "/workspace/persistent":
+            if self.persistent:
+                relative = path_str[len("/workspace/persistent/"):] if path_str != "/workspace/persistent" else ""
+                return self._resolve_persistent_path(path_str, relative, path)
+            # Persistent not configured, treat as workspace path
+            relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
+            return (self.workspace / relative_to_workspace).resolve()
 
         # Handle agent paths that reference external mounts
         if path_str.startswith("/workspace/external/"):
@@ -759,24 +781,18 @@ class Ag3ntumPathValidator:
                         resolved = (self.workspace / relative_to_workspace).resolve()
                         return resolved
 
-            elif external_part.startswith("persistent/"):
-                # Persistent storage: /workspace/external/persistent/* -> /users/{username}/ag3ntum/persistent/*
+            elif external_part.startswith("persistent/") or external_part == "persistent":
+                # DEPRECATED: /workspace/external/persistent/* is deprecated
+                # Use /workspace/persistent/* instead (persistent is now at workspace root)
+                logger.warning(
+                    f"Deprecated path: {path}. Use ./persistent/ instead of ./external/persistent/"
+                )
                 if self.persistent:
-                    relative = external_part[11:]  # Remove "persistent/"
-                    resolved = (self.persistent / relative).resolve()
-                    # Security: verify resolved path stays within boundary
-                    if not self._is_within_boundary(resolved, self.persistent):
-                        raise PathValidationError(
-                            f"Path traversal detected: {path}",
-                            path=path,
-                            reason="PATH_TRAVERSAL: Resolved path escapes persistent storage boundary",
-                        )
-                    return resolved
-                else:
-                    # Persistent not configured, treat as workspace path
-                    relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
-                    resolved = (self.workspace / relative_to_workspace).resolve()
-                    return resolved
+                    relative = external_part[11:] if external_part != "persistent" else ""  # Remove "persistent/"
+                    return self._resolve_persistent_path(path_str, relative, path)
+                # Persistent not configured, treat as workspace path
+                relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
+                return (self.workspace / relative_to_workspace).resolve()
 
             elif external_part.startswith("user-ro/"):
                 # Per-user read-only mount: /workspace/external/user-ro/{name}/* -> real path/*
@@ -953,6 +969,38 @@ class Ag3ntumPathValidator:
             return None
         remaining = path_str[idx + len(pattern):]
         return remaining.split("/")[0] if remaining else None
+
+    def _resolve_persistent_path(self, path: str, relative: str, original_path: str) -> Path:
+        """
+        Resolve a path within persistent storage with boundary validation.
+
+        Args:
+            path: The full path being resolved (for error messages)
+            relative: The relative path within persistent storage
+            original_path: The original user-provided path (for error messages)
+
+        Returns:
+            Resolved Path within persistent storage
+
+        Raises:
+            PathValidationError: If path escapes boundary or persistent not configured
+        """
+        if not self.persistent:
+            raise PathValidationError(
+                f"Persistent storage not configured: {path}",
+                path=original_path,
+                reason="Persistent storage path not available",
+            )
+
+        resolved = (self.persistent / relative).resolve() if relative else self.persistent.resolve()
+
+        if not self._is_within_boundary(resolved, self.persistent):
+            raise PathValidationError(
+                f"Path traversal detected: {original_path}",
+                path=original_path,
+                reason="PATH_TRAVERSAL: Resolved path escapes persistent storage boundary",
+            )
+        return resolved
 
     def _is_within_boundary(self, path: Path, boundary: Path) -> bool:
         """

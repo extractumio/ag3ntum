@@ -112,7 +112,9 @@ class TestIsolatedModeUserCreation:
         isolated_mode,
     ) -> None:
         """New users in isolated mode get UIDs in 50000-60000 range."""
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
 
         assert ISOLATED_UID_MIN <= uid <= ISOLATED_UID_MAX, (
             f"UID {uid} should be in isolated range [{ISOLATED_UID_MIN}, {ISOLATED_UID_MAX}]"
@@ -131,7 +133,9 @@ class TestIsolatedModeUserCreation:
         result.scalar_one_or_none.return_value = 50005
         mock_db.execute.return_value = result
 
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
 
         assert uid == 50006, f"Expected UID 50006, got {uid}"
 
@@ -148,7 +152,9 @@ class TestIsolatedModeUserCreation:
         result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = result
 
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
 
         assert uid == ISOLATED_UID_MIN, f"Expected UID {ISOLATED_UID_MIN}, got {uid}"
 
@@ -195,7 +201,9 @@ class TestDirectModeUserCreation:
         direct_mode,
     ) -> None:
         """New users in direct mode get UIDs in 1000-65533 range."""
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
 
         assert DIRECT_UID_MIN <= uid <= DIRECT_UID_MAX, (
             f"UID {uid} should be in direct range [{DIRECT_UID_MIN}, {DIRECT_UID_MAX}]"
@@ -214,7 +222,9 @@ class TestDirectModeUserCreation:
         result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = result
 
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
 
         assert uid == DIRECT_UID_MIN, f"Expected UID {DIRECT_UID_MIN}, got {uid}"
 
@@ -340,13 +350,15 @@ class TestUIDRangeExhaustion:
         isolated_mode,
     ) -> None:
         """Error when isolated UID range is exhausted."""
-        # Mock last UID is at the maximum
+        # Mock DB returns max UID in range
         result = MagicMock()
         result.scalar_one_or_none.return_value = ISOLATED_UID_MAX
         mock_db.execute.return_value = result
 
-        with pytest.raises(ValueError) as exc_info:
-            await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            with pytest.raises(ValueError) as exc_info:
+                await user_service._generate_next_uid(mock_db, UIDMode.ISOLATED)
 
         assert "exhausted" in str(exc_info.value).lower()
 
@@ -358,13 +370,15 @@ class TestUIDRangeExhaustion:
         direct_mode,
     ) -> None:
         """Error when direct UID range is exhausted."""
-        # Mock last UID is at the maximum
+        # Mock DB returns max UID in range
         result = MagicMock()
         result.scalar_one_or_none.return_value = DIRECT_UID_MAX
         mock_db.execute.return_value = result
 
-        with pytest.raises(ValueError) as exc_info:
-            await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            with pytest.raises(ValueError) as exc_info:
+                await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
 
         assert "exhausted" in str(exc_info.value).lower()
 
@@ -389,7 +403,9 @@ class TestModeSwitching:
         result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = result
 
-        uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_db, UIDMode.DIRECT)
 
         assert uid == DIRECT_UID_MIN, (
             f"Should use direct mode minimum {DIRECT_UID_MIN}, got {uid}"

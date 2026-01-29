@@ -17,18 +17,14 @@ Usage: python3 red-alert.py [--output report.txt] [--json] [--quick]
 import argparse
 import datetime
 import glob
-import grp
-import hashlib
 import json
 import os
 import platform
 import pwd
-import re
 import socket
 import stat
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 

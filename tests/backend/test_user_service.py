@@ -101,7 +101,9 @@ class TestUIDGeneration:
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
 
-        uid = await user_service._generate_next_uid(mock_session)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_session)
         # Default isolated mode starts at 50000
         assert uid == 50000
 
@@ -113,7 +115,9 @@ class TestUIDGeneration:
         mock_result.scalar_one_or_none.return_value = 50005
         mock_session.execute.return_value = mock_result
 
-        uid = await user_service._generate_next_uid(mock_session)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_session)
         assert uid == 50006
 
     @pytest.mark.asyncio
@@ -129,7 +133,9 @@ class TestUIDGeneration:
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
 
-        uid = await user_service._generate_next_uid(mock_session)
+        # Mock _get_system_uids_in_range to return empty set (no system users)
+        with patch.object(user_service, '_get_system_uids_in_range', return_value=set()):
+            uid = await user_service._generate_next_uid(mock_session)
         # Should start at range minimum regardless of legacy UIDs
         assert uid == 50000
 
