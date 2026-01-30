@@ -22,6 +22,211 @@
 #   - Persistent: ./persistent/ (always per-user, auto-configured)
 # =============================================================================
 
+# =============================================================================
+# MOUNT RECORD SYNTAX
+# =============================================================================
+#
+# Each mount record is a YAML list item with the following fields:
+#
+#   - name: <string>           # REQUIRED - Mount name (alphanum, dash, underscore)
+#     host_path: <string>      # REQUIRED - Absolute path on host filesystem
+#     description: <string>    # OPTIONAL - Human-readable description
+#     optional: <bool>         # OPTIONAL - Skip if path missing (default: false)
+#     users: [<list>]          # REQUIRED for per_user - List of usernames or ["*"]
+#
+# YAML INDENTATION RULES:
+#   - List items start with "- " (dash + space)
+#   - Properties must align 2 spaces after the dash
+#   - Use spaces, NOT tabs
+#
+# CORRECT syntax:
+#   ro:
+#     - name: example          # ← dash + space + first property
+#       host_path: /path       # ← 2 spaces + property (aligns with 'name')
+#       description: "Text"    # ← 2 spaces + property (aligns with 'name')
+#
+# WRONG syntax (common mistakes):
+#   ro:
+#     - name: example
+#     host_path: /path         # ✗ WRONG: not indented, not part of list item
+#
+#   ro:
+#      - name: example
+#        host_path: /path      # ✗ WRONG: inconsistent indentation (3 spaces)
+#
+#   ro:
+#     -name: example           # ✗ WRONG: missing space after dash
+#
+# =============================================================================
+
+# =============================================================================
+# TYPICAL USE CASES
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CASE 1: Global read-only mount (available to ALL users, cannot modify)
+# -----------------------------------------------------------------------------
+# Use for: shared datasets, documentation, reference materials
+#
+# global:
+#   ro:
+#     - name: datasets
+#       host_path: /data/ml-datasets
+#       description: "Shared ML training datasets"
+#
+# Agent path: ./external/ro/datasets/
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 2: Global read-write mount (available to ALL users, can modify)
+# -----------------------------------------------------------------------------
+# Use for: shared output directories, collaborative workspaces
+#
+# global:
+#   rw:
+#     - name: shared-output
+#       host_path: /data/shared-output
+#       description: "Shared output directory"
+#
+# Agent path: ./external/rw/shared-output/
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 3: Optional mount (skip silently if path doesn't exist)
+# -----------------------------------------------------------------------------
+# Use for: paths that may not exist on all deployments
+#
+# global:
+#   ro:
+#     - name: optional-docs
+#       host_path: /opt/extra-docs
+#       description: "Extra documentation (if available)"
+#       optional: true         # ← Won't fail if /opt/extra-docs missing
+#
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 4: Required mount (fail if path doesn't exist)
+# -----------------------------------------------------------------------------
+# Use for: critical paths that must be present
+#
+# global:
+#   ro:
+#     - name: critical-config
+#       host_path: /etc/app-config
+#       description: "Required configuration files"
+#       optional: false        # ← Default behavior, will fail if missing
+#
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 5: Per-user mount with username placeholder
+# -----------------------------------------------------------------------------
+# Use for: user home directories, personal workspaces
+# The {username} placeholder is replaced with the actual username
+#
+# per_user:
+#   rw:
+#     - name: home
+#       host_path: /home/{username}/workspace
+#       description: "User's personal workspace"
+#       users: ["*"]           # ← Available to ALL users
+#       optional: true
+#
+# For user "alice": host_path becomes /home/alice/workspace
+# For user "bob":   host_path becomes /home/bob/workspace
+# Agent path: ./external/rw/home/
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 6: Per-user mount for specific users only
+# -----------------------------------------------------------------------------
+# Use for: restricted access to sensitive directories
+#
+# per_user:
+#   ro:
+#     - name: admin-logs
+#       host_path: /var/log/application
+#       description: "Application logs (admin access)"
+#       users: ["admin", "devops", "security"]  # ← Only these users
+#       optional: true
+#
+# Only admin, devops, security users will see this mount
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 7: Shared path for multiple specific users (no placeholder)
+# -----------------------------------------------------------------------------
+# Use for: project directories shared among team members
+#
+# per_user:
+#   rw:
+#     - name: team-project
+#       host_path: /projects/frontend    # ← Same path for all listed users
+#       description: "Frontend team project"
+#       users: ["alice", "bob", "charlie"]
+#       optional: false
+#
+# All three users access the SAME /projects/frontend directory
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 8: Multiple mounts in same category
+# -----------------------------------------------------------------------------
+# Use for: organizing multiple resources
+#
+# global:
+#   ro:
+#     - name: docs
+#       host_path: /data/documentation
+#       description: "Documentation"
+#
+#     - name: samples
+#       host_path: /data/code-samples
+#       description: "Code samples"
+#
+#     - name: assets
+#       host_path: /data/media-assets
+#       description: "Media assets"
+#       optional: true
+#
+# Agent sees: ./external/ro/docs/, ./external/ro/samples/, ./external/ro/assets/
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 9: Empty category (no mounts configured)
+# -----------------------------------------------------------------------------
+# Use for: categories you don't need but must declare
+#
+# global:
+#   ro: []                     # ← Empty list, no global read-only mounts
+#   rw: []                     # ← Empty list, no global read-write mounts
+#
+# per_user:
+#   ro: []
+#   rw: []
+#
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# CASE 10: Minimal configuration (empty mounts)
+# -----------------------------------------------------------------------------
+# Use for: deployments with no external mounts needed
+#
+# global:
+#   ro: []
+#   rw: []
+# per_user:
+#   ro: []
+#   rw: []
+#
+# -----------------------------------------------------------------------------
+
+
+# =============================================================================
+# WORKING EXAMPLE CONFIGURATION
+# =============================================================================
+
 # Global mounts - available to ALL users
 global:
   # Read-only mounts
@@ -75,12 +280,27 @@ per_user:
       optional: false
 
 # =============================================================================
+# REFERENCE
+# =============================================================================
+#
 # Reserved names (cannot be used):
 #   - persistent, ro, rw, external
+#
+# Valid name characters:
+#   - Letters (a-z, A-Z)
+#   - Numbers (0-9)
+#   - Dash (-)
+#   - Underscore (_)
 #
 # Security notes:
 #   - Paths are validated at deploy time
 #   - Symlinks are resolved and logged
 #   - Sensitive path patterns trigger warnings
 #   - Per-user paths use {username} placeholder
+#
+# Troubleshooting:
+#   - YAML syntax errors: Check indentation (2 spaces, no tabs)
+#   - Mount not visible: Check users list and optional flag
+#   - Permission denied: Verify host_path permissions match UID
+#
 # =============================================================================
