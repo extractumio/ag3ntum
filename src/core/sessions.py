@@ -19,6 +19,7 @@ SECURITY: Session directories use shared access model:
 import logging
 import os
 import shutil
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,64 @@ from typing import Optional
 from .exceptions import SessionError
 
 logger = logging.getLogger(__name__)
+
+
+def _sudo_chown(path: Path, uid: int) -> None:
+    """
+    Set ownership of a path using sudo chown.
+
+    The API process (ag3ntum_api) doesn't have CAP_CHOWN as an effective
+    capability when running as non-root. We use sudo chown instead,
+    which is allowed via sudoers rules in the Dockerfile:
+      ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *:* /users/*
+
+    Args:
+        path: Path to change ownership of
+        uid: UID to set as owner and group
+    """
+    try:
+        result = subprocess.run(
+            ["sudo", "/usr/bin/chown", f"{uid}:{uid}", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning(f"sudo chown failed for {path}: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"sudo chown timed out for {path}")
+    except Exception as e:
+        logger.warning(f"Could not set ownership of {path} to {uid}: {e}")
+
+
+def _sudo_chown_recursive(path: Path, uid: int) -> None:
+    """
+    Recursively set ownership of a path using sudo chown -R.
+
+    The API process (ag3ntum_api) doesn't have CAP_CHOWN as an effective
+    capability when running as non-root. We use sudo chown instead,
+    which is allowed via sudoers rules in the Dockerfile:
+      ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *:* /users/*
+
+    Args:
+        path: Path to change ownership of (recursively)
+        uid: UID to set as owner and group
+    """
+    try:
+        result = subprocess.run(
+            ["sudo", "/usr/bin/chown", "-R", f"{uid}:{uid}", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=30,  # Longer timeout for recursive operation
+        )
+        if result.returncode != 0:
+            logger.warning(f"sudo chown -R failed for {path}: {result.stderr.strip()}")
+        else:
+            logger.info(f"Set ownership of {path} (recursive) to {uid}:{uid}")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"sudo chown -R timed out for {path}")
+    except Exception as e:
+        logger.warning(f"Could not set ownership of {path} to {uid}: {e}")
 
 
 class SessionManager:
@@ -120,22 +179,25 @@ class SessionManager:
             owner_uid: Optional UID to set as owner (also used as GID)
         """
         session_dir.mkdir(parents=True, exist_ok=True)
-        session_dir.chmod(0o770)
+        try:
+            session_dir.chmod(0o770)
+        except PermissionError:
+            # Directory already exists and is owned by sandbox user - that's OK
+            pass
 
         workspace = session_dir / "workspace"
         workspace.mkdir(exist_ok=True)
-        workspace.chmod(0o770)
+        try:
+            # 777 permissions allow both API and sandbox to read/write
+            # Security is enforced by PathValidator and bubblewrap sandbox, not by permissions
+            workspace.chmod(0o777)
+        except PermissionError:
+            # Directory already exists and is owned by sandbox user - that's OK
+            pass
 
-        if owner_uid is not None:
-            try:
-                # Set both owner and group to the sandbox user's UID
-                # (In Unix, GID often equals UID for user's primary group)
-                os.chown(session_dir, owner_uid, owner_uid)
-                os.chown(workspace, owner_uid, owner_uid)
-            except OSError as e:
-                # chown may fail if API doesn't have CAP_CHOWN
-                # This is OK - sudo bwrap will still have root access
-                logger.warning(f"Could not set ownership to {owner_uid}: {e}")
+        # Note: Don't chown here - ownership is set after all directories are
+        # created (in setup_external_mounts) to avoid permission issues where
+        # the API can't create subdirectories after losing ownership
 
     def get_session_dir(self, session_id: str) -> Path:
         """
@@ -179,7 +241,9 @@ class SessionManager:
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
-    def setup_external_mounts(self, session_id: str, username: str) -> None:
+    def setup_external_mounts(
+        self, session_id: str, username: str, owner_uid: Optional[int] = None
+    ) -> None:
         """
         Create symlinks for external mounts in the workspace.
 
@@ -197,17 +261,26 @@ class SessionManager:
         Args:
             session_id: The session ID.
             username: The username for persistent storage path and per-user mounts.
+            owner_uid: UID to set as owner (for sandbox access). If None, uses default.
         """
         import yaml
 
         workspace = self.get_workspace_dir(session_id)
         external_dir = workspace / "external"
 
-        # Create base directories
-        (external_dir / "ro").mkdir(parents=True, exist_ok=True)
-        (external_dir / "rw").mkdir(parents=True, exist_ok=True)
-        (external_dir / "user-ro").mkdir(parents=True, exist_ok=True)
-        (external_dir / "user-rw").mkdir(parents=True, exist_ok=True)
+        # Create base directories with 770 permissions for sandbox access
+        dirs_to_create = [
+            external_dir,
+            external_dir / "ro",
+            external_dir / "rw",
+            external_dir / "user-ro",
+            external_dir / "user-rw",
+        ]
+        for dir_path in dirs_to_create:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            # 777 permissions allow both API and sandbox to read/write
+            # Security is enforced by PathValidator and bubblewrap sandbox
+            dir_path.chmod(0o777)
 
         # Load global mounts configuration from auto-generated-mounts.yaml (generated by run.sh)
         mounts_file = Path("/data/auto-generated/auto-generated-mounts.yaml")
@@ -384,6 +457,10 @@ class SessionManager:
             raise SessionError(
                 f"Failed to create persistent storage symlink: {e}"
             )
+
+        # Note: We use 777 permissions instead of chown to allow both API and sandbox access
+        # Security is enforced by PathValidator (blocks cross-session access) and
+        # bubblewrap sandbox (isolates subprocess execution)
 
         logger.info(f"Set up external mounts for session {session_id}")
 

@@ -216,7 +216,8 @@ class SessionService:
             username = sessions_dir.parent.name
 
             # Set up external mount symlinks (for File Browser UI and agent tools)
-            session_manager.setup_external_mounts(session_id, username)
+            # Pass owner_uid so directories are accessible by sandbox user
+            session_manager.setup_external_mounts(session_id, username, owner_uid=owner_uid)
 
             # Create database record (authoritative source for all metadata)
             db_session = Session(

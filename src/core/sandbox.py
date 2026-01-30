@@ -355,17 +355,44 @@ class SandboxExecutor:
                     f"from sandboxed_envs"
                 )
 
-        # Add UID/GID dropping via bwrap (instead of preexec_fn)
-        # This works because bwrap runs via sudo (configured in permissions.yaml)
-        # and can drop to the target user UID/GID
-        if self._linux_uid is not None:
-            cmd.extend(["--uid", str(self._linux_uid)])
-        if self._linux_gid is not None:
-            cmd.extend(["--gid", str(self._linux_gid)])
+        # Privilege dropping strategy depends on whether we're using sudo bwrap
+        # bwrap's --uid/--gid flags REQUIRE --unshare-user to create a user namespace.
+        # But with --unshare-user, root inside the namespace can't access host files
+        # because there's no UID mapping (host UIDs appear as nobody=65534).
+        #
+        # Solution: When using sudo bwrap:
+        # - Don't use --unshare-user (so mounts can access host files as root)
+        # - Don't use bwrap's --uid/--gid (they require --unshare-user)
+        # - Instead, wrap the command with setpriv to drop privileges AFTER mounts
+        #
+        # When NOT using sudo (development mode):
+        # - Use --unshare-user for user namespace isolation
+        # - bwrap's --uid/--gid work within the user namespace
+        is_using_sudo = config.bwrap_path.startswith("sudo")
+
+        if not is_using_sudo:
+            # Not using sudo - can use bwrap's native --uid/--gid
+            if self._linux_uid is not None:
+                cmd.extend(["--uid", str(self._linux_uid)])
+            if self._linux_gid is not None:
+                cmd.extend(["--gid", str(self._linux_gid)])
 
         cmd.extend(["--chdir", config.environment.home])
 
         cmd.append("--")
+
+        # When using sudo, wrap command with setpriv to drop privileges
+        if is_using_sudo and self._linux_uid is not None and self._linux_gid is not None:
+            # setpriv drops to target UID/GID and clears supplementary groups
+            # Use full path since PATH may not be set correctly inside sandbox
+            cmd.extend([
+                "/usr/bin/setpriv",
+                f"--reuid={self._linux_uid}",
+                f"--regid={self._linux_gid}",
+                "--clear-groups",
+                "--",
+            ])
+
         cmd.extend(list(command))
 
         return cmd

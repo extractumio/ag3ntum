@@ -314,9 +314,14 @@ class TestSandboxExecutor:
         )
         # With sudo bwrap, --unshare-user should NOT be used
         assert "--unshare-user" not in cmd
-        # But --uid and --gid should still be present
-        assert "--uid" in cmd
-        assert "--gid" in cmd
+        # bwrap's --uid/--gid require --unshare-user, so they should NOT be used
+        assert "--uid" not in cmd
+        assert "--gid" not in cmd
+        # Instead, setpriv should be used to drop privileges after bwrap setup
+        assert "/usr/bin/setpriv" in cmd
+        assert "--reuid=50000" in cmd
+        assert "--regid=50000" in cmd
+        assert "--clear-groups" in cmd
 
     def test_nested_container_no_unshare_user_with_sudo_no_uid(
         self, workspace: Path

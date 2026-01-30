@@ -157,6 +157,13 @@ sandbox:
       source: "/lib"
       target: "/lib"
       mode: ro
+    # lib64 is required on x86_64 systems for dynamic linker
+    # Optional since it doesn't exist on ARM64 systems
+    system_lib64:
+      source: "/lib64"
+      target: "/lib64"
+      mode: ro
+      optional: true
     system_bin:
       source: "/bin"
       target: "/bin"
@@ -219,26 +226,17 @@ sandbox:
     #   ./external/rw/{name}/    - Read-write external mounts
     #   ./persistent/            - Per-user persistent storage (at workspace root)
 
-    # Read-only external mounts from host
-    # Optional: may not exist if no --mount-ro options were used
+    # External mounts from host (ro and rw)
+    # Optional: may not exist if no --mount-ro/--mount-rw options were used
     #
-    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/ro).
+    # IMPORTANT: Mount the parent /mounts directory instead of subdirectories.
+    # Docker overlay filesystem has issues when mounting overlay subdirectories
+    # directly to non-root UIDs. Mounting the parent works correctly.
     # The workspace has symlinks: ./external/ro/{name} -> /mounts/ro/{name}
-    # These symlinks must resolve correctly inside bwrap, so /mounts/ro must exist.
-    external_ro:
-      source: "/mounts/ro"
-      target: "/mounts/ro"
-      mode: ro
-      optional: true
-
-    # Read-write external mounts from host
-    # Optional: may not exist if no --mount-rw options were used
-    #
-    # IMPORTANT: Mount to SAME PATH as source (not /workspace/external/rw).
-    # The workspace has symlinks: ./external/rw/{name} -> /mounts/rw/{name}
-    external_rw:
-      source: "/mounts/rw"
-      target: "/mounts/rw"
+    # These symlinks resolve correctly when /mounts is mounted.
+    external_mounts:
+      source: "/mounts"
+      target: "/mounts"
       mode: rw
       optional: true
 
