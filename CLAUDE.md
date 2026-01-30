@@ -192,6 +192,38 @@ sandboxed_envs:              # Per-user API keys (visible only in sandbox)
   OPENAI_API_KEY: "sk-..."
 ```
 
+### External Mounts Configuration (`config/external-mounts.yaml`)
+
+External mounts allow agents to access host folders. See `config/external-mounts.yaml.example` for full syntax documentation.
+
+**Two-Part System:**
+| Part | Configured In | Loaded When | Restart Required? |
+|------|---------------|-------------|-------------------|
+| Docker volume mounts | `docker-compose.override.yml` | Build time | **YES** - `./run.sh build` |
+| User authorization | `external-mounts.yaml` | Session creation | NO |
+
+**What requires `./run.sh build`:**
+- Adding/removing ANY mount (global or per_user)
+- Changing `host_path` of any mount
+
+**What's dynamic (new session only):**
+- Changing `users` list on existing mount
+- Changing `optional` flag on existing mount
+
+**How it works:**
+1. `run.sh build` creates Docker volumes at `/mounts/{ro,rw,user-ro,user-rw}/{name}`
+2. Session creation reads `mount_service.py` to check user authorization
+3. Symlinks created only if: Docker volume exists AND user is authorized
+
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `run.sh` (lines 318-374, 538-685) | Parses YAML, generates docker-compose.override.yml |
+| `scripts/parse_mounts_config.py` | YAML validation and parsing |
+| `src/services/mount_service.py` | Runtime user authorization check (mtime-cached) |
+| `src/core/sessions.py` (lines 244-465) | Creates workspace symlinks per session |
+| `data/auto-generated/auto-generated-mounts.yaml` | Manifest mapping container↔host paths |
+
 ---
 
 ## Security Architecture (6-Layer Model)
@@ -678,6 +710,35 @@ color: #7ec8d4;
 color: var(--color-cyan);
 ```
 
+### 15. External Mounts: Build vs Restart
+
+**Common mistake**: Thinking per-user mounts are fully dynamic. They're not.
+
+Both global AND per-user mounts require `./run.sh build` when adding new mounts:
+
+```yaml
+# docker-compose.override.yml (generated at build time)
+volumes:
+  - /host/path:/mounts/user-rw/name:rw  # ← Per-user mount is also a Docker volume!
+```
+
+The symlink in `sessions.py` points to `/mounts/user-rw/{name}` which must exist:
+```python
+target = Path(f"/mounts/user-rw/{name}")
+if not target.exists():
+    continue  # Mount skipped - Docker volume doesn't exist!
+```
+
+**What's actually dynamic**: Only the `users` list check (who gets symlinks to existing mounts).
+
+| Change Type | Command |
+|-------------|---------|
+| Add/remove ANY mount | `./run.sh build` |
+| Change `host_path` | `./run.sh build` |
+| Change `users` list (existing mount) | New session only |
+| Change `optional` flag (existing mount) | New session only |
+| Code changes only | `./run.sh restart` |
+
 ---
 
 ## Documentation Index
@@ -687,6 +748,7 @@ color: var(--color-cyan);
 | Architecture | `docs/current_architecture.md` | System design, component diagrams |
 | Security Layers | `docs/layers_of_security_for_filesystem.md` | 6-layer security model details |
 | Path Resolver | `docs/sandbox_path_resolver.md` | Sandbox path translation |
+| External Mounts | `../DOCUMENTS/TECHNICAL/external_mounts.md` | Mount configuration and lifecycle |
 | Web Terminal Client | `../DOCUMENTS/TECHNICAL/web_terminal_client.md` | Frontend architecture & design |
 | Debugging | `docs/how-to-debug-agent-with-ag3ntum_debug.md` | ag3ntum_debug.py usage |
 | Product Overview | `docs/product_management/01_product_overview.md` | Business summary |

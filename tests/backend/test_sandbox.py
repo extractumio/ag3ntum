@@ -282,31 +282,99 @@ class TestSandboxExecutor:
         assert "--unshare-pid" in cmd
         assert "--unshare-all" not in cmd
 
-    def test_nested_container_adds_unshare_user_when_uid_set(
-        self, basic_config: SandboxConfig
+    def test_nested_container_no_unshare_user_with_sudo_and_uid(
+        self, workspace: Path
     ) -> None:
-        """Nested container with UID adds --unshare-user (required by bwrap for --uid)."""
-        executor = SandboxExecutor(basic_config, linux_uid=50000, linux_gid=50000)
-        cmd = executor.build_bwrap_command(
-            ["echo", "hello"],
-            allow_network=False,
-            nested_container=True
-        )
-        assert "--unshare-user" in cmd
-        assert "--uid" in cmd
-        assert "--gid" in cmd
+        """Nested container with sudo bwrap and UID does NOT add --unshare-user.
 
-    def test_nested_container_no_unshare_user_without_uid(
-        self, basic_config: SandboxConfig
-    ) -> None:
-        """Nested container without UID does not add --unshare-user."""
-        executor = SandboxExecutor(basic_config)  # No linux_uid
+        When using 'sudo bwrap', the sudo provides root access to files, and
+        --uid/--gid work directly via bwrap. --unshare-user would create a new
+        user namespace that prevents accessing host files.
+        """
+        # Use sudo bwrap (like production config)
+        config = SandboxConfig(
+            bwrap_path="sudo bwrap",
+            static_mounts={
+                "bin": SandboxMount(source="/usr/bin", target="/usr/bin"),
+                "lib": SandboxMount(source="/lib", target="/lib"),
+            },
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = SandboxExecutor(config, linux_uid=50000, linux_gid=50000)
         cmd = executor.build_bwrap_command(
             ["echo", "hello"],
             allow_network=False,
             nested_container=True
         )
+        # With sudo bwrap, --unshare-user should NOT be used
         assert "--unshare-user" not in cmd
+        # bwrap's --uid/--gid require --unshare-user, so they should NOT be used
+        assert "--uid" not in cmd
+        assert "--gid" not in cmd
+        # Instead, setpriv should be used to drop privileges after bwrap setup
+        assert "/usr/bin/setpriv" in cmd
+        assert "--reuid=50000" in cmd
+        assert "--regid=50000" in cmd
+        assert "--clear-groups" in cmd
+
+    def test_nested_container_no_unshare_user_with_sudo_no_uid(
+        self, workspace: Path
+    ) -> None:
+        """Nested container with sudo bwrap but no UID does NOT add --unshare-user.
+
+        When using 'sudo bwrap' (even without UID/GID), we should not use
+        --unshare-user because sudo provides root access directly.
+        """
+        config = SandboxConfig(
+            bwrap_path="sudo bwrap",
+            static_mounts={
+                "bin": SandboxMount(source="/usr/bin", target="/usr/bin"),
+                "lib": SandboxMount(source="/lib", target="/lib"),
+            },
+            session_mounts={
+                "workspace": SandboxMount(
+                    source=str(workspace),
+                    target="/workspace",
+                    mode="rw",
+                ),
+            },
+        )
+        executor = SandboxExecutor(config)  # No linux_uid
+        cmd = executor.build_bwrap_command(
+            ["echo", "hello"],
+            allow_network=False,
+            nested_container=True
+        )
+        # With sudo bwrap (even without UID), --unshare-user should NOT be used
+        assert "--unshare-user" not in cmd
+        # And --uid/--gid should NOT be present since we didn't set them
+        assert "--uid" not in cmd
+        assert "--gid" not in cmd
+
+    def test_nested_container_adds_unshare_user_without_sudo(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """Nested container without sudo but with no UID can optionally use --unshare-user.
+
+        When NOT using sudo and NOT setting UID, --unshare-user may be used for
+        additional isolation. This is a less common scenario (development only).
+        """
+        # basic_config uses default bwrap_path="bwrap" (no sudo)
+        executor = SandboxExecutor(basic_config)  # No UID
+        cmd = executor.build_bwrap_command(
+            ["echo", "hello"],
+            allow_network=False,
+            nested_container=True
+        )
+        # Without UID set and without sudo, --unshare-user is optionally used
+        # Current implementation: --unshare-user only when NOT using sudo AND no UID
+        assert "--unshare-user" in cmd
 
     def test_non_nested_uses_unshare_all(
         self, basic_config: SandboxConfig

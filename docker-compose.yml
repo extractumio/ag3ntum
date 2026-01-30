@@ -57,6 +57,9 @@ services:
       # - Session UID enforcement prevents cross-user access
       - SETUID
       - SETGID
+      # CAP_CHOWN required for setting workspace ownership to sandbox user's UID
+      # This allows session directories to be accessible by the sandboxed process
+      - CHOWN
     security_opt:
       - apparmor:unconfined
       # Note: Seccomp profiles (config/security/seccomp-*.json) are available but

@@ -222,20 +222,25 @@ class SandboxExecutor:
         cmd = config.bwrap_path.split()
 
         # In Docker, we need to be careful about namespace operations
-        # Use --unshare-user --unshare-pid for basic isolation
-        # but avoid --unshare-all which requires pivot_root
+        # Use --unshare-pid for basic isolation but avoid --unshare-all which requires pivot_root
+        #
+        # IMPORTANT: Do NOT use --unshare-user when running via sudo bwrap!
+        # --unshare-user creates a new user namespace where:
+        # 1. Even root inside the namespace can't access host files owned by other UIDs
+        # 2. The UID mapping isn't set up, so host UIDs appear as 65534 (nobody)
+        # 3. This causes "Permission denied" when trying to bind-mount the workspace
+        #
+        # When using "sudo bwrap", the sudo provides root privileges to access any file,
+        # and --uid/--gid flags work directly without needing a user namespace.
         if nested_container:
-            # --unshare-user is required when using --uid/--gid flags
-            # It creates a new user namespace where we can set custom UIDs
-            if self._linux_uid is not None or self._linux_gid is not None:
+            # Check if we're using sudo - don't use --unshare-user with sudo
+            is_using_sudo = config.bwrap_path.startswith("sudo")
+
+            # Only use --unshare-user if NOT using sudo and NOT setting custom UID/GID
+            # When using sudo with --uid/--gid, the privilege drop happens via bwrap flags
+            if not is_using_sudo and self._linux_uid is None and self._linux_gid is None:
                 cmd.append("--unshare-user")
-                # Map the user's UID/GID so workspace files appear with correct ownership
-                # Without this, host UIDs appear as 65534 (overflow) inside the namespace
-                # Format: --uid-map <inside_uid> <outside_uid> <count>
-                #cmd.extend(["--uid-map", str(self._linux_uid), str(self._linux_uid), "1"])
-                # Commented out since it's not yet supported in bwrap
-                #if self._linux_gid is not None:
-                #    cmd.extend(["--gid-map", str(self._linux_gid), str(self._linux_gid), "1"])
+
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",
@@ -350,17 +355,44 @@ class SandboxExecutor:
                     f"from sandboxed_envs"
                 )
 
-        # Add UID/GID dropping via bwrap (instead of preexec_fn)
-        # This works because bwrap runs via sudo (configured in permissions.yaml)
-        # and can drop to the target user UID/GID
-        if self._linux_uid is not None:
-            cmd.extend(["--uid", str(self._linux_uid)])
-        if self._linux_gid is not None:
-            cmd.extend(["--gid", str(self._linux_gid)])
+        # Privilege dropping strategy depends on whether we're using sudo bwrap
+        # bwrap's --uid/--gid flags REQUIRE --unshare-user to create a user namespace.
+        # But with --unshare-user, root inside the namespace can't access host files
+        # because there's no UID mapping (host UIDs appear as nobody=65534).
+        #
+        # Solution: When using sudo bwrap:
+        # - Don't use --unshare-user (so mounts can access host files as root)
+        # - Don't use bwrap's --uid/--gid (they require --unshare-user)
+        # - Instead, wrap the command with setpriv to drop privileges AFTER mounts
+        #
+        # When NOT using sudo (development mode):
+        # - Use --unshare-user for user namespace isolation
+        # - bwrap's --uid/--gid work within the user namespace
+        is_using_sudo = config.bwrap_path.startswith("sudo")
+
+        if not is_using_sudo:
+            # Not using sudo - can use bwrap's native --uid/--gid
+            if self._linux_uid is not None:
+                cmd.extend(["--uid", str(self._linux_uid)])
+            if self._linux_gid is not None:
+                cmd.extend(["--gid", str(self._linux_gid)])
 
         cmd.extend(["--chdir", config.environment.home])
 
         cmd.append("--")
+
+        # When using sudo, wrap command with setpriv to drop privileges
+        if is_using_sudo and self._linux_uid is not None and self._linux_gid is not None:
+            # setpriv drops to target UID/GID and clears supplementary groups
+            # Use full path since PATH may not be set correctly inside sandbox
+            cmd.extend([
+                "/usr/bin/setpriv",
+                f"--reuid={self._linux_uid}",
+                f"--regid={self._linux_gid}",
+                "--clear-groups",
+                "--",
+            ])
+
         cmd.extend(list(command))
 
         return cmd
