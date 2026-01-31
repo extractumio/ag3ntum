@@ -44,3 +44,8 @@ class SkillError(AgentError):
     """Error related to skill loading or execution."""
     pass
 
+
+class DynamicMountError(AgentError):
+    """Error related to dynamic mount setup or validation."""
+    pass
+

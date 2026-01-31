@@ -66,9 +66,14 @@ class TaskParams:
     # Permission profile (CLI: --profile)
     profile: Optional[str] = None
 
+    # Dynamic mounts for this session (API only, not available via CLI)
+    dynamic_mounts: Optional[list] = None  # List of DynamicMountRequest objects
+
     def __post_init__(self):
         if self.additional_dirs is None:
             self.additional_dirs = []
+        if self.dynamic_mounts is None:
+            self.dynamic_mounts = []
 
 
 class AgentRunner:
@@ -319,19 +324,6 @@ class AgentRunner:
                 # Fetch user
                 result = await db.execute(select(User).where(User.id == params.user_id))
                 user = result.scalar_one_or_none()
-
-                # Debug: log database info and all users
-                from ..db.database import DATABASE_PATH
-                all_users_result = await db.execute(select(User))
-                all_users = all_users_result.scalars().all()
-                import sys
-                print(f"[DEBUG_AR] Database path: {DATABASE_PATH}", file=sys.stderr, flush=True)
-                print(f"[DEBUG_AR] Looking for user_id: {params.user_id}", file=sys.stderr, flush=True)
-                print(f"[DEBUG_AR] Found {len(all_users)} users in DB: {[(u.id, u.email, u.linux_uid) for u in all_users]}", file=sys.stderr, flush=True)
-                if user:
-                    print(f"[DEBUG_AR] User found: id={user.id}, linux_uid={user.linux_uid}", file=sys.stderr, flush=True)
-                else:
-                    print(f"[DEBUG_AR] User NOT found for user_id: {params.user_id}", file=sys.stderr, flush=True)
 
                 if not user or user.linux_uid is None:
                     emit_error_event(

@@ -5,7 +5,8 @@ Defines the API contract for all endpoints.
 All parameters from CLI are available via HTTP request.
 """
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -187,7 +188,14 @@ class RunTaskRequest(BaseModel):
         default_factory=AgentConfigOverrides,
         description="Agent configuration overrides (model, max_turns, etc.)"
     )
-    
+
+    # Dynamic mounts for this session (NEW)
+    dynamic_mounts: Optional[list["DynamicMountRequest"]] = Field(
+        default=None,
+        description="Dynamic folder mounts for this session only",
+        max_length=10
+    )
+
     @field_validator("task")
     @classmethod
     def truncate_task(cls, v: str) -> str:
@@ -460,6 +468,96 @@ class ErrorResponse(BaseModel):
     """Standard error response."""
     detail: str = Field(description="Error message")
     code: Optional[str] = Field(default=None, description="Error code")
+
+
+# =============================================================================
+# Dynamic Mount Models
+# =============================================================================
+
+class DynamicMountRequest(BaseModel):
+    """Request to mount a dynamic path for this session."""
+
+    base: str = Field(
+        ...,
+        description="Name of the dynamic base (from config)",
+        min_length=1,
+        max_length=64,
+        examples=["logs", "projects", "user-home"]
+    )
+
+    subpath: Optional[str] = Field(
+        default=None,
+        description="Subdirectory within the base (optional)",
+        max_length=512,
+        examples=["nginx", "myapp/logs"]
+    )
+
+    alias: str = Field(
+        ...,
+        description="Name for the mount in workspace/dynamic/",
+        min_length=1,
+        max_length=64,
+        examples=["app-logs", "my-project"]
+    )
+
+    mode: Optional[Literal["ro", "rw"]] = Field(
+        default=None,
+        description="Access mode (defaults to 'ro')"
+    )
+
+    @field_validator("base", "alias")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate base/alias names - alphanumeric, hyphen, underscore only."""
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError("Must contain only alphanumeric, hyphen, underscore")
+        return v
+
+    @field_validator("subpath")
+    @classmethod
+    def validate_subpath(cls, v: Optional[str]) -> Optional[str]:
+        """Validate subpath - no path traversal."""
+        if v is None:
+            return None
+        # Reject dangerous patterns BEFORE any normalization
+        if ".." in v or v.startswith("/") or "\x00" in v or "\\" in v:
+            raise ValueError("Invalid subpath: contains forbidden characters")
+        # Only allow safe characters
+        if not re.match(r'^[a-zA-Z0-9/_.-]+$', v):
+            raise ValueError("Invalid subpath: contains forbidden characters")
+        return v
+
+
+class DynamicMountInfo(BaseModel):
+    """Information about a mounted dynamic path (response)."""
+
+    alias: str = Field(description="Mount alias name")
+    workspace_path: str = Field(description="Path in workspace (e.g., ./dynamic/nginx-logs)")
+    mode: str = Field(description="Access mode: ro or rw")
+    source_base: str = Field(description="Source base name")
+    source_subpath: Optional[str] = Field(default=None, description="Source subpath")
+
+
+class DynamicBaseInfo(BaseModel):
+    """Information about an available dynamic base (for UI)."""
+
+    name: str = Field(description="Base name")
+    description: str = Field(description="Human-readable description")
+    max_mode: str = Field(description="Maximum allowed mode (ro or rw)")
+    requires_subpath: bool = Field(default=False, description="Whether subpath is required")
+
+
+class AvailableDynamicMountsResponse(BaseModel):
+    """Response for GET /sessions/dynamic-mounts/available."""
+    enabled: bool = Field(description="Whether dynamic mounts feature is enabled")
+    bases: list[DynamicBaseInfo] = Field(
+        default_factory=list,
+        description="List of available dynamic bases for this user"
+    )
+    max_mounts_per_session: int = Field(
+        default=10,
+        description="Maximum mounts allowed per session"
+    )
 
 
 class SubmitAnswerRequest(BaseModel):

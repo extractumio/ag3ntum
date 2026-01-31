@@ -96,11 +96,45 @@ export async function getSession(
   return apiRequest<SessionResponse>(baseUrl, `/api/v1/sessions/${sessionId}`, {}, token);
 }
 
+// Dynamic mount types
+export interface DynamicMountRequest {
+  base: string;
+  subpath?: string;
+  alias: string;
+  mode?: 'ro' | 'rw';
+}
+
+export interface DynamicBaseInfo {
+  name: string;
+  description: string;
+  max_mode: string;
+  requires_subpath: boolean;
+}
+
+export interface AvailableDynamicMountsResponse {
+  enabled: boolean;
+  bases: DynamicBaseInfo[];
+  max_mounts_per_session: number;
+}
+
+export async function getAvailableDynamicMounts(
+  baseUrl: string,
+  token: string
+): Promise<AvailableDynamicMountsResponse> {
+  return apiRequest<AvailableDynamicMountsResponse>(
+    baseUrl,
+    '/api/v1/sessions/dynamic-mounts/available',
+    { method: 'GET' },
+    token
+  );
+}
+
 export async function runTask(
   baseUrl: string,
   token: string,
   task: string,
-  model?: string
+  model?: string,
+  dynamicMounts?: DynamicMountRequest[]
 ): Promise<TaskStartedResponse> {
   return apiRequest<TaskStartedResponse>(
     baseUrl,
@@ -110,6 +144,7 @@ export async function runTask(
       body: JSON.stringify({
         task,
         config: model ? { model } : {},
+        dynamic_mounts: dynamicMounts?.length ? dynamicMounts : undefined,
       }),
     },
     token

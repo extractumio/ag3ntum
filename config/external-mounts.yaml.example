@@ -280,11 +280,70 @@ per_user:
       optional: false
 
 # =============================================================================
+# DYNAMIC MOUNT BASES (Session-time mount selection)
+# =============================================================================
+# Dynamic mounts are Docker-mounted at build time but NOT auto-symlinked.
+# Users request access per-session via the API/UI.
+#
+# Use cases:
+#   - Log analysis (user requests specific log directories)
+#   - Project selection (user chooses which project to analyze)
+#   - Data exploration (user browses available datasets)
+#
+# CASE 11: Dynamic mount base (logs example)
+# -----------------------------------------------------------------------------
+# dynamic:
+#   enabled: true
+#   security:
+#     max_mounts_per_session: 10
+#     max_subpath_depth: 10
+#     global_blocked_subpaths:
+#       - ".ssh"
+#       - ".gnupg"
+#       - ".aws"
+#       - "*.key"
+#       - "*_rsa"
+#   bases:
+#     - name: logs
+#       host_path: /var/log
+#       description: "System and application logs"
+#       max_mode: ro            # Maximum allowed access mode
+#       authorization:
+#         mode: allowlist       # allowlist | role | self_only
+#         allowed_users: ["*"]  # ["*"] = all users
+#       subpath_restrictions:
+#         mode: blocklist       # allowlist | blocklist
+#         blocked:
+#           - "audit"
+#           - "secure"
+#       optional: false
+# -----------------------------------------------------------------------------
+
+# CASE 12: Dynamic user home directory (self_only authorization)
+# -----------------------------------------------------------------------------
+# dynamic:
+#   bases:
+#     - name: user-home
+#       host_path: /home/{username}
+#       description: "User's home directory"
+#       max_mode: rw
+#       authorization:
+#         mode: self_only       # Only own directory (username from JWT)
+#       subpath_restrictions:
+#         mode: blocklist
+#         blocked:
+#           - ".*"              # All hidden files
+#         exceptions:
+#           - ".local/share/myapp"  # Specific allowed hidden paths
+#       optional: true
+# -----------------------------------------------------------------------------
+
+# =============================================================================
 # REFERENCE
 # =============================================================================
 #
 # Reserved names (cannot be used):
-#   - persistent, ro, rw, external
+#   - persistent, ro, rw, external, dynamic
 #
 # Valid name characters:
 #   - Letters (a-z, A-Z)
@@ -297,10 +356,12 @@ per_user:
 #   - Symlinks are resolved and logged
 #   - Sensitive path patterns trigger warnings
 #   - Per-user paths use {username} placeholder
+#   - Dynamic mounts have multi-layer path validation
 #
 # Troubleshooting:
 #   - YAML syntax errors: Check indentation (2 spaces, no tabs)
 #   - Mount not visible: Check users list and optional flag
 #   - Permission denied: Verify host_path permissions match UID
+#   - Dynamic mount denied: Check authorization and subpath_restrictions
 #
 # =============================================================================

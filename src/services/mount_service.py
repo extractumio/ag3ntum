@@ -14,9 +14,13 @@ path resolution across all components:
 Note: This service runs inside Docker. External mounts are configured via:
 - run.sh --mount-ro and --mount-rw for global mounts
 - external-mounts.yaml per_user section for user-specific mounts
+- external-mounts.yaml dynamic section for session-time dynamic mounts
 """
+from dataclasses import dataclass
+import fnmatch
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -386,3 +390,353 @@ def translate_docker_path_to_sandbox(session_id: str, docker_path: str) -> str:
     except (PathResolutionError, Exception) as e:
         logger.debug(f"Could not translate Docker path to sandbox: {e}")
         return docker_path
+
+
+# =============================================================================
+# Dynamic Mount Service
+# =============================================================================
+
+@dataclass
+class DynamicMountBase:
+    """Configuration for a dynamic mount base."""
+    name: str
+    host_path: str
+    container_path: str
+    description: str
+    max_mode: str  # "ro" or "rw"
+    authorization_mode: str  # "allowlist", "role", "self_only"
+    allowed_users: list[str]
+    subpath_mode: str  # "allowlist" or "blocklist"
+    allowed_subpaths: list[str]
+    blocked_subpaths: list[str]
+    subpath_exceptions: list[str]
+    optional: bool
+
+
+@dataclass
+class DynamicMountValidation:
+    """Result of validating a dynamic mount request."""
+    is_valid: bool
+    error: Optional[str] = None
+    denial_code: Optional[str] = None
+    resolved_container_path: Optional[str] = None
+    resolved_mode: Optional[str] = None
+
+
+class DynamicMountService:
+    """Service for validating and resolving dynamic mount requests."""
+
+    # Characters allowed in subpath (strict whitelist)
+    ALLOWED_SUBPATH_CHARS = re.compile(r'^[a-zA-Z0-9/_.-]+$')
+
+    # Dangerous patterns to reject
+    DANGEROUS_PATTERNS = [
+        r'\.\.',           # Path traversal
+        r'\x00',           # Null byte
+        r'\\',             # Backslash
+    ]
+
+    def __init__(self, config: dict):
+        self.config = config
+        self.dynamic_config = config.get("dynamic", {})
+        self.enabled = self.dynamic_config.get("enabled", False)
+        self.security = self.dynamic_config.get("security", {})
+        self.bases = self._load_bases()
+        self.global_blocked = self.security.get("global_blocked_subpaths", [])
+
+    def _load_bases(self) -> dict[str, DynamicMountBase]:
+        """Load dynamic mount bases from config."""
+        bases = {}
+        for base_config in self.dynamic_config.get("bases", []):
+            auth = base_config.get("authorization", {})
+            subpath_res = base_config.get("subpath_restrictions", {})
+
+            base = DynamicMountBase(
+                name=base_config["name"],
+                host_path=base_config["host_path"],
+                container_path=f"/mounts/dynamic/{base_config['name']}",
+                description=base_config.get("description", ""),
+                max_mode=base_config.get("max_mode", "ro"),
+                authorization_mode=auth.get("mode", "allowlist"),
+                allowed_users=auth.get("allowed_users", []),
+                subpath_mode=subpath_res.get("mode", "blocklist"),
+                allowed_subpaths=subpath_res.get("allowed", []),
+                blocked_subpaths=subpath_res.get("blocked", []),
+                subpath_exceptions=subpath_res.get("exceptions", []),
+                optional=base_config.get("optional", True),
+            )
+            bases[base.name] = base
+        return bases
+
+    def get_available_bases(self, username: str) -> list[DynamicMountBase]:
+        """Get list of bases available to a user."""
+        available = []
+        for base in self.bases.values():
+            if self._is_user_authorized(base, username):
+                available.append(base)
+        return available
+
+    def validate_mount_request(
+        self,
+        request: "DynamicMountRequest",
+        username: str,
+    ) -> DynamicMountValidation:
+        """
+        Validate a dynamic mount request.
+
+        SECURITY: Username comes from JWT token, never from request body.
+        """
+        # Import here to avoid circular dependency
+        from src.api.models import DynamicMountRequest
+
+        # 1. Feature enabled check
+        if not self.enabled:
+            return DynamicMountValidation(
+                is_valid=False,
+                error="Dynamic mounts feature is disabled",
+                denial_code="FEATURE_DISABLED"
+            )
+
+        # 2. Base exists check
+        base = self.bases.get(request.base)
+        if not base:
+            return DynamicMountValidation(
+                is_valid=False,
+                error=f"Unknown dynamic base: {request.base}",
+                denial_code="BASE_NOT_FOUND"
+            )
+
+        # 3. User authorization check
+        if not self._is_user_authorized(base, username):
+            logger.warning(
+                f"SECURITY: User '{username}' denied access to base '{request.base}'"
+            )
+            return DynamicMountValidation(
+                is_valid=False,
+                error=f"Not authorized for base: {request.base}",
+                denial_code="NOT_AUTHORIZED"
+            )
+
+        # 4. Subpath validation
+        subpath = request.subpath or ""
+        subpath_result = self._validate_subpath(base, subpath, username)
+        if not subpath_result.is_valid:
+            return subpath_result
+
+        # 5. Mode validation
+        effective_mode = request.mode or "ro"
+        if effective_mode == "rw" and base.max_mode == "ro":
+            return DynamicMountValidation(
+                is_valid=False,
+                error=f"Base '{request.base}' only allows read-only access",
+                denial_code="MODE_EXCEEDS_MAX"
+            )
+
+        # 6. Resolve container path with username substitution
+        container_path = base.container_path.replace("{username}", username)
+        if subpath:
+            container_path = f"{container_path}/{subpath}"
+
+        # 7. Validate resolved path exists (unless optional)
+        resolved_path = Path(container_path)
+        if not base.optional and not resolved_path.exists():
+            return DynamicMountValidation(
+                is_valid=False,
+                error=f"Path does not exist: {container_path}",
+                denial_code="PATH_NOT_FOUND"
+            )
+
+        # 8. Symlink resolution and containment check
+        containment_result = self._validate_path_containment(
+            resolved_path, base.container_path.replace("{username}", username)
+        )
+        if not containment_result.is_valid:
+            return containment_result
+
+        return DynamicMountValidation(
+            is_valid=True,
+            resolved_container_path=container_path,
+            resolved_mode=effective_mode
+        )
+
+    def _is_user_authorized(self, base: DynamicMountBase, username: str) -> bool:
+        """Check if user is authorized for this base."""
+        if base.authorization_mode == "self_only":
+            return True  # Path contains {username}, enforced at path level
+
+        if base.authorization_mode == "allowlist":
+            for allowed in base.allowed_users:
+                if allowed == "*":
+                    return True
+                if allowed == "{self}":
+                    return True  # self_only check happens at path level
+                if allowed == username:
+                    return True
+            return False
+
+        # role-based not implemented yet
+        return False
+
+    def _validate_subpath(
+        self,
+        base: DynamicMountBase,
+        subpath: str,
+        username: str
+    ) -> DynamicMountValidation:
+        """Validate subpath against restrictions."""
+        if not subpath:
+            return DynamicMountValidation(is_valid=True)
+
+        # Check dangerous patterns
+        for pattern in self.DANGEROUS_PATTERNS:
+            if re.search(pattern, subpath):
+                logger.warning(
+                    f"SECURITY: Dangerous pattern in subpath: {subpath[:100]}"
+                )
+                return DynamicMountValidation(
+                    is_valid=False,
+                    error="Invalid subpath: contains forbidden characters",
+                    denial_code="DANGEROUS_PATTERN"
+                )
+
+        # Check character whitelist
+        if not self.ALLOWED_SUBPATH_CHARS.match(subpath):
+            return DynamicMountValidation(
+                is_valid=False,
+                error="Invalid subpath: contains forbidden characters",
+                denial_code="INVALID_CHARACTERS"
+            )
+
+        # Check max depth
+        max_depth = self.security.get("max_subpath_depth", 10)
+        if subpath.count("/") >= max_depth:
+            return DynamicMountValidation(
+                is_valid=False,
+                error=f"Subpath exceeds max depth of {max_depth}",
+                denial_code="MAX_DEPTH_EXCEEDED"
+            )
+
+        # Check global blocked patterns
+        for blocked in self.global_blocked:
+            if self._path_matches_pattern(subpath, blocked):
+                logger.warning(
+                    f"SECURITY: Subpath matches global block: {subpath} ~ {blocked}"
+                )
+                return DynamicMountValidation(
+                    is_valid=False,
+                    error="Subpath is blocked by security policy",
+                    denial_code="GLOBAL_BLOCKED"
+                )
+
+        # Check base-specific restrictions
+        if base.subpath_mode == "allowlist":
+            if not any(self._path_matches_pattern(subpath, p) for p in base.allowed_subpaths):
+                return DynamicMountValidation(
+                    is_valid=False,
+                    error="Subpath not in allowed list",
+                    denial_code="NOT_IN_ALLOWLIST"
+                )
+        elif base.subpath_mode == "blocklist":
+            for blocked in base.blocked_subpaths:
+                if self._path_matches_pattern(subpath, blocked):
+                    # Check exceptions
+                    if not any(self._path_matches_pattern(subpath, e) for e in base.subpath_exceptions):
+                        return DynamicMountValidation(
+                            is_valid=False,
+                            error="Subpath is blocked",
+                            denial_code="BLOCKED_BY_BASE"
+                        )
+
+        return DynamicMountValidation(is_valid=True)
+
+    def _validate_path_containment(
+        self,
+        path: Path,
+        base_path: str
+    ) -> DynamicMountValidation:
+        """Validate that resolved path stays within base after symlink resolution."""
+        try:
+            if path.exists():
+                real_path = path.resolve()
+                base_real = Path(base_path).resolve()
+
+                try:
+                    real_path.relative_to(base_real)
+                except ValueError:
+                    logger.error(
+                        f"SECURITY: Path escaped base! path={path}, real={real_path}, base={base_real}"
+                    )
+                    return DynamicMountValidation(
+                        is_valid=False,
+                        error="Path escapes base directory",
+                        denial_code="PATH_ESCAPE"
+                    )
+        except Exception as e:
+            logger.error(f"SECURITY: Path resolution failed: {e}")
+            return DynamicMountValidation(
+                is_valid=False,
+                error="Path validation failed",
+                denial_code="RESOLUTION_FAILED"
+            )
+
+        return DynamicMountValidation(is_valid=True)
+
+    def _path_matches_pattern(self, path: str, pattern: str) -> bool:
+        """Match path against pattern (supports wildcards)."""
+        path = path.strip("/")
+        pattern = pattern.strip("/")
+
+        path_parts = path.split("/")
+        pattern_parts = pattern.split("/")
+
+        for i, part in enumerate(pattern_parts):
+            if i >= len(path_parts):
+                return False
+            if not fnmatch.fnmatch(path_parts[i], part):
+                return False
+
+        return True
+
+
+# Singleton instance of DynamicMountService
+_dynamic_mount_service: Optional[DynamicMountService] = None
+_dynamic_config_mtime: float = 0
+
+
+def get_dynamic_mount_service() -> DynamicMountService:
+    """
+    Get the singleton DynamicMountService instance.
+
+    Reloads configuration if the file has been modified.
+    """
+    global _dynamic_mount_service, _dynamic_config_mtime
+
+    config_path = Path("/config/external-mounts.yaml")
+
+    # Check if we need to reload
+    if config_path.exists():
+        current_mtime = config_path.stat().st_mtime
+        if _dynamic_mount_service is None or current_mtime != _dynamic_config_mtime:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                _dynamic_mount_service = DynamicMountService(config)
+                _dynamic_config_mtime = current_mtime
+                logger.info(
+                    f"Loaded dynamic mount service: enabled={_dynamic_mount_service.enabled}, "
+                    f"bases={list(_dynamic_mount_service.bases.keys())}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load dynamic mount config: {e}")
+                _dynamic_mount_service = DynamicMountService({})
+    elif _dynamic_mount_service is None:
+        _dynamic_mount_service = DynamicMountService({})
+
+    return _dynamic_mount_service
+
+
+def invalidate_dynamic_mount_cache() -> None:
+    """Force reload of dynamic mount configuration on next access."""
+    global _dynamic_mount_service, _dynamic_config_mtime
+    _dynamic_mount_service = None
+    _dynamic_config_mtime = 0
