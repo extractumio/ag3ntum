@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .exceptions import SessionError
+from .exceptions import DynamicMountError, SessionError
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +463,113 @@ class SessionManager:
         # bubblewrap sandbox (isolates subprocess execution)
 
         logger.info(f"Set up external mounts for session {session_id}")
+
+    def setup_dynamic_mounts(
+        self,
+        session_id: str,
+        username: str,
+        mount_requests: list,
+        owner_uid: Optional[int] = None,
+    ) -> list:
+        """
+        Set up dynamic mounts for a session.
+
+        Creates symlinks in workspace/dynamic/ pointing to container mount paths.
+        Returns list of mount info for PathValidator and Bubblewrap configuration.
+
+        Args:
+            session_id: The session ID.
+            username: The username (from JWT token) for authorization.
+            mount_requests: List of DynamicMountRequest objects.
+            owner_uid: UID to set as symlink owner.
+
+        Returns:
+            List of DynamicMountInfo objects describing the mounted paths.
+
+        Raises:
+            DynamicMountError: If mount validation fails or setup encounters an error.
+        """
+        from src.api.models import DynamicMountInfo, DynamicMountRequest
+        from src.services.mount_service import get_dynamic_mount_service
+
+        workspace = self.get_workspace_dir(session_id)
+        dynamic_dir = workspace / "dynamic"
+        dynamic_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set permissions for sandbox access
+        try:
+            dynamic_dir.chmod(0o777)
+        except PermissionError:
+            pass
+
+        mount_service = get_dynamic_mount_service()
+        max_mounts = mount_service.security.get("max_mounts_per_session", 10)
+
+        if len(mount_requests) > max_mounts:
+            raise DynamicMountError(
+                f"Too many mounts requested ({len(mount_requests)}). Maximum: {max_mounts}"
+            )
+
+        mounted: list[DynamicMountInfo] = []
+        seen_aliases: set[str] = set()
+
+        for request in mount_requests:
+            # Check for duplicate aliases
+            if request.alias in seen_aliases:
+                raise DynamicMountError(f"Duplicate mount alias: {request.alias}")
+            seen_aliases.add(request.alias)
+
+            # Validate mount request
+            validation = mount_service.validate_mount_request(request, username)
+
+            if not validation.is_valid:
+                logger.warning(
+                    f"DYNAMIC_MOUNT_DENIED: session={session_id}, user={username}, "
+                    f"base={request.base}, subpath={request.subpath}, "
+                    f"reason={validation.denial_code}"
+                )
+                raise DynamicMountError(
+                    f"Mount '{request.alias}' denied: {validation.error}"
+                )
+
+            # Create symlink
+            link_path = dynamic_dir / request.alias
+            target_path = Path(validation.resolved_container_path)
+
+            if link_path.exists() or link_path.is_symlink():
+                raise DynamicMountError(f"Mount alias '{request.alias}' already exists")
+
+            try:
+                link_path.symlink_to(target_path)
+            except OSError as e:
+                raise DynamicMountError(
+                    f"Failed to create symlink for '{request.alias}': {e}"
+                )
+
+            # Set ownership if provided (use lchown for symlinks)
+            if owner_uid is not None:
+                try:
+                    os.lchown(link_path, owner_uid, owner_uid)
+                except OSError as e:
+                    logger.warning(f"Could not set ownership of {link_path}: {e}")
+
+            logger.info(
+                f"DYNAMIC_MOUNT_CREATED: session={session_id}, user={username}, "
+                f"alias={request.alias}, target={target_path}, mode={validation.resolved_mode}"
+            )
+
+            mounted.append(DynamicMountInfo(
+                alias=request.alias,
+                workspace_path=f"./dynamic/{request.alias}",
+                mode=validation.resolved_mode,
+                source_base=request.base,
+                source_subpath=request.subpath,
+            ))
+
+        logger.info(
+            f"Set up {len(mounted)} dynamic mounts for session {session_id}"
+        )
+        return mounted
 
     def cleanup_workspace_skills(self, session_id: str) -> None:
         """

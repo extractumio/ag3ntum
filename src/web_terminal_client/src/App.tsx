@@ -17,7 +17,9 @@ import {
   listSessionsCached,
   runTask,
   uploadFiles,
+  type DynamicMountRequest,
 } from './api';
+import { DynamicMountSelector } from './components/DynamicMountSelector';
 import { AuthProvider, useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import {
@@ -2124,6 +2126,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [dynamicMounts, setDynamicMounts] = useState<DynamicMountRequest[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => getStoredPanelCollapsed());
@@ -3017,7 +3020,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       });
 
       try {
-        const response = await runTask(config.api.base_url, token, fullTaskText, selectedModel);
+        const response = await runTask(config.api.base_url, token, fullTaskText, selectedModel, dynamicMounts);
         const sessionId = response.session_id;
 
         // Upload files to the new session (agent will see them in workspace)
@@ -4767,6 +4770,13 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         )}
         <div className="input-wrapper">
           <div className="input-section">
+            {config && token && (
+              <DynamicMountSelector
+                baseUrl={config.api.base_url}
+                token={token}
+                onMountsChange={setDynamicMounts}
+              />
+            )}
             <InputField
               value={inputValue}
               onChange={setInputValue}

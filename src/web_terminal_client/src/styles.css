@@ -2887,6 +2887,188 @@ resume-context {
 }
 
 /* =============================================================================
+ * DYNAMIC MOUNT SELECTOR
+ * ============================================================================= */
+
+.dynamic-mount-selector {
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-md);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.dynamic-mount-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing-sm);
+}
+
+.dynamic-mount-title {
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.clear-mounts-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-normal);
+}
+
+.clear-mounts-btn:hover {
+  color: var(--color-error);
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.mount-error {
+  color: var(--color-error);
+  font-size: var(--font-xs);
+  margin-bottom: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: rgba(255, 107, 107, 0.1);
+  border-radius: var(--radius-sm);
+}
+
+.selected-mounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+}
+
+.mount-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--font-xs);
+}
+
+.mount-chip-icon {
+  font-size: var(--font-sm);
+}
+
+.mount-chip-alias {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.mount-chip-base {
+  color: var(--color-text-secondary);
+}
+
+.mount-chip-remove {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  padding: 0 var(--spacing-xs);
+  line-height: 1;
+  transition: color var(--transition-normal);
+}
+
+.mount-chip-remove:hover {
+  color: var(--color-error);
+}
+
+.add-mount-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  align-items: flex-end;
+}
+
+.mount-select,
+.mount-input {
+  flex: 1;
+  min-width: 100px;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-size: var(--font-xs);
+  font-family: inherit;
+}
+
+.mount-select:focus,
+.mount-input:focus {
+  outline: none;
+  border-color: var(--color-accent-primary);
+}
+
+.mode-select {
+  flex: 0 0 100px;
+}
+
+.mount-form-buttons {
+  display: flex;
+  gap: var(--spacing-xs);
+}
+
+.mount-add-btn,
+.mount-cancel-btn {
+  padding: var(--spacing-xs) var(--spacing-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.mount-add-btn {
+  background: var(--color-accent-primary);
+  color: var(--color-bg-base);
+}
+
+.mount-add-btn:hover {
+  background: #9dd9e3;
+}
+
+.mount-cancel-btn {
+  background: var(--color-bg-highest);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.mount-cancel-btn:hover {
+  background: var(--color-bg-base);
+}
+
+.add-mount-btn {
+  width: 100%;
+  padding: var(--spacing-sm);
+  background: transparent;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.add-mount-btn:hover:not(:disabled) {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.add-mount-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* =============================================================================
  * TERMINAL STATUS BAR
  * ============================================================================= */
 

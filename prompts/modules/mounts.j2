@@ -64,6 +64,28 @@ These folders are mounted specifically for your user account, read-write:
 {% endfor %}
 {% endif %}
 
+{% if dynamic_mounts %}
+## Dynamic Mounts (`./dynamic/`)
+
+This session has the following user-selected dynamic mounts available:
+
+| Alias | Path | Mode | Description |
+|-------|------|------|-------------|
+{% for mount in dynamic_mounts %}
+| {{ mount.alias }} | `./dynamic/{{ mount.alias }}` | {{ mount.mode }} | {{ mount.description or 'User-requested mount' }} |
+{% endfor %}
+
+**Usage:**
+- Access files using paths like `./dynamic/{{ dynamic_mounts[0].alias }}/filename`
+- All Ag3ntum tools (mcp__ag3ntum__Read, mcp__ag3ntum__Write, mcp__ag3ntum__Edit, mcp__ag3ntum__Bash, mcp__ag3ntum__Glob, mcp__ag3ntum__Grep) work with dynamic mounts
+{% for mount in dynamic_mounts %}
+{% if mount.mode == 'ro' %}
+- `{{ mount.alias }}` is **read-only** - you cannot modify files in this mount
+{% endif %}
+{% endfor %}
+
+{% endif %}
+
 ## Important Notes
 
 1. **Read-only access**: You cannot write to `./external/ro/` or `./external/user-ro/` paths. Attempts will fail with "read-only external mount" error.

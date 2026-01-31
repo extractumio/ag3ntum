@@ -74,6 +74,40 @@ def validate_mount_config(config: dict) -> list[str]:
             if not mount.get('users'):
                 errors.append(f"per_user.{mode}[{i}] missing 'users' list")
 
+    # Validate dynamic mount bases
+    dynamic = config.get('dynamic', {})
+    if dynamic:
+        bases = dynamic.get('bases', [])
+        if not isinstance(bases, list):
+            errors.append("dynamic.bases must be a list")
+        else:
+            for i, base in enumerate(bases):
+                if not isinstance(base, dict):
+                    errors.append(f"dynamic.bases[{i}] must be a dict")
+                    continue
+                if not base.get('name'):
+                    errors.append(f"dynamic.bases[{i}] missing 'name'")
+                elif not validate_mount_name(base['name']):
+                    errors.append(f"dynamic.bases[{i}] invalid name: {base.get('name')}")
+                if not base.get('host_path'):
+                    errors.append(f"dynamic.bases[{i}] missing 'host_path'")
+                # Validate max_mode
+                max_mode = base.get('max_mode', 'ro')
+                if max_mode not in ('ro', 'rw'):
+                    errors.append(f"dynamic.bases[{i}] invalid max_mode: {max_mode}")
+                # Validate authorization
+                auth = base.get('authorization', {})
+                auth_mode = auth.get('mode', 'allowlist')
+                if auth_mode not in ('allowlist', 'role', 'self_only'):
+                    errors.append(f"dynamic.bases[{i}] invalid authorization.mode: {auth_mode}")
+                if auth_mode == 'allowlist' and not auth.get('allowed_users'):
+                    errors.append(f"dynamic.bases[{i}] allowlist mode requires 'allowed_users'")
+                # Validate subpath_restrictions
+                subpath_res = base.get('subpath_restrictions', {})
+                subpath_mode = subpath_res.get('mode', 'blocklist')
+                if subpath_mode not in ('allowlist', 'blocklist'):
+                    errors.append(f"dynamic.bases[{i}] invalid subpath_restrictions.mode: {subpath_mode}")
+
     return errors
 
 
@@ -127,7 +161,45 @@ def get_per_user_mounts(config: dict) -> dict:
     return result
 
 
-def output_bash(global_mounts: dict, per_user_mounts: dict) -> None:
+def get_dynamic_bases(config: dict) -> dict:
+    """Extract dynamic mount base configuration."""
+    dynamic = config.get('dynamic', {})
+    result = {
+        'enabled': dynamic.get('enabled', False),
+        'security': dynamic.get('security', {}),
+        'bases': [],
+    }
+
+    if not result['enabled']:
+        return result
+
+    bases = dynamic.get('bases', [])
+    if isinstance(bases, list):
+        for base in bases:
+            if isinstance(base, dict) and base.get('name') and base.get('host_path'):
+                path = Path(base['host_path'])
+                optional = base.get('optional', True)
+
+                # Check if path exists (for non-optional bases without {username} placeholder)
+                has_placeholder = '{username}' in base['host_path']
+                if not has_placeholder and not path.exists() and not optional:
+                    print(f"ERROR: Required dynamic base path does not exist: {path}", file=sys.stderr)
+                    sys.exit(1)
+
+                result['bases'].append({
+                    'name': base['name'],
+                    'host_path': base['host_path'],
+                    'description': base.get('description', ''),
+                    'max_mode': base.get('max_mode', 'ro'),
+                    'authorization': base.get('authorization', {'mode': 'allowlist', 'allowed_users': []}),
+                    'subpath_restrictions': base.get('subpath_restrictions', {'mode': 'blocklist', 'blocked': []}),
+                    'optional': optional,
+                })
+
+    return result
+
+
+def output_bash(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None) -> None:
     """Output in bash-compatible format."""
     # Output global RO mounts
     for mount in global_mounts['ro']:
@@ -146,13 +218,25 @@ def output_bash(global_mounts: dict, per_user_mounts: dict) -> None:
     for mount in per_user_mounts['rw']:
         print(f"MOUNT_USER_RW:{mount['host_path']}:{mount['name']}")
 
+    # Output dynamic mount bases (if enabled)
+    if dynamic_bases and dynamic_bases.get('enabled'):
+        for base in dynamic_bases.get('bases', []):
+            max_mode = base.get('max_mode', 'ro')
+            # Dynamic bases are mounted based on their max_mode
+            # rw mode means the user CAN request rw, so we mount as rw
+            # ro mode means read-only only
+            mount_mode = 'rw' if max_mode == 'rw' else 'ro'
+            print(f"MOUNT_DYNAMIC:{base['host_path']}:{base['name']}:{mount_mode}")
 
-def output_json(global_mounts: dict, per_user_mounts: dict) -> None:
+
+def output_json(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None) -> None:
     """Output in JSON format."""
     result = {
         'global': global_mounts,
         'per_user': per_user_mounts,
     }
+    if dynamic_bases:
+        result['dynamic'] = dynamic_bases
     print(json.dumps(result, indent=2))
 
 
@@ -214,12 +298,13 @@ def main():
     # Extract mounts
     global_mounts = get_global_mounts(config)
     per_user_mounts = get_per_user_mounts(config)
+    dynamic_bases = get_dynamic_bases(config)
 
     # Output
     if args.mounts_json or args.per_user_json:
-        output_json(global_mounts, per_user_mounts)
+        output_json(global_mounts, per_user_mounts, dynamic_bases)
     else:
-        output_bash(global_mounts, per_user_mounts)
+        output_bash(global_mounts, per_user_mounts, dynamic_bases)
 
 
 if __name__ == '__main__':

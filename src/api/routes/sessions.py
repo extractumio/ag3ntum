@@ -15,7 +15,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
@@ -35,8 +35,10 @@ from ...services.session_service import session_service
 from ..deps import get_current_user_id
 from ..models import (
     AgentConfigOverrides,
+    AvailableDynamicMountsResponse,
     CancelResponse,
     CreateSessionRequest,
+    DynamicBaseInfo,
     ResultMetrics,
     ResultResponse,
     RunTaskRequest,
@@ -310,14 +312,16 @@ def build_task_params(
     fork_session: bool,
     config: AgentConfigOverrides,
     sessions_dir: Path,
+    dynamic_mounts: list | None = None,
 ) -> TaskParams:
     """
     Build TaskParams from request data.
 
     Converts API request fields to TaskParams dataclass.
-    
+
     Args:
         sessions_dir: User-specific sessions base directory (e.g., /users/username/sessions)
+        dynamic_mounts: Optional list of validated DynamicMountRequest objects
     """
     return TaskParams(
         task=task,
@@ -339,6 +343,62 @@ def build_task_params(
         include_partial_messages=config.include_partial_messages,
         thinking_tokens=config.thinking_tokens,
         profile=config.profile,
+        dynamic_mounts=dynamic_mounts,
+    )
+
+
+# =============================================================================
+# GET /sessions/dynamic-mounts/available - List available dynamic mount bases
+# =============================================================================
+
+@router.get("/dynamic-mounts/available", response_model=AvailableDynamicMountsResponse)
+async def get_available_dynamic_mounts(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> AvailableDynamicMountsResponse:
+    """
+    Get list of available dynamic mount bases for the current user.
+
+    Returns bases that the user is authorized to access, along with their
+    descriptions and maximum access modes. Used by the UI to populate the
+    dynamic mount selector.
+    """
+    from ...services.mount_service import get_dynamic_mount_service
+
+    # Get username from database
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User not found: {user_id}",
+        )
+
+    # Get dynamic mount service and available bases
+    mount_service = get_dynamic_mount_service()
+
+    if not mount_service.enabled:
+        return AvailableDynamicMountsResponse(
+            enabled=False,
+            bases=[],
+            max_mounts_per_session=0,
+        )
+
+    available_bases = mount_service.get_available_bases(user.username)
+
+    return AvailableDynamicMountsResponse(
+        enabled=True,
+        bases=[
+            DynamicBaseInfo(
+                name=base.name,
+                description=base.description,
+                max_mode=base.max_mode,
+                requires_subpath=base.host_path.count("/") > 3,  # Heuristic for deep paths
+            )
+            for base in available_bases
+        ],
+        max_mounts_per_session=mount_service.security.get("max_mounts_per_session", 10),
     )
 
 
@@ -394,6 +454,33 @@ async def run_task(
     workspace_dir = user_sessions_dir / session.id / "workspace"
     task_for_agent = process_large_user_input(request.task, workspace_dir)
 
+    # Validate and process dynamic mounts (if any)
+    validated_dynamic_mounts = None
+    if request.dynamic_mounts:
+        from ...services.mount_service import get_dynamic_mount_service
+
+        mount_service = get_dynamic_mount_service()
+
+        # Validate each mount request
+        for mount_req in request.dynamic_mounts:
+            validation = mount_service.validate_mount_request(mount_req, user.username)
+            if not validation.is_valid:
+                logger.warning(
+                    f"Dynamic mount validation failed: session={session.id}, "
+                    f"base={mount_req.base}, subpath={mount_req.subpath}, "
+                    f"error={validation.error}, code={validation.denial_code}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid dynamic mount '{mount_req.alias}': {validation.error}",
+                )
+
+        # All mounts validated, store them
+        validated_dynamic_mounts = request.dynamic_mounts
+        logger.info(
+            f"Validated {len(validated_dynamic_mounts)} dynamic mounts for session {session.id}"
+        )
+
     # Build task parameters (pass same sessions_dir through the chain)
     params = build_task_params(
         session_id=session.id,
@@ -404,6 +491,7 @@ async def run_task(
         fork_session=request.fork_session,
         config=request.config,
         sessions_dir=user_sessions_dir,
+        dynamic_mounts=validated_dynamic_mounts,
     )
 
     # Record user message event with processed text for LLM reference

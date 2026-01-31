@@ -4,11 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
-# Arrays for mount options (format: "path:name")
+# Arrays for mount options (format: "path:name" or "path:name:mode" for dynamic)
 MOUNTS_RW=()
 MOUNTS_RO=()
 MOUNTS_USER_RW=()
 MOUNTS_USER_RO=()
+MOUNTS_DYNAMIC=()  # Dynamic mount bases (format: "path:name:mode")
 
 # Track used mount names to detect duplicates (space-separated string for Bash 3 compat)
 USED_MOUNT_NAMES=""
@@ -18,7 +19,7 @@ IMAGE_PREFIX="ag3ntum"  # Image name prefix
 CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 
 # Reserved mount names that cannot be used
-RESERVED_NAMES=("persistent" "ro" "rw" "external")
+RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
 # Directories that container needs to WRITE to (need ownership fix on Linux)
 # Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
@@ -369,6 +370,27 @@ function load_mounts_from_yaml() {
       validated="$(validate_mount "$mount_path" "$mount_name" "user-rw")" || exit 1
       MOUNTS_USER_RW+=("$validated")
       echo "  Added per-user RW mount: ${mount_name} -> ${mount_path}"
+    elif [[ "${mount_type}" == "MOUNT_DYNAMIC" ]]; then
+      # Dynamic mount base (format: MOUNT_DYNAMIC:path:name:mode)
+      # The mode comes from the third field
+      local mount_mode="${rest##*:}"
+      # Re-extract name without mode
+      rest="${line#*:}"
+      rest="${rest#*:}"
+      mount_name="${rest%%:*}"
+      mount_mode="${rest##*:}"
+
+      # Handle paths with {username} placeholder - skip validation for those
+      if [[ "${mount_path}" == *"{username}"* ]]; then
+        # Skip path existence validation for user-templated paths
+        MOUNTS_DYNAMIC+=("${mount_path}:${mount_name}:${mount_mode}")
+        echo "  Added dynamic base (templated): ${mount_name} -> ${mount_path} [${mount_mode}]"
+      else
+        local validated
+        validated="$(validate_mount "$mount_path" "$mount_name" "dynamic")" || exit 1
+        MOUNTS_DYNAMIC+=("${validated}:${mount_mode}")
+        echo "  Added dynamic base: ${mount_name} -> ${mount_path} [${mount_mode}]"
+      fi
     fi
   done <<< "${mounts_output}"
 }
@@ -543,7 +565,7 @@ function generate_compose_override() {
   # Ensure the auto-generated directory exists
   mkdir -p "data/auto-generated"
 
-  if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 && ${#MOUNTS_USER_RW[@]} -eq 0 && ${#MOUNTS_USER_RO[@]} -eq 0 ]]; then
+  if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 && ${#MOUNTS_USER_RW[@]} -eq 0 && ${#MOUNTS_USER_RO[@]} -eq 0 && ${#MOUNTS_DYNAMIC[@]} -eq 0 ]]; then
     # No mounts specified, remove override file and create empty manifest
     rm -f "${override_file}"
     cat > "${manifest_file}" <<EOF
@@ -660,6 +682,42 @@ EOF
     echo "  user-rw: []" >> "${manifest_file}"
   fi
 
+  # Write dynamic mount bases section (mounted at /mounts/dynamic/{name})
+  if [[ ${#MOUNTS_DYNAMIC[@]} -gt 0 ]]; then
+    echo "  dynamic:" >> "${manifest_file}"
+    for mount in "${MOUNTS_DYNAMIC[@]}"; do
+      # Format: path:name:mode
+      local abs_path="${mount%%:*}"
+      local rest="${mount#*:}"
+      local name="${rest%%:*}"
+      local mode="${rest##*:}"
+
+      # Skip paths with {username} placeholder for Docker volume (validated at session time)
+      if [[ "${abs_path}" == *"{username}"* ]]; then
+        echo "    - name: \"${name}\"" >> "${manifest_file}"
+        echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+        echo "      container_path: \"/mounts/dynamic/${name}\"" >> "${manifest_file}"
+        echo "      max_mode: \"${mode}\"" >> "${manifest_file}"
+        echo "      has_placeholder: true" >> "${manifest_file}"
+        echo "  Note: Dynamic base '${name}' has {username} placeholder - Docker volume skipped"
+      else
+        # Regular path - add Docker volume
+        local docker_mode="ro"
+        if [[ "${mode}" == "rw" ]]; then
+          docker_mode="rw"
+        fi
+        echo "      - ${abs_path}:/mounts/dynamic/${name}:${docker_mode}" >> "${override_file}"
+        echo "    - name: \"${name}\"" >> "${manifest_file}"
+        echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+        echo "      container_path: \"/mounts/dynamic/${name}\"" >> "${manifest_file}"
+        echo "      max_mode: \"${mode}\"" >> "${manifest_file}"
+        echo "      has_placeholder: false" >> "${manifest_file}"
+      fi
+    done
+  else
+    echo "  dynamic: []" >> "${manifest_file}"
+  fi
+
   echo ""
   echo "=== External Mounts Configured ==="
   echo "Generated ${override_file}"
@@ -677,6 +735,15 @@ EOF
     for mount in "${MOUNTS_RW[@]}"; do
       local name="${mount##*:}"
       echo "  ./external/rw/${name}/"
+    done
+  fi
+  if [[ ${#MOUNTS_DYNAMIC[@]} -gt 0 ]]; then
+    echo "Dynamic mount bases (user-selectable per session):"
+    for mount in "${MOUNTS_DYNAMIC[@]}"; do
+      local rest="${mount#*:}"
+      local name="${rest%%:*}"
+      local mode="${rest##*:}"
+      echo "  ./dynamic/${name}/ [max: ${mode}]"
     done
   fi
   echo "Persistent storage (always available):"

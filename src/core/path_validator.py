@@ -294,6 +294,21 @@ class PathValidatorConfig(BaseModel):
         description="Per-user read-write mounts: {name: real_path}"
     )
 
+    # =========================================================================
+    # DYNAMIC MOUNT PATHS - Session-time user-selected mounts
+    # =========================================================================
+    # These are configured via API at session creation time.
+    # Agent sees: /workspace/dynamic/{alias}/* -> Real path: /mounts/dynamic/{base}/{subpath}/*
+
+    dynamic_mounts_ro: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Dynamic read-only mounts for this session: {alias: container_path}"
+    )
+    dynamic_mounts_rw: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Dynamic read-write mounts for this session: {alias: container_path}"
+    )
+
     log_all_access: bool = Field(
         default=True, description="Log all path access attempts"
     )
@@ -373,6 +388,15 @@ class Ag3ntumPathValidator:
         }
         self.user_mounts_rw: dict[str, Path] = {
             name: path.resolve() for name, path in config.user_mounts_rw.items()
+        }
+
+        # Dynamic mount paths (configured per-session via API)
+        # Agent sees: /workspace/dynamic/{alias}/* -> Real path from config
+        self.dynamic_mounts_ro: dict[str, Path] = {
+            alias: path.resolve() for alias, path in config.dynamic_mounts_ro.items()
+        }
+        self.dynamic_mounts_rw: dict[str, Path] = {
+            alias: path.resolve() for alias, path in config.dynamic_mounts_rw.items()
         }
 
         # Extract session context from workspace path for cross-user/cross-session blocking
@@ -546,10 +570,34 @@ class Ag3ntumPathValidator:
                 except ValueError:
                     pass
 
+        # Check dynamic mount boundaries (session-time user-selected mounts)
+        in_dynamic_ro = False
+        in_dynamic_rw = False
+
+        if not in_workspace and not in_global_skills and not in_user_skills and not in_external_ro and not in_external_rw and not in_persistent and not in_user_ro and not in_user_rw:
+            # Check dynamic RO mounts
+            for alias, mount_path in self.dynamic_mounts_ro.items():
+                try:
+                    rel_path = str(normalized.relative_to(mount_path))
+                    in_dynamic_ro = True
+                    break
+                except ValueError:
+                    pass
+
+        if not in_workspace and not in_global_skills and not in_user_skills and not in_external_ro and not in_external_rw and not in_persistent and not in_user_ro and not in_user_rw and not in_dynamic_ro:
+            # Check dynamic RW mounts
+            for alias, mount_path in self.dynamic_mounts_rw.items():
+                try:
+                    rel_path = str(normalized.relative_to(mount_path))
+                    in_dynamic_rw = True
+                    break
+                except ValueError:
+                    pass
+
         in_any_allowed = (
             in_workspace or in_global_skills or in_user_skills or
             in_external_ro or in_external_rw or in_persistent or
-            in_user_ro or in_user_rw
+            in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw
         )
 
         if not in_any_allowed:
@@ -567,7 +615,7 @@ class Ag3ntumPathValidator:
 
         # Step 4: Check blocklist (workspace and external mount paths)
         # Security: blocklist applies to all areas to prevent accessing sensitive files
-        should_check_blocklist = in_workspace or in_external_ro or in_external_rw or in_persistent or in_user_ro or in_user_rw
+        should_check_blocklist = in_workspace or in_external_ro or in_external_rw or in_persistent or in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw
         if should_check_blocklist:
             for pattern in self.config.blocklist:
                 if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
@@ -602,8 +650,9 @@ class Ag3ntumPathValidator:
         # - Skills directories (global and user) are always read-only
         # - External RO mounts are always read-only
         # - Per-user RO mounts are always read-only
+        # - Dynamic RO mounts are always read-only
         # - Workspace paths may have readonly_prefixes
-        is_readonly = in_global_skills or in_user_skills or in_external_ro or in_user_ro
+        is_readonly = in_global_skills or in_user_skills or in_external_ro or in_user_ro or in_dynamic_ro
 
         if in_workspace and not is_readonly:
             is_readonly = any(
@@ -613,12 +662,12 @@ class Ag3ntumPathValidator:
 
         if is_readonly and operation in ("write", "edit", "delete"):
             # Provide helpful error message for external RO mounts
-            if in_external_ro or in_user_ro:
+            if in_external_ro or in_user_ro or in_dynamic_ro:
                 self._log_blocked(path, operation, "Read-only external mount")
                 raise PathValidationError(
-                    f"Cannot {operation} read-only external mount: {path}",
+                    f"Cannot {operation} read-only mount: {path}",
                     path=path,
-                    reason="External mount is read-only (mounted with --mount-ro or per-user ro)",
+                    reason="Mount is read-only (external mount, per-user ro, or dynamic ro)",
                 )
             else:
                 self._log_blocked(path, operation, "Read-only path")
@@ -659,15 +708,19 @@ class Ag3ntumPathValidator:
         p = PurePosixPath(path)
         path_str = str(p)
 
-        # First, normalize relative paths that reference external mounts or persistent
+        # First, normalize relative paths that reference external mounts, persistent, or dynamic
         if not p.is_absolute():
-            # Check if it's a relative external path like ./external/ro/... or ./persistent/...
+            # Check if it's a relative external path like ./external/ro/..., ./persistent/..., or ./dynamic/...
             if path_str.startswith("./external/") or path_str.startswith("external/"):
                 # Convert to absolute bwrap-style path
                 path_str = "/workspace/" + path_str.lstrip("./")
                 p = PurePosixPath(path_str)
             elif path_str.startswith("./persistent/") or path_str.startswith("persistent/"):
                 # Convert to absolute bwrap-style path
+                path_str = "/workspace/" + path_str.lstrip("./")
+                p = PurePosixPath(path_str)
+            elif path_str.startswith("./dynamic/") or path_str.startswith("dynamic/"):
+                # Convert to absolute bwrap-style path for dynamic mounts
                 path_str = "/workspace/" + path_str.lstrip("./")
                 p = PurePosixPath(path_str)
 
@@ -855,6 +908,54 @@ class Ag3ntumPathValidator:
                     return resolved
 
             # Unrecognized external path - fall through to workspace handling
+
+        # Handle dynamic mount paths (session-time user-selected mounts)
+        # /workspace/dynamic/{alias}/* -> container_path/*
+        if path_str.startswith("/workspace/dynamic/"):
+            remaining = path_str[len("/workspace/dynamic/"):]
+            # Extract alias (first path component)
+            if "/" in remaining:
+                alias, relative = remaining.split("/", 1)
+            else:
+                alias = remaining
+                relative = ""
+
+            # Check dynamic RO mounts first
+            if alias in self.dynamic_mounts_ro:
+                mount_path = self.dynamic_mounts_ro[alias]
+                if relative:
+                    resolved = (mount_path / relative).resolve()
+                else:
+                    resolved = mount_path.resolve()
+                # Security: verify resolved path stays within boundary
+                if not self._is_within_boundary(resolved, mount_path):
+                    raise PathValidationError(
+                        f"Path traversal detected: {path}",
+                        path=path,
+                        reason="PATH_TRAVERSAL: Resolved path escapes dynamic-ro mount boundary",
+                    )
+                return resolved
+
+            # Check dynamic RW mounts
+            if alias in self.dynamic_mounts_rw:
+                mount_path = self.dynamic_mounts_rw[alias]
+                if relative:
+                    resolved = (mount_path / relative).resolve()
+                else:
+                    resolved = mount_path.resolve()
+                # Security: verify resolved path stays within boundary
+                if not self._is_within_boundary(resolved, mount_path):
+                    raise PathValidationError(
+                        f"Path traversal detected: {path}",
+                        path=path,
+                        reason="PATH_TRAVERSAL: Resolved path escapes dynamic-rw mount boundary",
+                    )
+                return resolved
+
+            # Dynamic mount alias not configured - fall through to workspace handling
+            relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
+            resolved = (self.workspace / relative_to_workspace).resolve()
+            return resolved
 
         # Handle standard workspace paths
         if path_str.startswith("/workspace"):
