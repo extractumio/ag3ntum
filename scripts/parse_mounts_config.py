@@ -18,6 +18,19 @@ from pathlib import Path
 import yaml
 
 
+# Reserved mount names that cannot be used (would conflict with system paths)
+RESERVED_MOUNT_NAMES = {
+    'paths',       # Reserved for original-path mounts (/mounts/paths/)
+    'persistent',  # Reserved for persistent storage
+    'external',    # Could conflict with workspace structure
+    'ro',          # Legacy prefix - prevent confusion
+    'rw',          # Legacy prefix - prevent confusion
+    'user-ro',     # Legacy prefix - prevent confusion
+    'user-rw',     # Legacy prefix - prevent confusion
+    'dynamic',     # Legacy prefix - prevent confusion
+}
+
+
 def validate_mount_name(name: str) -> bool:
     """Validate mount name is safe."""
     if not name:
@@ -26,10 +39,98 @@ def validate_mount_name(name: str) -> bool:
         return False
     if len(name) > 64:
         return False
-    reserved = ['persistent', 'ro', 'rw', 'external']
-    if name.lower() in reserved:
+    if name.lower() in RESERVED_MOUNT_NAMES:
         return False
     return True
+
+
+def validate_no_collisions(config: dict) -> list[str]:
+    """
+    Validate no name collisions across all mount categories.
+
+    With flattened mount structure (/mounts/{name}), all mounts share the same
+    namespace. This function ensures no duplicate names across:
+    - global.ro, global.rw
+    - per_user.ro, per_user.rw
+    - dynamic.bases
+    - original_paths.ro, original_paths.rw (encoded names)
+    """
+    errors = []
+    all_names: dict[str, str] = {}  # name -> source for error messages
+
+    def add_name(name: str, source: str) -> None:
+        """Add a name and check for collisions."""
+        if not name:
+            return
+        name_lower = name.lower()
+        if name_lower in RESERVED_MOUNT_NAMES:
+            errors.append(f"Reserved name '{name}' used in {source}")
+        elif name_lower in all_names:
+            errors.append(
+                f"Name collision: '{name}' used in both "
+                f"{all_names[name_lower]} and {source}"
+            )
+        else:
+            all_names[name_lower] = source
+
+    # Collect names from global mounts
+    global_mounts = config.get('global', {})
+    for mount in global_mounts.get('ro', []) or []:
+        if isinstance(mount, dict):
+            add_name(mount.get('name'), 'global.ro')
+    for mount in global_mounts.get('rw', []) or []:
+        if isinstance(mount, dict):
+            add_name(mount.get('name'), 'global.rw')
+
+    # Collect names from per-user mounts
+    per_user = config.get('per_user', {})
+    for mount in per_user.get('ro', []) or []:
+        if isinstance(mount, dict):
+            add_name(mount.get('name'), 'per_user.ro')
+    for mount in per_user.get('rw', []) or []:
+        if isinstance(mount, dict):
+            add_name(mount.get('name'), 'per_user.rw')
+
+    # Collect names from dynamic bases
+    dynamic = config.get('dynamic', {})
+    if dynamic.get('enabled', False):
+        for base in dynamic.get('bases', []) or []:
+            if isinstance(base, dict):
+                add_name(base.get('name'), 'dynamic.bases')
+
+    # Collect encoded names from original_paths (for future use)
+    # Original paths like /var/log encode to _var_log
+    original_paths = config.get('original_paths', {})
+    for mount in original_paths.get('ro', []) or []:
+        if isinstance(mount, dict) and mount.get('path'):
+            # Encode path: /var/log -> _var_log
+            encoded = mount['path'].replace('/', '_')
+            add_name(encoded, f"original_paths.ro ({mount['path']})")
+    for mount in original_paths.get('rw', []) or []:
+        if isinstance(mount, dict) and mount.get('path'):
+            encoded = mount['path'].replace('/', '_')
+            add_name(encoded, f"original_paths.rw ({mount['path']})")
+
+    # Check for encoding collisions between original paths
+    # e.g., /var/log and /var_log both encode to _var_log
+    original_ro = original_paths.get('ro', []) or []
+    original_rw = original_paths.get('rw', []) or []
+    all_original = original_ro + original_rw
+    for i, p1 in enumerate(all_original):
+        if not isinstance(p1, dict) or not p1.get('path'):
+            continue
+        enc1 = p1['path'].replace('/', '_')
+        for p2 in all_original[i+1:]:
+            if not isinstance(p2, dict) or not p2.get('path'):
+                continue
+            enc2 = p2['path'].replace('/', '_')
+            if enc1 == enc2 and p1['path'] != p2['path']:
+                errors.append(
+                    f"Encoding collision: {p1['path']} and {p2['path']} "
+                    f"both encode to {enc1}"
+                )
+
+    return errors
 
 
 def validate_mount_config(config: dict) -> list[str]:
@@ -107,6 +208,34 @@ def validate_mount_config(config: dict) -> list[str]:
                 subpath_mode = subpath_res.get('mode', 'blocklist')
                 if subpath_mode not in ('allowlist', 'blocklist'):
                     errors.append(f"dynamic.bases[{i}] invalid subpath_restrictions.mode: {subpath_mode}")
+
+    # Validate original-path mounts
+    original_paths = config.get('original_paths', {})
+    for mode in ['ro', 'rw']:
+        mounts = original_paths.get(mode, [])
+        if not isinstance(mounts, list):
+            errors.append(f"original_paths.{mode} must be a list")
+            continue
+        for i, mount in enumerate(mounts):
+            if not isinstance(mount, dict):
+                errors.append(f"original_paths.{mode}[{i}] must be a dict")
+                continue
+            if not mount.get('path'):
+                errors.append(f"original_paths.{mode}[{i}] missing 'path'")
+            else:
+                path = mount['path']
+                # Must be absolute path
+                if not path.startswith('/'):
+                    errors.append(f"original_paths.{mode}[{i}] path must be absolute: {path}")
+                # Check reserved paths
+                from src.core.mount_path_encoder import is_reserved_path
+                if is_reserved_path(path):
+                    errors.append(f"original_paths.{mode}[{i}] path is reserved: {path}")
+
+    # Validate no name collisions across all mount categories
+    # (flattened structure means all mounts share the same namespace)
+    collision_errors = validate_no_collisions(config)
+    errors.extend(collision_errors)
 
     return errors
 
@@ -199,7 +328,44 @@ def get_dynamic_bases(config: dict) -> dict:
     return result
 
 
-def output_bash(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None) -> None:
+def get_original_path_mounts(config: dict) -> dict:
+    """
+    Extract original-path mount configuration.
+
+    Original-path mounts allow accessing paths like /var/log at their
+    original locations within the sandbox.
+
+    Returns:
+        Dict with keys 'ro' and 'rw', each containing a list of mount configs:
+        {
+            'ro': [{'path': '/var/log', 'description': '...', 'allowed_users': ['*']}],
+            'rw': [{'path': '/data/output', 'description': '...', 'allowed_users': ['admin']}]
+        }
+    """
+    result = {'ro': [], 'rw': []}
+
+    original_paths = config.get('original_paths', {})
+    for mode in ['ro', 'rw']:
+        mounts = original_paths.get(mode, [])
+        if isinstance(mounts, list):
+            for mount in mounts:
+                if isinstance(mount, dict) and mount.get('path'):
+                    path = mount['path']
+                    # Encode path for mount directory name
+                    encoded = path.replace('/', '_')
+
+                    result[mode].append({
+                        'path': path,
+                        'encoded': encoded,
+                        'description': mount.get('description', ''),
+                        'optional': mount.get('optional', True),
+                        'allowed_users': mount.get('allowed_users', ['*']),
+                    })
+
+    return result
+
+
+def output_bash(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None, original_paths: dict = None) -> None:
     """Output in bash-compatible format."""
     # Output global RO mounts
     for mount in global_mounts['ro']:
@@ -228,8 +394,17 @@ def output_bash(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict 
             mount_mode = 'rw' if max_mode == 'rw' else 'ro'
             print(f"MOUNT_DYNAMIC:{base['host_path']}:{base['name']}:{mount_mode}")
 
+    # Output original-path mounts (if configured)
+    # These allow paths like /var/log to be accessible at their original locations
+    if original_paths:
+        for mount in original_paths.get('ro', []):
+            # Format: MOUNT_ORIGINAL:{path}:{encoded}:{mode}
+            print(f"MOUNT_ORIGINAL:{mount['path']}:{mount['encoded']}:ro")
+        for mount in original_paths.get('rw', []):
+            print(f"MOUNT_ORIGINAL:{mount['path']}:{mount['encoded']}:rw")
 
-def output_json(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None) -> None:
+
+def output_json(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict = None, original_paths: dict = None) -> None:
     """Output in JSON format."""
     result = {
         'global': global_mounts,
@@ -237,6 +412,8 @@ def output_json(global_mounts: dict, per_user_mounts: dict, dynamic_bases: dict 
     }
     if dynamic_bases:
         result['dynamic'] = dynamic_bases
+    if original_paths:
+        result['original_paths'] = original_paths
     print(json.dumps(result, indent=2))
 
 
@@ -299,12 +476,13 @@ def main():
     global_mounts = get_global_mounts(config)
     per_user_mounts = get_per_user_mounts(config)
     dynamic_bases = get_dynamic_bases(config)
+    original_paths = get_original_path_mounts(config)
 
     # Output
     if args.mounts_json or args.per_user_json:
-        output_json(global_mounts, per_user_mounts, dynamic_bases)
+        output_json(global_mounts, per_user_mounts, dynamic_bases, original_paths)
     else:
-        output_bash(global_mounts, per_user_mounts, dynamic_bases)
+        output_bash(global_mounts, per_user_mounts, dynamic_bases, original_paths)
 
 
 if __name__ == '__main__':

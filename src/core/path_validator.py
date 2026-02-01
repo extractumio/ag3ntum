@@ -258,20 +258,22 @@ class PathValidatorConfig(BaseModel):
     )
 
     # =========================================================================
-    # EXTERNAL MOUNT PATHS - Host folders mounted via run.sh
+    # EXTERNAL MOUNT PATHS - Host folders mounted via run.sh (flattened structure)
     # =========================================================================
     # These are Docker container paths (not bwrap paths).
-    # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*
-    # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
+    # With flattened mount structure, all mounts are at /mounts/{name}
+    # Agent sees: /workspace/external/ro/* -> Real path: /mounts/{name}
+    # Agent sees: /workspace/external/rw/* -> Real path: /mounts/{name}
     # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
 
-    external_ro_base: Path | None = Field(
-        default=None,
-        description="Base path for read-only external mounts (/mounts/ro)"
+    # Global mounts from external-mounts.yaml global section
+    global_mounts_ro: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Global read-only mounts: {name: container_path}"
     )
-    external_rw_base: Path | None = Field(
-        default=None,
-        description="Base path for read-write external mounts (/mounts/rw)"
+    global_mounts_rw: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Global read-write mounts: {name: container_path}"
     )
     persistent_path: Path | None = Field(
         default=None,
@@ -282,23 +284,26 @@ class PathValidatorConfig(BaseModel):
     # PER-USER MOUNT PATHS - User-specific external mounts
     # =========================================================================
     # These are configured via external-mounts.yaml per_user section.
-    # Agent sees: /workspace/external/user-ro/{name}/* -> Real path: {host_path}/*
-    # Agent sees: /workspace/external/user-rw/{name}/* -> Real path: {host_path}/*
+    # With flattened structure, mounts appear at /mounts/{name}
+    # Agent sees: /workspace/external/user-ro/{name}/* -> Real path: /mounts/{name}/*
+    # Agent sees: /workspace/external/user-rw/{name}/* -> Real path: /mounts/{name}/*
 
     user_mounts_ro: dict[str, Path] = Field(
         default_factory=dict,
-        description="Per-user read-only mounts: {name: real_path}"
+        description="Per-user read-only mounts: {name: container_path}"
     )
     user_mounts_rw: dict[str, Path] = Field(
         default_factory=dict,
-        description="Per-user read-write mounts: {name: real_path}"
+        description="Per-user read-write mounts: {name: container_path}"
     )
 
     # =========================================================================
     # DYNAMIC MOUNT PATHS - Session-time user-selected mounts
     # =========================================================================
     # These are configured via API at session creation time.
-    # Agent sees: /workspace/dynamic/{alias}/* -> Real path: /mounts/dynamic/{base}/{subpath}/*
+    # Agent sees: ./{alias}/* via symlinks at workspace root
+    # Real path: /mounts/{base}/{subpath}/* (flattened structure)
+    # The symlinks are created at workspace/{alias} pointing to /mounts/{base}/{subpath}
 
     dynamic_mounts_ro: dict[str, Path] = Field(
         default_factory=dict,
@@ -307,6 +312,24 @@ class PathValidatorConfig(BaseModel):
     dynamic_mounts_rw: dict[str, Path] = Field(
         default_factory=dict,
         description="Dynamic read-write mounts for this session: {alias: container_path}"
+    )
+
+    # =========================================================================
+    # ORIGINAL-PATH MOUNTS - Access paths at their original locations
+    # =========================================================================
+    # These allow accessing paths like /var/log at /var/log (not via workspace).
+    # Docker mounts them at /mounts/paths/{encoded}, and bubblewrap bind-mounts
+    # them to their original locations inside the sandbox.
+    # For file tools in the main Python process, we translate original paths
+    # to Docker paths: /var/log -> /mounts/paths/_var_log
+
+    original_path_mounts_ro: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Original-path read-only mounts: {original_path: docker_path}"
+    )
+    original_path_mounts_rw: dict[str, Path] = Field(
+        default_factory=dict,
+        description="Original-path read-write mounts: {original_path: docker_path}"
     )
 
     log_all_access: bool = Field(
@@ -372,17 +395,21 @@ class Ag3ntumPathValidator:
         self.global_skills = config.global_skills_path.resolve() if config.global_skills_path else None
         self.user_skills = config.user_skills_path.resolve() if config.user_skills_path else None
 
-        # External mount paths
-        # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*
-        self.external_ro = config.external_ro_base.resolve() if config.external_ro_base else None
-        # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
-        self.external_rw = config.external_rw_base.resolve() if config.external_rw_base else None
+        # External mount paths (flattened structure: all at /mounts/{name})
+        # Agent sees: /workspace/external/ro/* -> Real path: /mounts/{name}
+        # Agent sees: /workspace/external/rw/* -> Real path: /mounts/{name}
+        self.global_mounts_ro: dict[str, Path] = {
+            name: path.resolve() for name, path in config.global_mounts_ro.items()
+        }
+        self.global_mounts_rw: dict[str, Path] = {
+            name: path.resolve() for name, path in config.global_mounts_rw.items()
+        }
         # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
         self.persistent = config.persistent_path.resolve() if config.persistent_path else None
 
-        # Per-user mount paths (resolved at session start)
-        # Agent sees: /workspace/external/user-ro/{name}/* -> Real path from config
-        # Agent sees: /workspace/external/user-rw/{name}/* -> Real path from config
+        # Per-user mount paths (resolved at session start, flattened structure)
+        # Agent sees: /workspace/external/user-ro/{name}/* -> Real path: /mounts/{name}/*
+        # Agent sees: /workspace/external/user-rw/{name}/* -> Real path: /mounts/{name}/*
         self.user_mounts_ro: dict[str, Path] = {
             name: path.resolve() for name, path in config.user_mounts_ro.items()
         }
@@ -390,13 +417,23 @@ class Ag3ntumPathValidator:
             name: path.resolve() for name, path in config.user_mounts_rw.items()
         }
 
-        # Dynamic mount paths (configured per-session via API)
-        # Agent sees: /workspace/dynamic/{alias}/* -> Real path from config
+        # Dynamic mount paths (configured per-session via API, flattened structure)
+        # Agent sees: ./{alias}/* via symlinks -> Real path: /mounts/{base}/*
         self.dynamic_mounts_ro: dict[str, Path] = {
             alias: path.resolve() for alias, path in config.dynamic_mounts_ro.items()
         }
         self.dynamic_mounts_rw: dict[str, Path] = {
             alias: path.resolve() for alias, path in config.dynamic_mounts_rw.items()
+        }
+
+        # Original-path mounts (access paths at original locations)
+        # Agent sees: /var/log/* -> Docker path: /mounts/paths/_var_log/*
+        # The key is the original path, the value is the Docker path
+        self.original_path_mounts_ro: dict[str, Path] = {
+            orig: docker.resolve() for orig, docker in config.original_path_mounts_ro.items()
+        }
+        self.original_path_mounts_rw: dict[str, Path] = {
+            orig: docker.resolve() for orig, docker in config.original_path_mounts_rw.items()
         }
 
         # Extract session context from workspace path for cross-user/cross-session blocking
@@ -524,20 +561,24 @@ class Ag3ntumPathValidator:
             except ValueError:
                 pass
 
-        # Check external mount boundaries
+        # Check global external mount boundaries (flattened structure)
         if not in_workspace and not in_global_skills and not in_user_skills:
-            if self.external_ro:
+            # Check global RO mounts
+            for mount_name, mount_path in self.global_mounts_ro.items():
                 try:
-                    rel_path = str(normalized.relative_to(self.external_ro))
+                    rel_path = str(normalized.relative_to(mount_path))
                     in_external_ro = True
+                    break
                 except ValueError:
                     pass
 
         if not in_workspace and not in_global_skills and not in_user_skills and not in_external_ro:
-            if self.external_rw:
+            # Check global RW mounts
+            for mount_name, mount_path in self.global_mounts_rw.items():
                 try:
-                    rel_path = str(normalized.relative_to(self.external_rw))
+                    rel_path = str(normalized.relative_to(mount_path))
                     in_external_rw = True
+                    break
                 except ValueError:
                     pass
 
@@ -594,10 +635,41 @@ class Ag3ntumPathValidator:
                 except ValueError:
                     pass
 
-        in_any_allowed = (
+        # Check original-path mount boundaries
+        # Original-path mounts allow access to paths like /var/log at their original locations
+        in_original_ro = False
+        in_original_rw = False
+
+        not_in_any_yet = not (
             in_workspace or in_global_skills or in_user_skills or
             in_external_ro or in_external_rw or in_persistent or
             in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw
+        )
+        if not_in_any_yet:
+            # Check original-path RO mounts
+            for orig_path, docker_path in self.original_path_mounts_ro.items():
+                try:
+                    rel_path = str(normalized.relative_to(docker_path))
+                    in_original_ro = True
+                    break
+                except ValueError:
+                    pass
+
+        if not_in_any_yet and not in_original_ro:
+            # Check original-path RW mounts
+            for orig_path, docker_path in self.original_path_mounts_rw.items():
+                try:
+                    rel_path = str(normalized.relative_to(docker_path))
+                    in_original_rw = True
+                    break
+                except ValueError:
+                    pass
+
+        in_any_allowed = (
+            in_workspace or in_global_skills or in_user_skills or
+            in_external_ro or in_external_rw or in_persistent or
+            in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw or
+            in_original_ro or in_original_rw
         )
 
         if not in_any_allowed:
@@ -615,7 +687,11 @@ class Ag3ntumPathValidator:
 
         # Step 4: Check blocklist (workspace and external mount paths)
         # Security: blocklist applies to all areas to prevent accessing sensitive files
-        should_check_blocklist = in_workspace or in_external_ro or in_external_rw or in_persistent or in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw
+        should_check_blocklist = (
+            in_workspace or in_external_ro or in_external_rw or in_persistent or
+            in_user_ro or in_user_rw or in_dynamic_ro or in_dynamic_rw or
+            in_original_ro or in_original_rw
+        )
         if should_check_blocklist:
             for pattern in self.config.blocklist:
                 if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
@@ -651,8 +727,9 @@ class Ag3ntumPathValidator:
         # - External RO mounts are always read-only
         # - Per-user RO mounts are always read-only
         # - Dynamic RO mounts are always read-only
+        # - Original-path RO mounts are always read-only
         # - Workspace paths may have readonly_prefixes
-        is_readonly = in_global_skills or in_user_skills or in_external_ro or in_user_ro or in_dynamic_ro
+        is_readonly = in_global_skills or in_user_skills or in_external_ro or in_user_ro or in_dynamic_ro or in_original_ro
 
         if in_workspace and not is_readonly:
             is_readonly = any(
@@ -662,12 +739,12 @@ class Ag3ntumPathValidator:
 
         if is_readonly and operation in ("write", "edit", "delete"):
             # Provide helpful error message for external RO mounts
-            if in_external_ro or in_user_ro or in_dynamic_ro:
+            if in_external_ro or in_user_ro or in_dynamic_ro or in_original_ro:
                 self._log_blocked(path, operation, "Read-only external mount")
                 raise PathValidationError(
                     f"Cannot {operation} read-only mount: {path}",
                     path=path,
-                    reason="Mount is read-only (external mount, per-user ro, or dynamic ro)",
+                    reason="Mount is read-only (external mount, per-user ro, dynamic ro, or original-path ro)",
                 )
             else:
                 self._log_blocked(path, operation, "Read-only path")
@@ -708,19 +785,23 @@ class Ag3ntumPathValidator:
         p = PurePosixPath(path)
         path_str = str(p)
 
-        # First, normalize relative paths that reference external mounts, persistent, or dynamic
+        # First, normalize relative paths that reference external mounts or persistent
+        # NOTE: Dynamic mounts are now at workspace root as symlinks (e.g., ./logs/ instead of ./dynamic/logs/)
+        # and are resolved automatically via standard workspace path handling below.
         if not p.is_absolute():
-            # Check if it's a relative external path like ./external/ro/..., ./persistent/..., or ./dynamic/...
+            # Check if it's a relative external path like ./external/ro/... or ./persistent/...
             if path_str.startswith("./external/") or path_str.startswith("external/"):
                 # Convert to absolute bwrap-style path
                 path_str = "/workspace/" + path_str.lstrip("./")
                 p = PurePosixPath(path_str)
-            elif path_str.startswith("./persistent/") or path_str.startswith("persistent/"):
+            # Handle persistent paths - with or without trailing slash
+            # PurePosixPath normalizes "./persistent/" to "persistent" (strips ./ and trailing /)
+            # So we need to check for: ./persistent, ./persistent/, persistent, persistent/
+            elif (
+                path_str == "./persistent" or path_str == "persistent" or
+                path_str.startswith("./persistent/") or path_str.startswith("persistent/")
+            ):
                 # Convert to absolute bwrap-style path
-                path_str = "/workspace/" + path_str.lstrip("./")
-                p = PurePosixPath(path_str)
-            elif path_str.startswith("./dynamic/") or path_str.startswith("dynamic/"):
-                # Convert to absolute bwrap-style path for dynamic mounts
                 path_str = "/workspace/" + path_str.lstrip("./")
                 p = PurePosixPath(path_str)
 
@@ -746,93 +827,100 @@ class Ag3ntumPathValidator:
             # Extract the part after /workspace/external/
             external_part = path_str[len("/workspace/external/"):]
 
-            # Route to correct external mount
+            # Route to correct external mount (flattened structure: /mounts/{name})
             if external_part.startswith("ro/"):
-                # Read-only external mount: /workspace/external/ro/* -> /mounts/ro/*
+                # Read-only external mount: /workspace/external/ro/{name}/* -> /mounts/{name}/*
                 relative = external_part[3:]  # Remove "ro/"
 
-                if self.external_ro:
-                    # Base path exists (Docker mode) - use it
-                    resolved = (self.external_ro / relative).resolve()
+                # Extract mount name (first path component)
+                if "/" in relative:
+                    mount_name, mount_relative = relative.split("/", 1)
+                else:
+                    mount_name = relative
+                    mount_relative = ""
+
+                # Check global RO mounts first
+                if mount_name in self.global_mounts_ro:
+                    mount_path = self.global_mounts_ro[mount_name]
+                    if mount_relative:
+                        resolved = (mount_path / mount_relative).resolve()
+                    else:
+                        resolved = mount_path.resolve()
                     # Security: verify resolved path stays within boundary
-                    if not self._is_within_boundary(resolved, self.external_ro):
+                    if not self._is_within_boundary(resolved, mount_path):
                         raise PathValidationError(
                             f"Path traversal detected: {path}",
                             path=path,
-                            reason="PATH_TRAVERSAL: Resolved path escapes external ro mount boundary",
+                            reason="PATH_TRAVERSAL: Resolved path escapes global-ro mount boundary",
+                        )
+                    return resolved
+                # Fallback to user mounts for backward compatibility
+                elif mount_name in self.user_mounts_ro:
+                    mount_path = self.user_mounts_ro[mount_name]
+                    if mount_relative:
+                        resolved = (mount_path / mount_relative).resolve()
+                    else:
+                        resolved = mount_path.resolve()
+                    # Security: verify resolved path stays within boundary
+                    if not self._is_within_boundary(resolved, mount_path):
+                        raise PathValidationError(
+                            f"Path traversal detected: {path}",
+                            path=path,
+                            reason="PATH_TRAVERSAL: Resolved path escapes user-ro mount boundary",
                         )
                     return resolved
                 else:
-                    # No base path - try to find mount in user_mounts_ro (non-Docker mode)
-                    # Path format: {mount_name}/... (e.g., "greg_downloads/file.txt")
-                    if "/" in relative:
-                        mount_name, mount_relative = relative.split("/", 1)
-                    else:
-                        mount_name = relative
-                        mount_relative = ""
-
-                    if mount_name in self.user_mounts_ro:
-                        mount_path = self.user_mounts_ro[mount_name]
-                        if mount_relative:
-                            resolved = (mount_path / mount_relative).resolve()
-                        else:
-                            resolved = mount_path.resolve()
-                        # Security: verify resolved path stays within boundary
-                        if not self._is_within_boundary(resolved, mount_path):
-                            raise PathValidationError(
-                                f"Path traversal detected: {path}",
-                                path=path,
-                                reason="PATH_TRAVERSAL: Resolved path escapes user-ro mount boundary",
-                            )
-                        return resolved
-                    else:
-                        # Mount not found, treat as workspace path (will likely fail boundary check)
-                        relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
-                        resolved = (self.workspace / relative_to_workspace).resolve()
-                        return resolved
+                    # Mount not found, treat as workspace path (will likely fail boundary check)
+                    relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
+                    resolved = (self.workspace / relative_to_workspace).resolve()
+                    return resolved
 
             elif external_part.startswith("rw/"):
-                # Read-write external mount: /workspace/external/rw/* -> /mounts/rw/*
+                # Read-write external mount: /workspace/external/rw/{name}/* -> /mounts/{name}/*
                 relative = external_part[3:]  # Remove "rw/"
 
-                if self.external_rw:
-                    # Base path exists (Docker mode) - use it
-                    resolved = (self.external_rw / relative).resolve()
+                # Extract mount name (first path component)
+                if "/" in relative:
+                    mount_name, mount_relative = relative.split("/", 1)
+                else:
+                    mount_name = relative
+                    mount_relative = ""
+
+                # Check global RW mounts first
+                if mount_name in self.global_mounts_rw:
+                    mount_path = self.global_mounts_rw[mount_name]
+                    if mount_relative:
+                        resolved = (mount_path / mount_relative).resolve()
+                    else:
+                        resolved = mount_path.resolve()
                     # Security: verify resolved path stays within boundary
-                    if not self._is_within_boundary(resolved, self.external_rw):
+                    if not self._is_within_boundary(resolved, mount_path):
                         raise PathValidationError(
                             f"Path traversal detected: {path}",
                             path=path,
-                            reason="PATH_TRAVERSAL: Resolved path escapes external rw mount boundary",
+                            reason="PATH_TRAVERSAL: Resolved path escapes global-rw mount boundary",
+                        )
+                    return resolved
+                # Fallback to user mounts for backward compatibility
+                elif mount_name in self.user_mounts_rw:
+                    mount_path = self.user_mounts_rw[mount_name]
+                    if mount_relative:
+                        resolved = (mount_path / mount_relative).resolve()
+                    else:
+                        resolved = mount_path.resolve()
+                    # Security: verify resolved path stays within boundary
+                    if not self._is_within_boundary(resolved, mount_path):
+                        raise PathValidationError(
+                            f"Path traversal detected: {path}",
+                            path=path,
+                            reason="PATH_TRAVERSAL: Resolved path escapes user-rw mount boundary",
                         )
                     return resolved
                 else:
-                    # No base path - try to find mount in user_mounts_rw (non-Docker mode)
-                    if "/" in relative:
-                        mount_name, mount_relative = relative.split("/", 1)
-                    else:
-                        mount_name = relative
-                        mount_relative = ""
-
-                    if mount_name in self.user_mounts_rw:
-                        mount_path = self.user_mounts_rw[mount_name]
-                        if mount_relative:
-                            resolved = (mount_path / mount_relative).resolve()
-                        else:
-                            resolved = mount_path.resolve()
-                        # Security: verify resolved path stays within boundary
-                        if not self._is_within_boundary(resolved, mount_path):
-                            raise PathValidationError(
-                                f"Path traversal detected: {path}",
-                                path=path,
-                                reason="PATH_TRAVERSAL: Resolved path escapes user-rw mount boundary",
-                            )
-                        return resolved
-                    else:
-                        # Mount not found, treat as workspace path
-                        relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
-                        resolved = (self.workspace / relative_to_workspace).resolve()
-                        return resolved
+                    # Mount not found, treat as workspace path
+                    relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
+                    resolved = (self.workspace / relative_to_workspace).resolve()
+                    return resolved
 
             elif external_part.startswith("persistent/") or external_part == "persistent":
                 # DEPRECATED: /workspace/external/persistent/* is deprecated
@@ -909,53 +997,10 @@ class Ag3ntumPathValidator:
 
             # Unrecognized external path - fall through to workspace handling
 
-        # Handle dynamic mount paths (session-time user-selected mounts)
-        # /workspace/dynamic/{alias}/* -> container_path/*
-        if path_str.startswith("/workspace/dynamic/"):
-            remaining = path_str[len("/workspace/dynamic/"):]
-            # Extract alias (first path component)
-            if "/" in remaining:
-                alias, relative = remaining.split("/", 1)
-            else:
-                alias = remaining
-                relative = ""
-
-            # Check dynamic RO mounts first
-            if alias in self.dynamic_mounts_ro:
-                mount_path = self.dynamic_mounts_ro[alias]
-                if relative:
-                    resolved = (mount_path / relative).resolve()
-                else:
-                    resolved = mount_path.resolve()
-                # Security: verify resolved path stays within boundary
-                if not self._is_within_boundary(resolved, mount_path):
-                    raise PathValidationError(
-                        f"Path traversal detected: {path}",
-                        path=path,
-                        reason="PATH_TRAVERSAL: Resolved path escapes dynamic-ro mount boundary",
-                    )
-                return resolved
-
-            # Check dynamic RW mounts
-            if alias in self.dynamic_mounts_rw:
-                mount_path = self.dynamic_mounts_rw[alias]
-                if relative:
-                    resolved = (mount_path / relative).resolve()
-                else:
-                    resolved = mount_path.resolve()
-                # Security: verify resolved path stays within boundary
-                if not self._is_within_boundary(resolved, mount_path):
-                    raise PathValidationError(
-                        f"Path traversal detected: {path}",
-                        path=path,
-                        reason="PATH_TRAVERSAL: Resolved path escapes dynamic-rw mount boundary",
-                    )
-                return resolved
-
-            # Dynamic mount alias not configured - fall through to workspace handling
-            relative_to_workspace = path_str[len("/workspace"):].lstrip("/")
-            resolved = (self.workspace / relative_to_workspace).resolve()
-            return resolved
+        # NOTE: Dynamic mounts are now symlinked at workspace root (e.g., workspace/{alias})
+        # instead of workspace/dynamic/{alias}. The symlink resolution in workspace path
+        # handling below automatically resolves to /mounts/dynamic/{base}/{subpath}.
+        # Validation then checks if the resolved path is within allowed dynamic_mounts_*.
 
         # Handle standard workspace paths
         if path_str.startswith("/workspace"):
@@ -974,8 +1019,28 @@ class Ag3ntumPathValidator:
             resolved = (self.workspace / p).resolve()
         else:
             # Absolute path NOT starting with /workspace
-            # This is an escape attempt (like /etc/passwd)
-            resolved = Path(p).resolve()
+            # Check if this is an original-path mount (e.g., /var/log)
+            # Original-path mounts allow accessing paths at their original locations
+            # Translate: /var/log -> /mounts/paths/_var_log
+            original_mount = self._find_original_path_mount(path_str)
+            if original_mount:
+                orig_path, docker_path, is_ro = original_mount
+                if path_str == orig_path:
+                    resolved = docker_path.resolve()
+                else:
+                    # Path is under the mount (e.g., /var/log/syslog)
+                    relative = path_str[len(orig_path):].lstrip("/")
+                    resolved = (docker_path / relative).resolve()
+                # Security: verify resolved path stays within mount boundary
+                if not self._is_within_boundary(resolved, docker_path):
+                    raise PathValidationError(
+                        f"Path traversal detected: {path}",
+                        path=path,
+                        reason="PATH_TRAVERSAL: Resolved path escapes original-path mount boundary",
+                    )
+            else:
+                # This is an escape attempt (like /etc/passwd)
+                resolved = Path(p).resolve()
 
         return resolved
 
@@ -1103,6 +1168,37 @@ class Ag3ntumPathValidator:
             )
         return resolved
 
+    def _find_original_path_mount(
+        self, path: str
+    ) -> tuple[str, Path, bool] | None:
+        """
+        Find the original-path mount that contains the given path.
+
+        Args:
+            path: An absolute path (e.g., "/var/log" or "/var/log/syslog")
+
+        Returns:
+            Tuple of (original_path, docker_path, is_readonly) if found, else None
+        """
+        best_match: tuple[str, Path, bool] | None = None
+        best_len = 0
+
+        # Check RO mounts
+        for orig_path, docker_path in self.original_path_mounts_ro.items():
+            if path == orig_path or path.startswith(orig_path + "/"):
+                if len(orig_path) > best_len:
+                    best_match = (orig_path, docker_path, True)
+                    best_len = len(orig_path)
+
+        # Check RW mounts
+        for orig_path, docker_path in self.original_path_mounts_rw.items():
+            if path == orig_path or path.startswith(orig_path + "/"):
+                if len(orig_path) > best_len:
+                    best_match = (orig_path, docker_path, False)
+                    best_len = len(orig_path)
+
+        return best_match
+
     def _is_within_boundary(self, path: Path, boundary: Path) -> bool:
         """
         Check if a resolved path is within the given boundary.
@@ -1170,11 +1266,15 @@ def configure_path_validator(
     skills_path: Path | None = None,
     global_skills_path: Path | None = None,
     user_skills_path: Path | None = None,
-    external_ro_base: Path | None = None,
-    external_rw_base: Path | None = None,
+    global_mounts_ro: dict[str, Path] | None = None,
+    global_mounts_rw: dict[str, Path] | None = None,
     persistent_path: Path | None = None,
     user_mounts_ro: dict[str, Path] | None = None,
     user_mounts_rw: dict[str, Path] | None = None,
+    dynamic_mounts_ro: dict[str, Path] | None = None,
+    dynamic_mounts_rw: dict[str, Path] | None = None,
+    original_path_mounts_ro: dict[str, Path] | None = None,
+    original_path_mounts_rw: dict[str, Path] | None = None,
     blocklist: list[str] | None = None,
     readonly_prefixes: list[str] | None = None,
 ) -> Ag3ntumPathValidator:
@@ -1191,11 +1291,15 @@ def configure_path_validator(
         skills_path: Deprecated, use global_skills_path/user_skills_path
         global_skills_path: Path to global skills directory (read-only)
         user_skills_path: Path to user skills directory (read-only)
-        external_ro_base: Base path for read-only external mounts (/mounts/ro)
-        external_rw_base: Base path for read-write external mounts (/mounts/rw)
+        global_mounts_ro: Global read-only mounts {name: container_path} (flattened)
+        global_mounts_rw: Global read-write mounts {name: container_path} (flattened)
         persistent_path: Path to user's persistent storage
-        user_mounts_ro: Per-user read-only mounts {name: real_path}
-        user_mounts_rw: Per-user read-write mounts {name: real_path}
+        user_mounts_ro: Per-user read-only mounts {name: container_path}
+        user_mounts_rw: Per-user read-write mounts {name: container_path}
+        dynamic_mounts_ro: Dynamic read-only mounts {alias: container_path}
+        dynamic_mounts_rw: Dynamic read-write mounts {alias: container_path}
+        original_path_mounts_ro: Original-path read-only mounts {orig_path: docker_path}
+        original_path_mounts_rw: Original-path read-write mounts {orig_path: docker_path}
         blocklist: Optional list of blocked patterns (defaults to common sensitive files)
         readonly_prefixes: Optional list of read-only path prefixes
 
@@ -1221,11 +1325,15 @@ def configure_path_validator(
         skills_path=skills_path,
         global_skills_path=global_skills_path,
         user_skills_path=user_skills_path,
-        external_ro_base=external_ro_base,
-        external_rw_base=external_rw_base,
+        global_mounts_ro=global_mounts_ro or {},
+        global_mounts_rw=global_mounts_rw or {},
         persistent_path=persistent_path,
         user_mounts_ro=user_mounts_ro or {},
         user_mounts_rw=user_mounts_rw or {},
+        dynamic_mounts_ro=dynamic_mounts_ro or {},
+        dynamic_mounts_rw=dynamic_mounts_rw or {},
+        original_path_mounts_ro=original_path_mounts_ro or {},
+        original_path_mounts_rw=original_path_mounts_rw or {},
         blocklist=blocklist or DEFAULT_BLOCKLIST.copy(),
         readonly_prefixes=readonly_prefixes or DEFAULT_READONLY_PREFIXES.copy(),
     )
@@ -1239,22 +1347,29 @@ def configure_path_validator(
                 session_id=session_id,
                 username=username,
                 workspace_docker=str(workspace_path),
+                global_mounts_ro={k: str(v) for k, v in (global_mounts_ro or {}).items()},
+                global_mounts_rw={k: str(v) for k, v in (global_mounts_rw or {}).items()},
                 user_mounts_ro={k: str(v) for k, v in (user_mounts_ro or {}).items()},
                 user_mounts_rw={k: str(v) for k, v in (user_mounts_rw or {}).items()},
             )
         except Exception as e:
             logger.warning(f"Failed to configure SandboxPathResolver: {e}")
 
-    # Log user mount info if any configured
+    # Log mount info if any configured
+    global_ro_count = len(global_mounts_ro) if global_mounts_ro else 0
+    global_rw_count = len(global_mounts_rw) if global_mounts_rw else 0
     user_ro_count = len(user_mounts_ro) if user_mounts_ro else 0
     user_rw_count = len(user_mounts_rw) if user_mounts_rw else 0
+    orig_ro_count = len(original_path_mounts_ro) if original_path_mounts_ro else 0
+    orig_rw_count = len(original_path_mounts_rw) if original_path_mounts_rw else 0
 
     logger.info(
         f"PATH_VALIDATOR: Configured for session {session_id} "
         f"with workspace={workspace_path}, username={username}, "
-        f"external_ro={external_ro_base}, external_rw={external_rw_base}, "
+        f"global_mounts={global_ro_count} RO/{global_rw_count} RW, "
         f"persistent={persistent_path}, "
-        f"user_mounts_ro={user_ro_count}, user_mounts_rw={user_rw_count}"
+        f"user_mounts={user_ro_count} RO/{user_rw_count} RW, "
+        f"original_paths={orig_ro_count} RO/{orig_rw_count} RW"
     )
     return validator
 

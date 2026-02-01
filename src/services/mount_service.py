@@ -196,6 +196,59 @@ def get_user_mounts(username: str) -> dict[str, list[dict]]:
     return result
 
 
+def get_global_mounts_for_path_validator() -> dict[str, dict[str, Path]]:
+    """
+    Get global mount paths for PathValidator configuration.
+
+    Reads the auto-generated-mounts.yaml manifest to get Docker container paths
+    for global mounts. With the flattened mount structure, all mounts are at
+    /mounts/{name} and mode is tracked separately.
+
+    Returns:
+        Dict with keys 'ro' and 'rw', each containing a dict of {name: container_path}:
+        {
+            'ro': {'global_var_log': Path('/mounts/global_var_log')},
+            'rw': {'product_docs': Path('/mounts/product_docs')}
+        }
+    """
+    result: dict[str, dict[str, Path]] = {"ro": {}, "rw": {}}
+
+    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    if not manifest_path.exists():
+        logger.debug(f"No mounts manifest at {manifest_path}")
+        return result
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = yaml.safe_load(f) or {}
+
+        mounts_data = manifest.get("mounts", {})
+
+        # Process both RO and RW mounts
+        for mode in ("ro", "rw"):
+            for mount in mounts_data.get(mode, []):
+                if not isinstance(mount, dict) or not mount.get("name"):
+                    continue
+                name = mount["name"]
+                container_path = mount.get("container_path", f"/mounts/{name}")
+                path = Path(container_path)
+                if path.exists():
+                    result[mode][name] = path
+                    logger.debug(f"Loaded global {mode.upper()} mount: {name} -> {container_path}")
+
+        ro_count = len(result["ro"])
+        rw_count = len(result["rw"])
+        if ro_count > 0 or rw_count > 0:
+            logger.info(
+                f"Loaded global mounts for PathValidator: {ro_count} RO, {rw_count} RW"
+            )
+
+    except Exception as e:
+        logger.warning(f"Failed to load global mounts from manifest: {e}")
+
+    return result
+
+
 def invalidate_cache() -> None:
     """Force reload of configuration on next access."""
     global _cached_config, _config_mtime
@@ -740,3 +793,191 @@ def invalidate_dynamic_mount_cache() -> None:
     global _dynamic_mount_service, _dynamic_config_mtime
     _dynamic_mount_service = None
     _dynamic_config_mtime = 0
+
+
+# =============================================================================
+# Original-Path Mount Service
+# =============================================================================
+
+@dataclass
+class OriginalPathMount:
+    """Configuration for an original-path mount."""
+    path: str  # Original path (e.g., "/var/log")
+    encoded: str  # Encoded name (e.g., "_var_log")
+    container_path: str  # Docker path (e.g., "/mounts/paths/_var_log")
+    description: str
+    mode: str  # "ro" or "rw"
+    allowed_users: list[str]
+    optional: bool
+
+
+class OriginalPathMountService:
+    """
+    Service for original-path mounts.
+
+    Original-path mounts allow accessing host paths at their original locations
+    within the sandbox. For example, /var/log on the host can be accessed as
+    /var/log inside the sandbox (not just via workspace symlinks).
+
+    This is achieved by:
+    1. Docker mounts host path to /mounts/paths/{encoded}
+    2. Bubblewrap bind-mounts /mounts/paths/{encoded} to original path
+    3. Agent can access /var/log directly
+    """
+
+    def __init__(self, config: dict):
+        self.config = config
+        self.original_paths_config = config.get("original_paths", {})
+        self.mounts = self._load_mounts()
+
+    def _load_mounts(self) -> dict[str, OriginalPathMount]:
+        """Load original-path mounts from config."""
+        mounts = {}
+
+        for mode in ("ro", "rw"):
+            for mount_config in self.original_paths_config.get(mode, []):
+                if not isinstance(mount_config, dict) or not mount_config.get("path"):
+                    continue
+
+                path = mount_config["path"]
+                encoded = path.replace("/", "_")
+
+                mount = OriginalPathMount(
+                    path=path,
+                    encoded=encoded,
+                    container_path=f"/mounts/paths/{encoded}",
+                    description=mount_config.get("description", ""),
+                    mode=mode,
+                    allowed_users=mount_config.get("allowed_users", ["*"]),
+                    optional=mount_config.get("optional", True),
+                )
+                mounts[path] = mount
+
+        return mounts
+
+    def get_mounts_for_user(self, username: str) -> list[OriginalPathMount]:
+        """
+        Get original-path mounts available to a user.
+
+        Args:
+            username: The username to check access for
+
+        Returns:
+            List of OriginalPathMount objects the user can access
+        """
+        available = []
+
+        for mount in self.mounts.values():
+            if self._is_user_authorized(mount, username):
+                # Check if Docker mount exists
+                container_path = Path(mount.container_path)
+                if container_path.exists() or mount.optional:
+                    available.append(mount)
+
+        return available
+
+    def _is_user_authorized(self, mount: OriginalPathMount, username: str) -> bool:
+        """Check if user is authorized for this mount."""
+        for allowed in mount.allowed_users:
+            if allowed == "*":
+                return True
+            if allowed == username:
+                return True
+        return False
+
+    def get_mount_for_path(self, path: str) -> OriginalPathMount | None:
+        """
+        Get the mount that contains a given path.
+
+        Args:
+            path: An original path (e.g., "/var/log" or "/var/log/syslog")
+
+        Returns:
+            The OriginalPathMount if path is under a mount, else None
+        """
+        # Find the longest matching mount path
+        best_match = None
+        best_len = 0
+
+        for mount_path, mount in self.mounts.items():
+            if path == mount_path or path.startswith(mount_path + "/"):
+                if len(mount_path) > best_len:
+                    best_match = mount
+                    best_len = len(mount_path)
+
+        return best_match
+
+    def translate_to_docker_path(
+        self,
+        original_path: str,
+        username: str
+    ) -> str | None:
+        """
+        Translate an original path to its Docker container path.
+
+        Args:
+            original_path: Path like "/var/log" or "/var/log/syslog"
+            username: User requesting access (for authorization check)
+
+        Returns:
+            Docker path like "/mounts/paths/_var_log/syslog", or None if not allowed
+        """
+        mount = self.get_mount_for_path(original_path)
+        if not mount:
+            return None
+
+        if not self._is_user_authorized(mount, username):
+            logger.warning(
+                f"SECURITY: User '{username}' denied access to original path '{original_path}'"
+            )
+            return None
+
+        # Calculate relative path within mount
+        if original_path == mount.path:
+            return mount.container_path
+        else:
+            relative = original_path[len(mount.path):].lstrip("/")
+            return f"{mount.container_path}/{relative}"
+
+
+# Singleton instance
+_original_path_service: OriginalPathMountService | None = None
+_original_path_config_mtime: float = 0
+
+
+def get_original_path_mount_service() -> OriginalPathMountService:
+    """
+    Get the singleton OriginalPathMountService instance.
+
+    Reloads configuration if the file has been modified.
+    """
+    global _original_path_service, _original_path_config_mtime
+
+    config_path = Path("/config/external-mounts.yaml")
+
+    if config_path.exists():
+        current_mtime = config_path.stat().st_mtime
+        if _original_path_service is None or current_mtime != _original_path_config_mtime:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                _original_path_service = OriginalPathMountService(config)
+                _original_path_config_mtime = current_mtime
+                logger.info(
+                    f"Loaded original-path mount service: "
+                    f"mounts={list(_original_path_service.mounts.keys())}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load original-path mount config: {e}")
+                _original_path_service = OriginalPathMountService({})
+    elif _original_path_service is None:
+        _original_path_service = OriginalPathMountService({})
+
+    return _original_path_service
+
+
+def invalidate_original_path_mount_cache() -> None:
+    """Force reload of original-path mount configuration on next access."""
+    global _original_path_service, _original_path_config_mtime
+    _original_path_service = None
+    _original_path_config_mtime = 0

@@ -38,21 +38,23 @@ from src.core.sandbox_path_resolver import (
 
 @pytest.fixture
 def basic_context():
-    """Create a basic SandboxPathContext for testing."""
+    """Create a basic SandboxPathContext for testing with global mounts (flattened structure)."""
     return SandboxPathContext(
         session_id="test-session-123",
         username="testuser",
+        global_mounts_ro={"downloads": "/mounts/downloads"},
+        global_mounts_rw={"projects": "/mounts/projects"},
     )
 
 
 @pytest.fixture
 def context_with_user_mounts():
-    """Create a SandboxPathContext with user mounts."""
+    """Create a SandboxPathContext with user mounts (flattened structure)."""
     return SandboxPathContext(
         session_id="test-session-456",
         username="testuser",
-        user_mounts_ro={"downloads": "/mounts/user-ro/downloads"},
-        user_mounts_rw={"projects": "/mounts/user-rw/projects"},
+        user_mounts_ro={"downloads": "/mounts/downloads"},
+        user_mounts_rw={"projects": "/mounts/projects"},
     )
 
 
@@ -343,14 +345,14 @@ class TestSandboxToDocker:
         assert docker_path == "/users/testuser/ag3ntum/persistent/data.json"
 
     def test_external_ro_path(self, resolver):
-        """Test translating external read-only mount paths."""
+        """Test translating external read-only mount paths (flattened structure)."""
         docker_path = resolver.sandbox_to_docker("/workspace/external/ro/downloads/file.csv")
-        assert docker_path == "/mounts/ro/downloads/file.csv"
+        assert docker_path == "/mounts/downloads/file.csv"
 
     def test_external_rw_path(self, resolver):
-        """Test translating external read-write mount paths."""
+        """Test translating external read-write mount paths (flattened structure)."""
         docker_path = resolver.sandbox_to_docker("/workspace/external/rw/projects/code.py")
-        assert docker_path == "/mounts/rw/projects/code.py"
+        assert docker_path == "/mounts/projects/code.py"
 
     def test_venv_path(self, resolver):
         """Test translating venv paths."""
@@ -363,18 +365,18 @@ class TestSandboxToDocker:
         assert docker_path == "/skills/.claude/skills/test/script.py"
 
     def test_user_ro_mount(self, resolver_with_user_mounts):
-        """Test translating user read-only mount paths."""
+        """Test translating user read-only mount paths (flattened structure)."""
         docker_path = resolver_with_user_mounts.sandbox_to_docker(
             "/workspace/external/user-ro/downloads/file.txt"
         )
-        assert docker_path == "/mounts/user-ro/downloads/file.txt"
+        assert docker_path == "/mounts/downloads/file.txt"
 
     def test_user_rw_mount(self, resolver_with_user_mounts):
-        """Test translating user read-write mount paths."""
+        """Test translating user read-write mount paths (flattened structure)."""
         docker_path = resolver_with_user_mounts.sandbox_to_docker(
             "/workspace/external/user-rw/projects/code.py"
         )
-        assert docker_path == "/mounts/user-rw/projects/code.py"
+        assert docker_path == "/mounts/projects/code.py"
 
     def test_unknown_mount_raises_error(self, resolver_with_user_mounts):
         """Test that unknown user mount raises error."""
@@ -709,20 +711,20 @@ class TestEdgeCases:
         assert docker_path == "/users/testuser/ag3ntum/persistent"
 
     def test_external_ro_root_path(self, resolver):
-        """Test handling external ro root path."""
-        docker_path = resolver.sandbox_to_docker("/workspace/external/ro")
-        assert docker_path == "/mounts/ro"
-        # Also verify mount type and writability for root path
-        assert resolver.get_mount_type("/workspace/external/ro") == "external_ro"
-        assert resolver.is_path_writable("/workspace/external/ro") is False
+        """Test that external/ro without mount name raises error (flattened structure)."""
+        # With flattened mounts, there is no single base directory for ro mounts
+        # The agent must specify a mount name: /workspace/external/ro/{name}
+        with pytest.raises(PathResolutionError) as exc_info:
+            resolver.sandbox_to_docker("/workspace/external/ro")
+        assert exc_info.value.reason == "INVALID_PATH"
 
     def test_external_rw_root_path(self, resolver):
-        """Test handling external rw root path."""
-        docker_path = resolver.sandbox_to_docker("/workspace/external/rw")
-        assert docker_path == "/mounts/rw"
-        # Also verify mount type and writability for root path
-        assert resolver.get_mount_type("/workspace/external/rw") == "external_rw"
-        assert resolver.is_path_writable("/workspace/external/rw") is True
+        """Test that external/rw without mount name raises error (flattened structure)."""
+        # With flattened mounts, there is no single base directory for rw mounts
+        # The agent must specify a mount name: /workspace/external/rw/{name}
+        with pytest.raises(PathResolutionError) as exc_info:
+            resolver.sandbox_to_docker("/workspace/external/rw")
+        assert exc_info.value.reason == "INVALID_PATH"
 
     def test_multiple_dot_components(self, resolver):
         """Test handling multiple dot components."""
@@ -790,16 +792,16 @@ class TestIntegration:
         assert resolver.is_path_writable(normalized) is True
 
     def test_full_flow_readonly_external(self, resolver):
-        """Test complete flow for read-only external mount."""
-        sandbox_path = "/workspace/external/ro/datasets/data.csv"
+        """Test complete flow for read-only external mount (flattened structure)."""
+        sandbox_path = "/workspace/external/ro/downloads/data.csv"
 
         # Normalize
         normalized = resolver.normalize(sandbox_path)
         assert normalized == sandbox_path
 
-        # Translate to Docker
+        # Translate to Docker (flattened: /mounts/{name})
         docker_path = resolver.sandbox_to_docker(normalized)
-        assert docker_path == "/mounts/ro/datasets/data.csv"
+        assert docker_path == "/mounts/downloads/data.csv"
 
         # Check properties
         assert resolver.get_mount_type(normalized) == "external_ro"

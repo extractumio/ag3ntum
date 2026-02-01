@@ -847,11 +847,15 @@ class TestOptionalMounts:
 
 
 class TestWorkspaceAndMountAccess:
-    """Test file access validation for workspace, RO/RW mounts, and persistent storage."""
+    """Test file access validation for workspace, RO/RW mounts, and persistent storage.
+
+    Uses flattened mount structure where mounts are at /mounts/{name}
+    instead of /mounts/{type}/{name}.
+    """
 
     @pytest.fixture
     def mount_structure(self, tmp_path: Path) -> dict[str, Path]:
-        """Create realistic mount structure for testing."""
+        """Create realistic mount structure for testing (flattened)."""
         # Main workspace
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -863,27 +867,26 @@ class TestWorkspaceAndMountAccess:
         external = workspace / "external"
         external.mkdir()
 
-        # Read-only mount
-        ro_base = tmp_path / "mounts" / "ro"
-        ro_mount = ro_base / "docs"
-        ro_mount.mkdir(parents=True)
-        (ro_mount / "readme.md").write_text("# Documentation")
-        (ro_mount / "subdir").mkdir()
-        (ro_mount / "subdir" / "guide.txt").write_text("guide content")
+        # Flattened mount structure: /mounts/{name}
+        # Read-only mount "docs" at /mounts/docs
+        docs_mount = tmp_path / "mounts" / "docs"
+        docs_mount.mkdir(parents=True)
+        (docs_mount / "readme.md").write_text("# Documentation")
+        (docs_mount / "subdir").mkdir()
+        (docs_mount / "subdir" / "guide.txt").write_text("guide content")
 
         # Symlink for ro mount inside workspace
         (external / "ro").mkdir()
-        (external / "ro" / "docs").symlink_to(ro_mount)
+        (external / "ro" / "docs").symlink_to(docs_mount)
 
-        # Read-write mount
-        rw_base = tmp_path / "mounts" / "rw"
-        rw_mount = rw_base / "projects"
-        rw_mount.mkdir(parents=True)
-        (rw_mount / "editable.py").write_text("# Editable file")
+        # Read-write mount "projects" at /mounts/projects
+        projects_mount = tmp_path / "mounts" / "projects"
+        projects_mount.mkdir(parents=True)
+        (projects_mount / "editable.py").write_text("# Editable file")
 
         # Symlink for rw mount inside workspace
         (external / "rw").mkdir()
-        (external / "rw" / "projects").symlink_to(rw_mount)
+        (external / "rw" / "projects").symlink_to(projects_mount)
 
         # Persistent storage
         persistent = tmp_path / "users" / "testuser" / "ag3ntum" / "persistent"
@@ -896,8 +899,8 @@ class TestWorkspaceAndMountAccess:
 
         return {
             "workspace": workspace,
-            "ro_base": ro_base,
-            "rw_base": rw_base,
+            "docs_mount": docs_mount,      # RO mount (flattened)
+            "projects_mount": projects_mount,  # RW mount (flattened)
             "persistent": persistent,
             "external": external,
             "root": tmp_path,
@@ -905,13 +908,13 @@ class TestWorkspaceAndMountAccess:
 
     @pytest.fixture
     def validator(self, mount_structure: dict[str, Path]):
-        """Create path validator with mount configuration."""
+        """Create path validator with flattened mount configuration."""
         from src.core.path_validator import Ag3ntumPathValidator, PathValidatorConfig
 
         config = PathValidatorConfig(
             workspace_path=mount_structure["workspace"],
-            external_ro_base=mount_structure["ro_base"],
-            external_rw_base=mount_structure["rw_base"],
+            global_mounts_ro={"docs": mount_structure["docs_mount"]},
+            global_mounts_rw={"projects": mount_structure["projects_mount"]},
             persistent_path=mount_structure["persistent"],
         )
         return Ag3ntumPathValidator(config)

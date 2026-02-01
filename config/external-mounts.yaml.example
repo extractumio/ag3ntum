@@ -339,6 +339,62 @@ per_user:
 # -----------------------------------------------------------------------------
 
 # =============================================================================
+# ORIGINAL-PATH MOUNTS (Access paths at their original filesystem locations)
+# =============================================================================
+# Original-path mounts make host paths available at their ORIGINAL locations
+# inside the sandbox, not just under ./external/. This is useful when you need
+# to access paths like /var/log at /var/log (not ./external/ro/logs/).
+#
+# IMPORTANT: This is an advanced feature. Most users should use regular mounts.
+#
+# How it works:
+#   - Docker mounts the path to /mounts/paths/{encoded_name}
+#   - Bubblewrap then bind-mounts it to the original location
+#   - The agent sees /var/log as /var/log (read-only or read-write)
+#
+# Encoding:
+#   /var/log     -> _var_log      -> /mounts/paths/_var_log
+#   /data/output -> _data_output  -> /mounts/paths/_data_output
+#
+# Reserved paths (cannot be mounted):
+#   /, /bin, /sbin, /lib, /usr, /etc, /proc, /sys, /dev, /tmp,
+#   /workspace, /mounts, /persistent, /skills, /venv, /root
+#
+# CASE 13: Read-only original-path mount
+# -----------------------------------------------------------------------------
+# original_paths:
+#   ro:
+#     - path: /var/log
+#       description: "System logs at original location"
+#       optional: true
+#       users: ["*"]             # Available to all users
+# -----------------------------------------------------------------------------
+#
+# CASE 14: Read-write original-path mount
+# -----------------------------------------------------------------------------
+# original_paths:
+#   rw:
+#     - path: /data/output
+#       description: "Shared output at original location"
+#       optional: false
+#       users: ["admin", "data-team"]
+# -----------------------------------------------------------------------------
+#
+# The agent sees:
+#   - /var/log (ro) - read files directly at /var/log
+#   - /data/output (rw) - write files directly to /data/output
+#
+# NOTE: These paths are ALSO available via ./external/ro/ or ./external/rw/
+# with encoded names (e.g., ./external/ro/_var_log/), but the primary use
+# is accessing them at their original locations.
+# =============================================================================
+
+# Original-path mounts configuration
+original_paths:
+  ro: []
+  rw: []
+
+# =============================================================================
 # REFERENCE
 # =============================================================================
 #

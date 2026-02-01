@@ -561,7 +561,8 @@ class ClaudeAgent:
         trace_processor: Optional[Any] = None,
         resume_id: Optional[str] = None,
         fork_session: bool = False,
-        username: Optional[str] = None
+        username: Optional[str] = None,
+        dynamic_mounts: Optional[list] = None,
     ) -> ClaudeAgentOptions:
         """
         Build ClaudeAgentOptions for the SDK.
@@ -573,6 +574,7 @@ class ClaudeAgent:
             resume_id: Claude's session ID for resuming conversations (optional).
             fork_session: If True, fork to new session when resuming (optional).
             username: Optional username for loading user-specific sandboxed environment variables.
+            dynamic_mounts: List of DynamicMountInfo objects for this session (optional).
 
         Returns:
             ClaudeAgentOptions configured for execution.
@@ -768,16 +770,23 @@ class ClaudeAgent:
                     user_skills = Path("/user-skills")
 
             # External mount paths (Docker container paths)
-            # Agent sees: /workspace/external/ro/* -> Real path: /mounts/ro/*
-            # Agent sees: /workspace/external/rw/* -> Real path: /mounts/rw/*
+            # With flattened mount structure, all mounts are at /mounts/{name}
+            # Agent sees: /workspace/external/ro/* -> Real path: /mounts/{name}
+            # Agent sees: /workspace/external/rw/* -> Real path: /mounts/{name}
             # Agent sees: /workspace/persistent/* -> Real path: /users/{username}/ag3ntum/persistent/*
-            external_ro_base = Path("/mounts/ro")
-            external_rw_base = Path("/mounts/rw")
             persistent_path = Path(f"/users/{username}/ag3ntum/persistent") if username else None
+
+            # Load global mounts from manifest for PathValidator
+            # These are configured via external-mounts.yaml global section
+            # All mounts now appear at /mounts/{name} (flattened structure)
+            from ..services.mount_service import get_global_mounts_for_path_validator
+            global_mounts = get_global_mounts_for_path_validator()
+            global_mounts_ro_paths = global_mounts.get("ro", {})
+            global_mounts_rw_paths = global_mounts.get("rw", {})
 
             # Load per-user mounts for PathValidator
             # These are configured via external-mounts.yaml per_user section
-            # Mounts appear at /mounts/user-ro/{name} and /mounts/user-rw/{name} in Docker
+            # Mounts appear at /mounts/{name} in Docker (flattened structure)
             user_mounts_ro_paths: dict[str, Path] = {}
             user_mounts_rw_paths: dict[str, Path] = {}
 
@@ -787,16 +796,78 @@ class ClaudeAgent:
                     user_mounts_data = get_user_mounts(username)
                     for mount_info in user_mounts_data.get("ro", []):
                         name = mount_info["name"]
-                        mount_path = Path(f"/mounts/user-ro/{name}")
+                        mount_path = Path(f"/mounts/{name}")
                         if mount_path.exists() or mount_info.get("optional", True):
                             user_mounts_ro_paths[name] = mount_path
                     for mount_info in user_mounts_data.get("rw", []):
                         name = mount_info["name"]
-                        mount_path = Path(f"/mounts/user-rw/{name}")
+                        mount_path = Path(f"/mounts/{name}")
                         if mount_path.exists() or mount_info.get("optional", True):
                             user_mounts_rw_paths[name] = mount_path
                 except Exception as e:
                     logger.warning(f"Failed to load per-user mounts for PathValidator: {e}")
+
+            # Build dynamic mount paths for PathValidator
+            dynamic_mounts_ro_paths: dict[str, Path] = {}
+            dynamic_mounts_rw_paths: dict[str, Path] = {}
+            if dynamic_mounts:
+                for mount_info in dynamic_mounts:
+                    # Build container path: /mounts/{base}/{subpath} (flattened structure)
+                    container_path = f"/mounts/{mount_info.source_base}"
+                    if mount_info.source_subpath:
+                        container_path = f"{container_path}/{mount_info.source_subpath}"
+                    mount_path = Path(container_path)
+
+                    if mount_info.mode == "ro":
+                        dynamic_mounts_ro_paths[mount_info.alias] = mount_path
+                    else:
+                        dynamic_mounts_rw_paths[mount_info.alias] = mount_path
+
+                    # Also add to sandbox config for Bubblewrap binding
+                    sandbox_config.dynamic_mounts.append(SandboxMount(
+                        source=container_path,
+                        target=container_path,  # Same path so symlinks work
+                        mode=mount_info.mode,
+                        optional=True,
+                    ))
+
+                logger.info(
+                    f"Added {len(dynamic_mounts)} dynamic mounts: "
+                    f"{len(dynamic_mounts_ro_paths)} RO, {len(dynamic_mounts_rw_paths)} RW"
+                )
+
+            # Load original-path mounts for this user
+            # These allow accessing paths like /var/log at their original locations
+            original_path_mounts_ro: dict[str, Path] = {}
+            original_path_mounts_rw: dict[str, Path] = {}
+            if username:
+                from ..services.mount_service import get_original_path_mount_service
+                try:
+                    orig_mount_service = get_original_path_mount_service()
+                    orig_mounts = orig_mount_service.get_mounts_for_user(username)
+                    for mount in orig_mounts:
+                        docker_path = Path(mount.container_path)
+                        if docker_path.exists() or mount.optional:
+                            if mount.mode == "ro":
+                                original_path_mounts_ro[mount.path] = docker_path
+                            else:
+                                original_path_mounts_rw[mount.path] = docker_path
+
+                            # Add to sandbox config for Bubblewrap binding
+                            # Bind Docker path to original location inside sandbox
+                            sandbox_config.original_path_mounts.append(SandboxMount(
+                                source=mount.container_path,  # Docker path
+                                target=mount.path,  # Original path (bind target)
+                                mode=mount.mode,
+                                optional=mount.optional,
+                            ))
+                    if orig_mounts:
+                        logger.info(
+                            f"Added {len(orig_mounts)} original-path mounts: "
+                            f"{len(original_path_mounts_ro)} RO, {len(original_path_mounts_rw)} RW"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load original-path mounts: {e}")
 
             configure_path_validator(
                 session_id=session_context.session_id,
@@ -805,19 +876,23 @@ class ClaudeAgent:
                 skills_path=self._skills_dir if self._config.enable_skills else None,
                 global_skills_path=global_skills,
                 user_skills_path=user_skills,
-                external_ro_base=external_ro_base if external_ro_base.exists() else None,
-                external_rw_base=external_rw_base if external_rw_base.exists() else None,
+                global_mounts_ro=global_mounts_ro_paths if global_mounts_ro_paths else None,
+                global_mounts_rw=global_mounts_rw_paths if global_mounts_rw_paths else None,
                 persistent_path=persistent_path if persistent_path and persistent_path.exists() else None,
                 user_mounts_ro=user_mounts_ro_paths if user_mounts_ro_paths else None,
                 user_mounts_rw=user_mounts_rw_paths if user_mounts_rw_paths else None,
+                dynamic_mounts_ro=dynamic_mounts_ro_paths if dynamic_mounts_ro_paths else None,
+                dynamic_mounts_rw=dynamic_mounts_rw_paths if dynamic_mounts_rw_paths else None,
+                original_path_mounts_ro=original_path_mounts_ro if original_path_mounts_ro else None,
+                original_path_mounts_rw=original_path_mounts_rw if original_path_mounts_rw else None,
             )
             logger.info(
                 f"PathValidator configured for session {session_context.session_id}, "
                 f"workspace={workspace_dir}, global_skills={global_skills}, user_skills={user_skills}, "
-                f"external_ro={external_ro_base if external_ro_base.exists() else None}, "
-                f"external_rw={external_rw_base if external_rw_base.exists() else None}, "
+                f"global_mounts={len(global_mounts_ro_paths)} RO/{len(global_mounts_rw_paths)} RW, "
                 f"persistent={persistent_path if persistent_path and persistent_path.exists() else None}, "
-                f"user_mounts_ro={len(user_mounts_ro_paths)}, user_mounts_rw={len(user_mounts_rw_paths)}"
+                f"user_mounts={len(user_mounts_ro_paths)} RO/{len(user_mounts_rw_paths)} RW, "
+                f"original_paths={len(original_path_mounts_ro)} RO/{len(original_path_mounts_rw)} RW"
             )
         except Exception as e:
             logger.error(f"Failed to configure PathValidator: {e}")
@@ -1152,7 +1227,8 @@ class ClaudeAgent:
         timeout_seconds: Optional[int] = None,
         session_id: Optional[str] = None,
         username: Optional[str] = None,
-        session_context: Optional[SessionContext] = None
+        session_context: Optional[SessionContext] = None,
+        dynamic_mounts: Optional[list] = None,
     ) -> AgentResult:
         """
         Execute the agent with a task.
@@ -1172,6 +1248,7 @@ class ClaudeAgent:
             session_context: Session context from database. If provided, contains session_id and
                             claude_session_id for resumption. Caller is responsible for persisting
                             updates from AgentResult back to database.
+            dynamic_mounts: List of DynamicMountInfo objects for this session (optional).
 
         Returns:
             AgentResult with execution outcome.
@@ -1186,7 +1263,8 @@ class ClaudeAgent:
         return await asyncio.wait_for(
             self._execute(
                 task, system_prompt, parameters, resume_session_id, fork_session,
-                session_id=session_id, username=username, session_context=session_context
+                session_id=session_id, username=username, session_context=session_context,
+                dynamic_mounts=dynamic_mounts,
             ),
             timeout=effective_timeout,
         )
@@ -1200,7 +1278,8 @@ class ClaudeAgent:
         fork_session: bool = False,
         session_id: Optional[str] = None,
         username: Optional[str] = None,
-        session_context: Optional[SessionContext] = None
+        session_context: Optional[SessionContext] = None,
+        dynamic_mounts: Optional[list] = None,
     ) -> AgentResult:
         """
         Internal execution logic (called by run() with timeout wrapper).
@@ -1214,6 +1293,7 @@ class ClaudeAgent:
             session_id: Session ID to use for new session (optional, use session_context.session_id instead).
             username: Optional username for user-specific features.
             session_context: Session context from database. If not provided, a minimal one is created.
+            dynamic_mounts: List of DynamicMountInfo objects for this session.
 
         Returns:
             AgentResult with execution outcome.
@@ -1353,6 +1433,8 @@ class ClaudeAgent:
                 "enable_skills": self._config.enable_skills,
                 # External mounts configuration
                 "external_mounts": self._load_external_mounts_config(username),
+                # Dynamic mounts for this session
+                "dynamic_mounts": dynamic_mounts or [],
             }
 
             try:
@@ -1384,7 +1466,8 @@ class ClaudeAgent:
             session_context, system_prompt, trace_processor,
             resume_id=resume_id,
             fork_session=fork_session,
-            username=username
+            username=username,
+            dynamic_mounts=dynamic_mounts,
         )
         user_prompt = self._build_user_prompt(task, session_context, parameters)
 

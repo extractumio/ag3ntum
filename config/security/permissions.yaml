@@ -215,24 +215,29 @@ sandbox:
       optional: true
 
     # =========================================================================
-    # EXTERNAL MOUNTS - User-mounted folders from host system
+    # EXTERNAL MOUNTS - User-mounted folders from host system (FLATTENED STRUCTURE)
     # =========================================================================
     # These are configured via run.sh --mount-ro and --mount-rw options.
-    # Host folders are mounted to /mounts/ro/* and /mounts/rw/* in Docker,
+    # Host folders are mounted to /mounts/{name} in Docker (flattened namespace),
     # then bind-mounted into the sandbox at /workspace/external/*.
     #
     # Agent accesses them as:
-    #   ./external/ro/{name}/    - Read-only external mounts
-    #   ./external/rw/{name}/    - Read-write external mounts
+    #   ./external/ro/{name}/    - Global read-only external mounts
+    #   ./external/rw/{name}/    - Global read-write external mounts
+    #   ./external/user-ro/{name}/ - Per-user read-only mounts
+    #   ./external/user-rw/{name}/ - Per-user read-write mounts
     #   ./persistent/            - Per-user persistent storage (at workspace root)
+    #
+    # MODE ENFORCEMENT: Read-only vs read-write is enforced by PathValidator,
+    # not by path prefix. All mounts share the same /mounts/{name} namespace.
 
-    # External mounts from host (ro and rw)
+    # External mounts from host (all mounts, mode enforced by PathValidator)
     # Optional: may not exist if no --mount-ro/--mount-rw options were used
     #
     # IMPORTANT: Mount the parent /mounts directory instead of subdirectories.
     # Docker overlay filesystem has issues when mounting overlay subdirectories
     # directly to non-root UIDs. Mounting the parent works correctly.
-    # The workspace has symlinks: ./external/ro/{name} -> /mounts/ro/{name}
+    # The workspace has symlinks: ./external/ro/{name} -> /mounts/{name}
     # These symlinks resolve correctly when /mounts is mounted.
     external_mounts:
       source: "/mounts"
@@ -291,15 +296,14 @@ sandbox:
     clear_env: true
   writable_paths:
     - "/workspace"
-    - "/mounts/rw"                  # Global read-write external mounts (symlink target)
-    - "/mounts/user-rw"             # Per-user read-write external mounts (symlink target)
+    - "/mounts"                     # All external mounts (flattened, mode enforced by PathValidator)
     - "/persistent"                 # Per-user persistent storage (isolated per-user mount)
   readonly_paths:
     - "/venv"                       # User's Python venv (read-only)
     - "/skills"                     # Global skills directory
     - "/user-skills"                # User's custom skills
-    - "/mounts/ro"                  # Global read-only external mounts (symlink target)
-    - "/mounts/user-ro"             # Per-user read-only external mounts (symlink target)
+    # Note: /mounts is listed as writable above because some mounts are RW.
+    # PathValidator enforces per-mount read-only vs read-write mode.
     - "/usr"
     - "/lib"
     - "/bin"

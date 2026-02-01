@@ -433,6 +433,52 @@ def get_bwrap_lib_binds() -> list[str]:
     return args
 
 
+def build_simple_bwrap_command(
+    user: User,
+    command_args: list[str],
+    extra_binds: list[str] | None = None,
+) -> list[str]:
+    """
+    Build a simple bwrap command for testing as a specific user.
+
+    This uses 'sudo bwrap ... setpriv --reuid=UID ...' which matches production.
+    Use this for simple mount/filesystem tests that don't need full sandbox setup.
+
+    Args:
+        user: The User object with username and linux_uid
+        command_args: The command and arguments to run (e.g., ["/bin/cat", "/mnt/ro/file.txt"])
+        extra_binds: Additional bind mount arguments (e.g., ["--ro-bind", "/src", "/dst"])
+
+    Returns:
+        Complete command list for subprocess.run()
+    """
+    bwrap_cmd = [
+        "sudo", "/usr/bin/bwrap",
+        "--ro-bind", "/usr", "/usr",
+    ] + get_bwrap_lib_binds() + [
+        # Create a world-accessible tmpfs for /mnt so bind-mounted directories
+        # under /mnt are accessible after privilege drop via setpriv
+        "--tmpfs", "/mnt",
+    ]
+
+    if extra_binds:
+        bwrap_cmd.extend(extra_binds)
+
+    bwrap_cmd.extend([
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--die-with-parent",
+        "--",
+        "/usr/bin/setpriv",
+        f"--reuid={user.linux_uid}",
+        f"--regid={user.linux_uid}",
+        "--clear-groups",
+    ])
+    bwrap_cmd.extend(command_args)
+
+    return bwrap_cmd
+
+
 def build_test_bwrap_command(
     user: User,
     command: str,
@@ -441,8 +487,15 @@ def build_test_bwrap_command(
     """
     Build a bwrap command for testing sandbox execution as a specific user.
 
-    This uses 'sudo -u username bwrap ...' which works with the test infrastructure
-    since ag3ntum_api has sudo permissions to run commands as any user.
+    This uses 'sudo bwrap ... setpriv --reuid=UID ...' which matches the production
+    code path in sandbox.py. The approach is:
+    1. Run bwrap as root via sudo (mounts require root)
+    2. Use setpriv AFTER bwrap's -- to drop to the target user's UID/GID
+
+    This is necessary because:
+    - bwrap's --uid/--gid flags require --unshare-user
+    - With --unshare-user, root inside namespace can't access host files
+    - Using setpriv after mounts are set up avoids this issue
 
     Args:
         user: The User object with username and linux_uid
@@ -455,12 +508,11 @@ def build_test_bwrap_command(
     workspace_path = Path(f"/users/{user.username}/ag3ntum/persistent")
     venv_path = Path(f"/users/{user.username}/venv")
 
-    # Build bwrap command
-    # Note: Use full path /usr/bin/bwrap to match sudoers pattern
+    # Build bwrap command using "sudo bwrap" (run as root for mounts)
+    # Privilege dropping happens via setpriv after the -- separator
     bwrap_cmd = [
-        "sudo", "-u", user.username,
-        "/usr/bin/bwrap",
-        # Namespace isolation
+        "sudo", "/usr/bin/bwrap",
+        # Namespace isolation (no --unshare-user since we're using setpriv)
         "--unshare-pid",
         "--unshare-uts",
         "--unshare-ipc",
@@ -485,12 +537,7 @@ def build_test_bwrap_command(
 
     # Static mounts
     bwrap_cmd.extend(["--ro-bind", "/usr", "/usr"])
-    bwrap_cmd.extend(["--ro-bind", "/lib", "/lib"])
-
-    if Path("/lib64").exists():
-        bwrap_cmd.extend(["--ro-bind", "/lib64", "/lib64"])
-    if Path("/bin").exists():
-        bwrap_cmd.extend(["--ro-bind", "/bin", "/bin"])
+    bwrap_cmd.extend(get_bwrap_lib_binds())
 
     # Session mounts
     bwrap_cmd.extend(["--bind", str(workspace_path), "/workspace"])
@@ -505,8 +552,16 @@ def build_test_bwrap_command(
         "--chdir", "/workspace",
     ])
 
-    # Command to execute
-    bwrap_cmd.extend(["--", "bash", "-c", command])
+    # Command separator, then setpriv to drop privileges, then the actual command
+    # setpriv drops to target UID/GID and clears supplementary groups
+    bwrap_cmd.extend([
+        "--",
+        "/usr/bin/setpriv",
+        f"--reuid={user.linux_uid}",
+        f"--regid={user.linux_uid}",  # GID typically matches UID
+        "--clear-groups",
+        "bash", "-c", command,
+    ])
 
     return bwrap_cmd
 
@@ -1160,18 +1215,12 @@ class TestSandboxIsolation:
         workspace = Path(f"/users/{user.username}/ag3ntum/persistent")
 
         # Run ls on /users inside sandbox - should fail or be empty
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--bind", str(workspace), "/workspace",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--unshare-all",
-            "--die-with-parent",
-            "/bin/ls", "/users",
-        ]
+        # Using build_simple_bwrap_command with setpriv for privilege dropping
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/ls", "/users"],
+            extra_binds=["--bind", str(workspace), "/workspace"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1235,17 +1284,11 @@ class TestMountAccess:
         if not TEST_RO_MOUNT.exists():
             pytest.skip(f"Test RO mount not found: {TEST_RO_MOUNT}")
 
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--die-with-parent",
-            "/bin/cat", "/mnt/ro/readonly_file.txt",
-        ]
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/cat", "/mnt/ro/readonly_file.txt"],
+            extra_binds=["--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1257,17 +1300,11 @@ class TestMountAccess:
         assert "read-only test file" in result.stdout
 
         # === Test 2: Read-only mount cannot be written to ===
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--die-with-parent",
-            "/bin/sh", "-c", "echo 'hacked' > /mnt/ro/hacked.txt",
-        ]
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/sh", "-c", "echo 'hacked' > /mnt/ro/hacked.txt"],
+            extra_binds=["--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1293,17 +1330,11 @@ class TestMountAccess:
             )
 
             # Test 3: Write to RW mount
-            bwrap_cmd = [
-                "sudo", "-u", user.username,
-                "bwrap",
-                "--ro-bind", "/usr", "/usr",
-            ] + get_bwrap_lib_binds() + [
-                "--bind", str(temp_rw_path), "/mnt/rw",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--die-with-parent",
-                "/bin/sh", "-c", f"echo 'test content' > /mnt/rw/{test_file_name}",
-            ]
+            bwrap_cmd = build_simple_bwrap_command(
+                user,
+                ["/bin/sh", "-c", f"echo 'test content' > /mnt/rw/{test_file_name}"],
+                extra_binds=["--bind", str(temp_rw_path), "/mnt/rw"],
+            )
             result = subprocess.run(
                 bwrap_cmd,
                 capture_output=True,
@@ -1316,17 +1347,11 @@ class TestMountAccess:
             assert "test content" in test_file.read_text()
 
             # Test 4: Read from RW mount
-            bwrap_cmd = [
-                "sudo", "-u", user.username,
-                "bwrap",
-                "--ro-bind", "/usr", "/usr",
-            ] + get_bwrap_lib_binds() + [
-                "--bind", str(temp_rw_path), "/mnt/rw",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--die-with-parent",
-                "/bin/cat", f"/mnt/rw/{test_file_name}",
-            ]
+            bwrap_cmd = build_simple_bwrap_command(
+                user,
+                ["/bin/cat", f"/mnt/rw/{test_file_name}"],
+                extra_binds=["--bind", str(temp_rw_path), "/mnt/rw"],
+            )
             result = subprocess.run(
                 bwrap_cmd,
                 capture_output=True,

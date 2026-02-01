@@ -494,7 +494,7 @@ class DynamicMountRequest(BaseModel):
 
     alias: str = Field(
         ...,
-        description="Name for the mount in workspace/dynamic/",
+        description="Name for the mount in workspace root",
         min_length=1,
         max_length=64,
         examples=["app-logs", "my-project"]
@@ -532,7 +532,7 @@ class DynamicMountInfo(BaseModel):
     """Information about a mounted dynamic path (response)."""
 
     alias: str = Field(description="Mount alias name")
-    workspace_path: str = Field(description="Path in workspace (e.g., ./dynamic/nginx-logs)")
+    workspace_path: str = Field(description="Path in workspace (e.g., ./nginx-logs)")
     mode: str = Field(description="Access mode: ro or rw")
     source_base: str = Field(description="Source base name")
     source_subpath: Optional[str] = Field(default=None, description="Source subpath")

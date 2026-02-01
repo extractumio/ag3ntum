@@ -513,3 +513,7 @@ class TaskExecutionParams:
     # Session context (for passing cumulative stats, claude_session_id, etc.)
     # API caller creates this from database Session; CLI may leave it None
     session_context: Optional["SessionContext"] = None
+
+    # Dynamic mounts for this session (API only)
+    # List of DynamicMountInfo objects from setup_dynamic_mounts()
+    dynamic_mounts: list = field(default_factory=list)
