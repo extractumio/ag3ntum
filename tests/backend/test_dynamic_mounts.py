@@ -391,7 +391,7 @@ class TestDynamicMountService:
         result = service.validate_mount_request(request, "testuser")
 
         assert result.is_valid is True
-        assert result.resolved_container_path == "/mounts/dynamic/logs/nginx"
+        assert result.resolved_container_path == "/mounts/logs/nginx"
 
     def test_username_substitution_in_path(self) -> None:
         """Username is substituted in container path."""
@@ -406,7 +406,7 @@ class TestDynamicMountService:
         assert result.is_valid is True
         # Note: container_path substitution happens, but the base itself
         # still has {username} placeholder - substitution happens at path level
-        assert "/mounts/dynamic/user-home" in result.resolved_container_path
+        assert "/mounts/user-home" in result.resolved_container_path
 
 
 # =============================================================================
@@ -571,7 +571,7 @@ class TestDynamicMountsAPIRun:
         validation.error = None
         validation.denial_code = None
         validation.resolved_mode = "ro"
-        validation.resolved_container_path = "/mounts/dynamic/logs"
+        validation.resolved_container_path = "/mounts/logs"
 
         service.validate_mount_request.return_value = validation
         return service

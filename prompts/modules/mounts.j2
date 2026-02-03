@@ -1,5 +1,5 @@
 {# Module: Mounts - External storage and persistent directories #}
-{% if external_mounts and (external_mounts.ro or external_mounts.rw or external_mounts.persistent or external_mounts.user_ro or external_mounts.user_rw) %}
+{% if external_mounts and (external_mounts.ro or external_mounts.rw or external_mounts.persistent or external_mounts.user_ro or external_mounts.user_rw) or original_path_mounts %}
 
 # External Storage
 
@@ -65,22 +65,44 @@ These folders are mounted specifically for your user account, read-write:
 {% endif %}
 
 {% if dynamic_mounts %}
-## Dynamic Mounts (`./dynamic/`)
+## Dynamic Mounts
 
-This session has the following user-selected dynamic mounts available:
+This session has the following user-selected dynamic mounts available at workspace root:
 
 | Alias | Path | Mode | Description |
 |-------|------|------|-------------|
 {% for mount in dynamic_mounts %}
-| {{ mount.alias }} | `./dynamic/{{ mount.alias }}` | {{ mount.mode }} | {{ mount.description or 'User-requested mount' }} |
+| {{ mount.alias }} | `./{{ mount.alias }}` | {{ mount.mode }} | {{ mount.description or 'User-requested mount' }} |
 {% endfor %}
 
 **Usage:**
-- Access files using paths like `./dynamic/{{ dynamic_mounts[0].alias }}/filename`
+- Access files using paths like `./{{ dynamic_mounts[0].alias }}/filename`
 - All Ag3ntum tools (mcp__ag3ntum__Read, mcp__ag3ntum__Write, mcp__ag3ntum__Edit, mcp__ag3ntum__Bash, mcp__ag3ntum__Glob, mcp__ag3ntum__Grep) work with dynamic mounts
 {% for mount in dynamic_mounts %}
 {% if mount.mode == 'ro' %}
 - `{{ mount.alias }}` is **read-only** - you cannot modify files in this mount
+{% endif %}
+{% endfor %}
+
+{% endif %}
+
+{% if original_path_mounts %}
+## Original-Path Mounts
+
+These paths are accessible at their **original filesystem locations**:
+
+| Path | Mode | Description |
+|------|------|-------------|
+{% for mount in original_path_mounts %}
+| `{{ mount.path }}` | {{ mount.mode }} | {{ mount.description or 'Original-path mount' }} |
+{% endfor %}
+
+**Usage:**
+- Access files directly at their original paths (e.g., `{{ original_path_mounts[0].path }}/filename`)
+- All Ag3ntum tools work with these paths
+{% for mount in original_path_mounts %}
+{% if mount.mode == 'ro' %}
+- `{{ mount.path }}` is **read-only** - you cannot modify files in this path
 {% endif %}
 {% endfor %}
 
@@ -94,4 +116,4 @@ This session has the following user-selected dynamic mounts available:
 
 {% endif %}
 
-IMPORTANT: When user provides fully-qualified path to a LOCAL file or folder, check if it's available via `mcp__agentum__LS` tool. 
+IMPORTANT: When user provides fully-qualified path to a LOCAL file or folder, check if it's available via `mcp__ag3ntum__LS` tool. 

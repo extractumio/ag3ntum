@@ -70,6 +70,13 @@ SYSTEM_UID_MAX = 999
 # Root UID (must never be used)
 ROOT_UID = 0
 
+from tests.constants import (
+    PREBUILT_USER_A_USERNAME as TEST_USER_A_NAME,
+    PREBUILT_USER_A_UID as TEST_USER_A_UID,
+    PREBUILT_USER_B_USERNAME as TEST_USER_B_NAME,
+    PREBUILT_USER_B_UID as TEST_USER_B_UID,
+)
+
 
 # =============================================================================
 # Fixtures
@@ -1464,4 +1471,193 @@ class TestPermissionModelConstants:
         # User range should not include API UID
         assert not (config.isolated_uid_min <= API_UID <= config.isolated_uid_max), (
             "API_UID should not be in user UID range"
+        )
+
+
+# =============================================================================
+# Test: Shared GID Model (ag3ntum_api ↔ sandbox user group memberships)
+# =============================================================================
+
+class TestSharedGIDModel:
+    """Test the shared GID model for API ↔ sandbox user file access.
+
+    Security Model:
+    - ag3ntum_api is added to each sandbox user's primary group at creation
+    - This enables 0o660/0o770 permissions (owner + group, no world access)
+    - Cross-user isolation is enforced by PathValidator at application layer
+
+    Pre-created test users (by entrypoint-test.sh):
+    - ag3ntum_tester_a: UID/GID 59990
+    - ag3ntum_tester_b: UID/GID 59991
+    """
+
+    @pytest.fixture
+    def in_docker(self) -> bool:
+        """Check if running inside Docker."""
+        return os.environ.get("AG3NTUM_ROOT") == "/"
+
+    def test_test_users_exist(self, in_docker: bool) -> None:
+        """Pre-created test users should exist in /etc/passwd."""
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        import subprocess
+        for username, uid in [
+            (TEST_USER_A_NAME, TEST_USER_A_UID),
+            (TEST_USER_B_NAME, TEST_USER_B_UID),
+        ]:
+            result = subprocess.run(
+                ["id", "-u", username],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 0, (
+                f"Test user {username} not found. "
+                f"Was entrypoint-test.sh run?"
+            )
+            assert int(result.stdout.strip()) == uid, (
+                f"Test user {username} has wrong UID: expected {uid}, "
+                f"got {result.stdout.strip()}"
+            )
+
+    def test_ag3ntum_api_groups_include_test_user_gids(self, in_docker: bool) -> None:
+        """ag3ntum_api supplementary groups should include test user GIDs.
+
+        This verifies the shared GID model: ag3ntum_api is added to each
+        sandbox user's primary group, enabling 660/770 file access without
+        world-readable permissions.
+        """
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        import subprocess
+        result = subprocess.run(
+            ["id", "-G", "ag3ntum_api"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"Failed to get ag3ntum_api groups: {result.stderr}"
+        )
+
+        groups = set(int(g) for g in result.stdout.strip().split())
+
+        assert TEST_USER_A_UID in groups, (
+            f"ag3ntum_api not in group {TEST_USER_A_UID} "
+            f"({TEST_USER_A_NAME}). Groups: {sorted(groups)}"
+        )
+        assert TEST_USER_B_UID in groups, (
+            f"ag3ntum_api not in group {TEST_USER_B_UID} "
+            f"({TEST_USER_B_NAME}). Groups: {sorted(groups)}"
+        )
+
+    def test_api_process_has_test_user_groups(self, in_docker: bool) -> None:
+        """Running test process (ag3ntum_api) should have test user GIDs
+        in its supplementary groups.
+
+        Tests run via 'docker exec -u ag3ntum_api' which calls initgroups(),
+        so the process should have the shared GID memberships configured by
+        entrypoint-test.sh.
+        """
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        current_uid = os.getuid()
+        if current_uid != API_USER_UID:
+            pytest.skip(
+                f"Test must run as ag3ntum_api (UID {API_USER_UID}), "
+                f"currently running as UID {current_uid}"
+            )
+
+        process_groups = set(os.getgroups())
+
+        assert TEST_USER_A_UID in process_groups, (
+            f"Process supplementary groups missing GID {TEST_USER_A_UID} "
+            f"({TEST_USER_A_NAME}). Groups: {sorted(process_groups)}"
+        )
+        assert TEST_USER_B_UID in process_groups, (
+            f"Process supplementary groups missing GID {TEST_USER_B_UID} "
+            f"({TEST_USER_B_NAME}). Groups: {sorted(process_groups)}"
+        )
+
+    def test_test_users_in_ag3ntum_group(self, in_docker: bool) -> None:
+        """Test users should be members of the ag3ntum group."""
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        import subprocess
+        for username in [TEST_USER_A_NAME, TEST_USER_B_NAME]:
+            result = subprocess.run(
+                ["id", "-Gn", username],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 0, (
+                f"Failed to get groups for {username}: {result.stderr}"
+            )
+            groups = result.stdout.strip().split()
+            assert "ag3ntum" in groups, (
+                f"{username} not in ag3ntum group. Groups: {groups}"
+            )
+
+    def test_test_user_directories_exist(self, in_docker: bool) -> None:
+        """Pre-created test user directories should exist with correct ownership."""
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        for username, uid in [
+            (TEST_USER_A_NAME, TEST_USER_A_UID),
+            (TEST_USER_B_NAME, TEST_USER_B_UID),
+        ]:
+            user_dir = Path(f"/users/{username}")
+            assert user_dir.exists(), (
+                f"User directory {user_dir} not found"
+            )
+            assert (user_dir / "sessions").is_dir(), (
+                f"Sessions directory missing for {username}"
+            )
+            assert (user_dir / "ag3ntum" / "persistent").is_dir(), (
+                f"Persistent directory missing for {username}"
+            )
+
+            # Verify ownership
+            stat = user_dir.stat()
+            assert stat.st_uid == uid, (
+                f"{user_dir} owned by UID {stat.st_uid}, expected {uid}"
+            )
+
+    def test_dynamic_group_refresh(self, in_docker: bool) -> None:
+        """Verify refresh_process_supplementary_groups() updates os.getgroups().
+
+        The function reads current groups from /etc/group via 'id -G' and
+        applies them to the running process via os.setgroups(). This requires
+        CAP_SETGID (retained via ambient capabilities in entrypoint).
+        """
+        if not in_docker:
+            pytest.skip("Requires Docker environment")
+
+        current_uid = os.getuid()
+        if current_uid != API_USER_UID:
+            pytest.skip(
+                f"Test must run as ag3ntum_api (UID {API_USER_UID}), "
+                f"currently running as UID {current_uid}"
+            )
+
+        from src.services.user_service import refresh_process_supplementary_groups
+
+        # Refresh should succeed without raising
+        refresh_process_supplementary_groups()
+
+        # After refresh, process groups should match what 'id -G' reports
+        import subprocess
+        result = subprocess.run(
+            ["id", "-G", "ag3ntum_api"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"Failed to get ag3ntum_api groups: {result.stderr}"
+        )
+
+        expected = {int(g) for g in result.stdout.strip().split()}
+        actual = set(os.getgroups())
+        assert actual == expected, (
+            f"Process groups don't match /etc/group after refresh. "
+            f"Missing: {expected - actual}, Extra: {actual - expected}"
         )

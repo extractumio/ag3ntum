@@ -9,12 +9,11 @@ Each session has an isolated workspace with:
 NOTE: All session metadata is stored in SQLite database (Session model),
 NOT in files. This module only manages directory structure.
 
-SECURITY: Session directories use shared access model:
-- Permissions: 770 (owner and group can read/write/execute)
-- Owner: sandbox user's UID (for files created by agent)
-- Group: same as owner UID (sandbox user's primary group)
-- This allows both API (via sudo bwrap root access) and sandbox to access
-- PathValidator provides application-level cross-session isolation
+SECURITY: Session directories use shared GID access model:
+- Permissions: 770 dirs / 660 files (owner + group, no world access)
+- Owner: sandbox user's UID (both UID and GID set to sandbox user)
+- ag3ntum_api is in each sandbox user's group (shared GID)
+- PathValidator provides application-level cross-session/cross-user isolation
 """
 import logging
 import os
@@ -26,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from .exceptions import DynamicMountError, SessionError
+from .path_validator import get_session_linux_uid
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,31 @@ def _sudo_chown(path: Path, uid: int) -> None:
         logger.warning(f"Could not set ownership of {path} to {uid}: {e}")
 
 
-def _sudo_chown_recursive(path: Path, uid: int) -> None:
+def chown_to_session_user(path: Path, session_id: str) -> None:
+    """
+    Change ownership of a file/directory to the session's sandbox user.
+
+    Called by Write/Edit/MultiEdit MCP tools after creating/modifying files.
+    Sets both UID and GID to the sandbox user's ID (e.g., 50000:50000).
+    Since ag3ntum_api is in the sandbox user's group (shared GID model),
+    both the API process and Bash sandbox can access files with 660/770 perms.
+
+    Uses sudo chown for paths under /users/*. Silently skips for
+    other paths (e.g., /mounts/*) where ownership is managed by the host.
+
+    Args:
+        path: Path to change ownership of
+        session_id: Session ID to look up the linux_uid
+    """
+    linux_uid = get_session_linux_uid(session_id)
+    if linux_uid is None:
+        return
+
+    if str(path).startswith("/users/"):
+        _sudo_chown(path, linux_uid)
+
+
+def sudo_chown_recursive(path: Path, uid: int) -> None:
     """
     Recursively set ownership of a path using sudo chown -R.
 
@@ -248,10 +272,10 @@ class SessionManager:
         Create symlinks for external mounts in the workspace.
 
         Creates the ./external/ directory structure with symlinks to:
-        - ./external/ro/{name} -> /mounts/ro/{name} (global read-only mounts)
-        - ./external/rw/{name} -> /mounts/rw/{name} (global read-write mounts)
-        - ./external/user-ro/{name} -> {host_path} (per-user read-only mounts)
-        - ./external/user-rw/{name} -> {host_path} (per-user read-write mounts)
+        - ./external/ro/{name} -> /mounts/{name} (global read-only mounts)
+        - ./external/rw/{name} -> /mounts/{name} (global read-write mounts)
+        - ./external/user-ro/{name} -> /mounts/{name} (per-user read-only mounts)
+        - ./external/user-rw/{name} -> /mounts/{name} (per-user read-write mounts)
 
         Also creates persistent storage symlink:
         - ./persistent -> /persistent (sandbox mount target)
@@ -292,13 +316,15 @@ class SessionManager:
 
                 mounts_data = manifest.get("mounts", {})
 
-                # Create RO mount symlinks
+                # Create RO mount symlinks (flattened: /mounts/{name})
                 if isinstance(mounts_data.get("ro"), list):
                     for mount in mounts_data["ro"]:
                         if isinstance(mount, dict) and mount.get("name"):
                             name = mount["name"]
                             link = external_dir / "ro" / name
-                            target = Path(f"/mounts/ro/{name}")
+                            # Use container_path from manifest if available, else flat path
+                            container_path = mount.get("container_path", f"/mounts/{name}")
+                            target = Path(container_path)
 
                             # Skip if mount doesn't exist in Docker
                             if not target.exists():
@@ -327,13 +353,15 @@ class SessionManager:
                             except OSError as e:
                                 logger.warning(f"Failed to create RO symlink for {name}: {e}")
 
-                # Create RW mount symlinks
+                # Create RW mount symlinks (flattened: /mounts/{name})
                 if isinstance(mounts_data.get("rw"), list):
                     for mount in mounts_data["rw"]:
                         if isinstance(mount, dict) and mount.get("name"):
                             name = mount["name"]
                             link = external_dir / "rw" / name
-                            target = Path(f"/mounts/rw/{name}")
+                            # Use container_path from manifest if available, else flat path
+                            container_path = mount.get("container_path", f"/mounts/{name}")
+                            target = Path(container_path)
 
                             # Skip if mount doesn't exist in Docker
                             if not target.exists():
@@ -371,12 +399,13 @@ class SessionManager:
         try:
             user_mounts = get_user_mounts(username)
 
-            # Create per-user RO mount symlinks
-            # Per-user mounts are mounted at /mounts/user-ro/{name} inside Docker
+            # Create per-user RO mount symlinks (flattened: /mounts/{name})
             for mount_info in user_mounts.get("ro", []):
                 name = mount_info["name"]
                 link = external_dir / "user-ro" / name
-                target = Path(f"/mounts/user-ro/{name}")
+                # Use container_path from mount_info if available, else flat path
+                container_path = mount_info.get("container_path", f"/mounts/{name}")
+                target = Path(container_path)
 
                 # Skip if mount doesn't exist and is required
                 if not target.exists():
@@ -392,11 +421,13 @@ class SessionManager:
                     except OSError as e:
                         logger.warning(f"Failed to create user RO symlink for {name}: {e}")
 
-            # Create per-user RW mount symlinks
+            # Create per-user RW mount symlinks (flattened: /mounts/{name})
             for mount_info in user_mounts.get("rw", []):
                 name = mount_info["name"]
                 link = external_dir / "user-rw" / name
-                target = Path(f"/mounts/user-rw/{name}")
+                # Use container_path from mount_info if available, else flat path
+                container_path = mount_info.get("container_path", f"/mounts/{name}")
+                target = Path(container_path)
 
                 # Skip if mount doesn't exist and is required
                 if not target.exists():
@@ -474,7 +505,8 @@ class SessionManager:
         """
         Set up dynamic mounts for a session.
 
-        Creates symlinks in workspace/dynamic/ pointing to container mount paths.
+        Creates symlinks at workspace root (e.g., workspace/{alias}) pointing to
+        container mount paths (/mounts/{base}/{subpath}).
         Returns list of mount info for PathValidator and Bubblewrap configuration.
 
         Args:
@@ -493,14 +525,9 @@ class SessionManager:
         from src.services.mount_service import get_dynamic_mount_service
 
         workspace = self.get_workspace_dir(session_id)
-        dynamic_dir = workspace / "dynamic"
-        dynamic_dir.mkdir(parents=True, exist_ok=True)
 
-        # Set permissions for sandbox access
-        try:
-            dynamic_dir.chmod(0o777)
-        except PermissionError:
-            pass
+        # Reserved workspace paths that cannot be used as mount aliases
+        reserved_paths = {"external", "persistent", ".claude", "output.yaml"}
 
         mount_service = get_dynamic_mount_service()
         max_mounts = mount_service.security.get("max_mounts_per_session", 10)
@@ -519,6 +546,12 @@ class SessionManager:
                 raise DynamicMountError(f"Duplicate mount alias: {request.alias}")
             seen_aliases.add(request.alias)
 
+            # Check for reserved paths
+            if request.alias in reserved_paths:
+                raise DynamicMountError(
+                    f"Mount alias '{request.alias}' is reserved and cannot be used"
+                )
+
             # Validate mount request
             validation = mount_service.validate_mount_request(request, username)
 
@@ -532,8 +565,8 @@ class SessionManager:
                     f"Mount '{request.alias}' denied: {validation.error}"
                 )
 
-            # Create symlink
-            link_path = dynamic_dir / request.alias
+            # Create symlink at workspace root (same level as external/, persistent/)
+            link_path = workspace / request.alias
             target_path = Path(validation.resolved_container_path)
 
             if link_path.exists() or link_path.is_symlink():
@@ -560,7 +593,7 @@ class SessionManager:
 
             mounted.append(DynamicMountInfo(
                 alias=request.alias,
-                workspace_path=f"./dynamic/{request.alias}",
+                workspace_path=f"./{request.alias}",
                 mode=validation.resolved_mode,
                 source_base=request.base,
                 source_subpath=request.subpath,
@@ -570,6 +603,31 @@ class SessionManager:
             f"Set up {len(mounted)} dynamic mounts for session {session_id}"
         )
         return mounted
+
+    def get_original_path_mounts(
+        self,
+        username: str,
+    ) -> list:
+        """
+        Get original-path mounts available to a user.
+
+        Original-path mounts allow accessing paths like /var/log at their
+        original locations within the sandbox. These are configured in
+        external-mounts.yaml under original_paths.
+
+        Args:
+            username: The username (from JWT token) for authorization.
+
+        Returns:
+            List of OriginalPathMount objects describing the available mounts.
+        """
+        from src.services.mount_service import (
+            get_original_path_mount_service,
+            OriginalPathMount,
+        )
+
+        mount_service = get_original_path_mount_service()
+        return mount_service.get_mounts_for_user(username)
 
     def cleanup_workspace_skills(self, session_id: str) -> None:
         """
@@ -686,13 +744,17 @@ def ensure_secure_session_files(
     Ensure all session files have appropriate permissions after agent run.
 
     Session files use shared access permissions (770/660) to allow both
-    API and sandbox processes to access them. Cross-session isolation
-    is enforced at the application level by PathValidator.
+    API and sandbox processes to access them. The ag3ntum_api process is
+    in the sandbox user's primary group (shared GID model, set at user
+    creation), so 660/770 is sufficient — no world-readable permissions needed.
+
+    Cross-session isolation is enforced by PathValidator at the application level.
 
     Security Properties:
-    - Directories: 770 (owner + group)
-    - Files: 660 (owner + group read/write)
+    - Directories: 770 (owner rwx + group rwx, no world)
+    - Files: 660 (owner rw + group rw, no world)
     - Sensitive files (agent.jsonl, .claude.json): 660
+    - Ownership: uid:uid (sandbox user owns both UID and GID)
 
     Args:
         session_dir: Path to the session directory

@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from ..config import CONFIG_DIR
 from ..core.schemas import SessionContext, TaskExecutionParams
+from ..core.sessions import SessionManager
 from ..core.task_runner import execute_agent_task
 from ..core.tracer import BackendConsoleTracer, EventingTracer
 from ..db.database import AsyncSessionLocal
@@ -384,6 +385,29 @@ class AgentRunner:
             sessions_dir = Path(params.sessions_dir)
             working_dir = sessions_dir / session_id
 
+            # Set up dynamic mounts if any were requested
+            dynamic_mount_info = []
+            if params.dynamic_mounts:
+                try:
+                    session_manager = SessionManager(sessions_dir)
+                    dynamic_mount_info = session_manager.setup_dynamic_mounts(
+                        session_id=session_id,
+                        username=user.username,
+                        mount_requests=params.dynamic_mounts,
+                        owner_uid=linux_uid,
+                    )
+                    logger.info(
+                        f"Set up {len(dynamic_mount_info)} dynamic mounts for session {session_id}"
+                    )
+                except Exception as mount_error:
+                    logger.error(f"Failed to set up dynamic mounts: {mount_error}")
+                    emit_error_event(
+                        f"Failed to set up dynamic mounts: {mount_error}",
+                        "configuration_error"
+                    )
+                    await self._update_session_status(session_id, "failed")
+                    return
+
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
 
             exec_params = TaskExecutionParams(
@@ -415,6 +439,8 @@ class AgentRunner:
                 tracer=tracer,
                 # Session context from database
                 session_context=session_context,
+                # Dynamic mounts set up for this session
+                dynamic_mounts=dynamic_mount_info,
             )
 
             # Execute using unified task runner

@@ -30,7 +30,8 @@ RUN chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && git lfs install
 
 # Create ag3ntum group and ag3ntum_api user (UID 45045, well outside typical user range)
-# The ag3ntum group is used for session directory access (API + user both need access)
+# Shared GID model: ag3ntum group for home dir access; ag3ntum_api is also added to
+# each sandbox user's primary group at user creation time (for session file access with 660/770)
 RUN groupadd ag3ntum \
     && useradd -m -u 45045 -s /bin/bash -G ag3ntum ag3ntum_api
 
@@ -56,6 +57,8 @@ RUN echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -L *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -a -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
+    echo '# Allow API user to join sandbox user groups (shared GID for 660 file access)' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -a -G * ag3ntum_api' >> /etc/sudoers.d/ag3ntum && \
     echo '# Restricted userdel - only session users (user_ prefix) can be deleted' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel user_*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r user_*' >> /etc/sudoers.d/ag3ntum && \
@@ -95,12 +98,13 @@ COPY . /
 
 # Copy and make entrypoint executable
 COPY entrypoint-web.sh /entrypoint-web.sh
-RUN chmod +x /entrypoint-web.sh
+COPY entrypoint-api.sh /entrypoint-api.sh
+RUN chmod +x /entrypoint-web.sh /entrypoint-api.sh
 
 # Create runtime directories and set ownership of application directories to ag3ntum_api
 RUN mkdir -p /data /sessions \
     && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts \
-    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
+    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /entrypoint-api.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
 
 ENV AG3NTUM_ROOT=/
 ENV PYTHONPATH=/
@@ -112,5 +116,8 @@ ENV PYTHONUNBUFFERED=1
 # Set via docker-compose environment or CLI: -e AG3NTUM_UID_MODE=direct
 ENV AG3NTUM_UID_MODE=isolated
 
-# Switch to non-root user
-USER ag3ntum_api
+# NOTE: No USER directive here. The container starts as root so that
+# entrypoint-api.sh can sync Linux users and group memberships before
+# dropping to ag3ntum_api via setpriv --init-groups. This ensures the
+# API process inherits correct supplementary groups (shared GID model).
+# The web container entrypoint handles its own user context.

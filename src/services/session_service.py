@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import SESSIONS_DIR
-from ..core.sessions import SessionManager, generate_session_id
+from ..core.sessions import SessionManager, generate_session_id, sudo_chown_recursive
 from ..db.models import Session, User
 
 logger = logging.getLogger(__name__)
@@ -218,6 +218,13 @@ class SessionService:
             # Set up external mount symlinks (for File Browser UI and agent tools)
             # Pass owner_uid so directories are accessible by sandbox user
             session_manager.setup_external_mounts(session_id, username, owner_uid=owner_uid)
+
+            # Chown entire session directory to sandbox user AFTER all dirs/symlinks
+            # are created. API retains access via shared GID (660/770 perms).
+            if owner_uid is not None:
+                session_dir = session_manager.get_session_dir(session_id)
+                sudo_chown_recursive(session_dir, owner_uid)
+                logger.info(f"Set session {session_id} ownership to UID {owner_uid}")
 
             # Create database record (authoritative source for all metadata)
             db_session = Session(

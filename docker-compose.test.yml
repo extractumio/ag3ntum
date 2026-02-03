@@ -9,23 +9,33 @@
 #   docker compose -f docker-compose.yml -f docker-compose.test.yml <command>
 #
 # What this does:
-#   1. Mounts the test sudoers file directly into /etc/sudoers.d/
-#   2. Sets AG3NTUM_TEST_MODE=true environment variable
+#   1. Mounts the test sudoers file to a staging location (/config/test/)
+#   2. Uses entrypoint-test.sh to copy and set correct permissions (440, root:root)
+#   3. Sets AG3NTUM_TEST_MODE=true environment variable
 #
 # SECURITY:
 #   - Test sudoers rules are NOT baked into the Docker image
 #   - They are only active when explicitly using this override
 #   - Production deployments should NEVER include this file
-#   - The mount is read-only, so no modifications can be made
+#   - entrypoint-test.sh validates sudoers syntax before installing
 #
 # =============================================================================
 
 services:
   ag3ntum-api:
     # Additional volumes for test configuration
-    # Mount test sudoers directly into /etc/sudoers.d/ (Docker handles permissions)
+    # Mount test sudoers to staging area - entrypoint-test.sh will copy with correct permissions
     volumes:
-      - ./config/test/sudoers-test:/etc/sudoers.d/ag3ntum-test:ro
+      - ./config/test/sudoers-test:/config/test/sudoers-test:ro
+      - ./entrypoint-test.sh:/entrypoint-test.sh:ro
+
+    # Run as root initially to install test sudoers, then entrypoint drops to ag3ntum_api
+    user: root
+
+    # Override entrypoint to install test sudoers before starting
+    entrypoint: ["/bin/bash", "/entrypoint-test.sh"]
+    # The test entrypoint installs sudoers as root, then execs uvicorn as ag3ntum_api
+    command: ["/opt/venv/bin/uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "40080", "--workers", "4"]
 
     # Test-specific environment variables
     environment:

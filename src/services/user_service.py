@@ -46,6 +46,37 @@ API_UID = 45045
 
 logger = logging.getLogger(__name__)
 
+
+def refresh_process_supplementary_groups() -> None:
+    """Refresh this process's supplementary groups from /etc/group.
+
+    After usermod adds ag3ntum_api to a new user's group, the running process
+    still has stale groups. This reads the current groups from /etc/group and
+    applies them via os.setgroups().
+
+    Requires CAP_SETGID (retained via ambient capabilities in entrypoint).
+    """
+    try:
+        result = subprocess.run(
+            ["id", "-G", "ag3ntum_api"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            logger.warning(f"Failed to read groups for ag3ntum_api: {result.stderr.strip()}")
+            return
+
+        gids = [int(g) for g in result.stdout.strip().split()]
+        os.setgroups(gids)
+        logger.info(f"Refreshed supplementary groups: {len(gids)} groups loaded")
+    except PermissionError:
+        logger.warning(
+            "Cannot refresh supplementary groups (no CAP_SETGID). "
+            "Groups will update on next container restart."
+        )
+    except Exception as e:
+        logger.warning(f"Failed to refresh supplementary groups: {e}")
+
+
 # Default requirements file for user venvs
 DEFAULT_USER_REQUIREMENTS = CONFIG_DIR / "user_requirements.txt"
 
@@ -171,6 +202,79 @@ class UserService:
 
         logger.info(f"Created user {username} (UID: {linux_uid})")
         return user
+
+    async def ensure_linux_users_exist(self, db: AsyncSession) -> dict:
+        """
+        Ensure all database users have Linux accounts in the container.
+
+        Called on API startup. Linux users are ephemeral (lost on container
+        rebuild) but database records and files persist. This recreates the
+        Linux accounts and group memberships needed for the shared GID model.
+
+        Only creates the account and sets up groups — does NOT touch
+        directories, venvs, or secrets (those persist on disk).
+
+        Returns:
+            Dict with counts: created, skipped, failed
+        """
+        result = await db.execute(
+            select(User).where(User.is_active == True)
+        )
+        users = result.scalars().all()
+
+        stats = {"created": 0, "skipped": 0, "failed": 0}
+
+        for user in users:
+            if user.linux_uid is None:
+                continue
+
+            try:
+                # Create Linux user (idempotent — useradd returns 9 if exists)
+                proc = subprocess.run(
+                    ["sudo", "useradd", "-M", "-d", f"/users/{user.username}",
+                     "-s", "/bin/bash", "-u", str(user.linux_uid), user.username],
+                    capture_output=True, text=True,
+                )
+                created = proc.returncode == 0
+                if proc.returncode not in (0, 9):
+                    logger.error(
+                        f"Failed to ensure Linux user {user.username}: {proc.stderr.strip()}"
+                    )
+                    stats["failed"] += 1
+                    continue
+
+                # Add user to ag3ntum group
+                subprocess.run(
+                    ["sudo", "usermod", "-a", "-G", "ag3ntum", user.username],
+                    capture_output=True, check=True,
+                )
+
+                # Add ag3ntum_api to user's primary group (shared GID)
+                subprocess.run(
+                    ["sudo", "usermod", "-a", "-G", user.username, "ag3ntum_api"],
+                    capture_output=True, check=True,
+                )
+
+                if created:
+                    logger.info(
+                        f"Created Linux user {user.username} (UID {user.linux_uid})"
+                    )
+                    stats["created"] += 1
+                else:
+                    stats["skipped"] += 1
+
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"Failed to set up groups for {user.username}: "
+                    f"{e.stderr.strip() if e.stderr else e}"
+                )
+                stats["failed"] += 1
+
+        # Refresh groups in case any new users were synced
+        if stats["created"] > 0:
+            refresh_process_supplementary_groups()
+
+        return stats
 
     def _validate_username(self, username: str) -> bool:
         """Validate Linux username format."""
@@ -298,31 +402,42 @@ class UserService:
         """
         Create Linux user with sudo useradd and set up group-based permissions.
 
-        Permission Model (Group-Based):
+        Permission Model (Shared GID):
         ================================
-        Uses Unix group permissions for API access, with PathValidator as
-        the primary security gate for cross-user and cross-session isolation.
+        Uses Unix group permissions for mutual access between API and sandbox
+        processes. PathValidator is the primary security gate for cross-user
+        and cross-session isolation.
+
+        Two group relationships:
+        1. Sandbox user → ag3ntum group (home dir, skills, persistent access)
+        2. ag3ntum_api → sandbox user's primary group (session file access)
+
+        This shared GID model allows 660/770 permissions on session files
+        (no world access) while both API and sandbox can read/write.
 
         Security Layers:
         - Primary: PathValidator (application-level access control)
-        - Secondary: Unix group permissions (750 for dirs, 770 for persistent)
+        - Secondary: Unix group permissions (750 home, 770 sessions, 660 files)
 
         Directory Structure:
-          /users/{username}/           # 750 (owner rwx, group rx)
-          ├── .claude/                 # 770 (owner rwx, group rwx for API)
+          /users/{username}/           # 750 (owner rwx, ag3ntum group rx)
+          ├── .claude/                 # 770 (owner rwx, ag3ntum group rwx)
           │   └── skills/              # 770 (API can write skills)
-          ├── ag3ntum/                 # 750 (group rx for API traverse to persistent/)
-          │   ├── persistent/          # 770 (group rwx for API writes)
+          ├── ag3ntum/                 # 750 (ag3ntum group rx for traverse)
+          │   ├── persistent/          # 770 (ag3ntum group rwx for API writes)
           │   └── secrets.yaml         # 600 (owner only, protects API keys)
-          ├── sessions/                # 770 (API can create session dirs)
-          │   └── {session_id}/        # 700 (owner only, true isolation)
+          ├── sessions/                # 770 (ag3ntum group rwx, API creates dirs)
+          │   └── {session_id}/        # 770 owner:uid/group:uid (shared GID)
+          │       └── workspace/       # 770, files 660 (API in user's group)
           └── venv/                    # 755 (needs to be executable by sandbox)
 
         Security Properties:
-        - API (ag3ntum group) can manage user resources via group permissions
+        - API accesses home dirs via ag3ntum group membership
+        - API accesses session files via shared GID (user's primary group)
         - PathValidator blocks cross-user access (CROSS_USER_ACCESS_BLOCKED)
         - PathValidator blocks cross-session access (CROSS_SESSION_ACCESS_BLOCKED)
-        - Session directories are owner-only (700)
+        - Cross-user isolation: each user has unique GID; ag3ntum_api is in all
+          groups but PathValidator prevents cross-user file access
         - secrets.yaml is owner-only (600) even though ag3ntum/ is group-traversable
         """
         home_dir = Path(f"/users/{username}")
@@ -468,6 +583,10 @@ class UserService:
         # - Secondary: Unix group permissions (750 for dirs, 770 for persistent)
         # - Session directories: 700 (owner only, no group access)
         self._setup_group_permissions(home_dir, uid, username)
+
+        # Refresh this process's supplementary groups so the new user's
+        # GID is immediately available for shared-GID file access
+        refresh_process_supplementary_groups()
 
         logger.info(f"Created/Updated Linux user {username} with UID {uid}")
 
@@ -640,17 +759,22 @@ class UserService:
         """
         Set up group-based permissions for API access to user directories.
 
+        Two group relationships are established:
+        1. Sandbox user → ag3ntum group (home dir, skills, persistent access)
+        2. ag3ntum_api → sandbox user's primary group (session file access with 660/770)
+
         Permission Model:
-        - User is added to ag3ntum group
-        - User directories get 750 (owner rwx, group rx)
-        - ag3ntum/ dir gets 750 (traverse for group to access persistent/)
-        - Persistent storage gets 770 (owner rwx, group rwx for API writes)
+        - User directories get 750 (owner rwx, ag3ntum group rx)
+        - ag3ntum/ dir gets 750 (ag3ntum group traverse to persistent/)
+        - Persistent storage gets 770 (ag3ntum group rwx for API writes)
         - secrets.yaml stays 600 (owner only, protects API keys)
-        - Session directories get 700 (owner only, no group access)
-        - API (also in ag3ntum group) can access via group permissions
+        - Session files: 770 dirs / 660 files (owner:uid, group:uid)
+        - ag3ntum_api in user's group → can access session files without world perms
 
         Security: PathValidator provides application-level access control as the
         primary security gate. Group permissions are defense-in-depth.
+        Cross-user isolation: each user has unique primary GID. ag3ntum_api is in
+        all user groups but PathValidator prevents cross-user file access.
         """
         try:
             # Add user to ag3ntum group
@@ -660,6 +784,17 @@ class UserService:
                 capture_output=True,
             )
             logger.info(f"Added {username} to ag3ntum group")
+
+            # Add ag3ntum_api to sandbox user's primary group (shared GID)
+            # This allows the API process to access session files with 660/770 perms
+            # instead of the more permissive 666/777. Cross-user isolation is enforced
+            # by PathValidator at the application layer.
+            subprocess.run(
+                ["sudo", "usermod", "-a", "-G", username, "ag3ntum_api"],
+                check=True,
+                capture_output=True,
+            )
+            logger.info(f"Added ag3ntum_api to {username}'s group (GID {uid})")
 
             # Set group ownership to ag3ntum for key directories
             subprocess.run(
@@ -780,6 +915,8 @@ class UserService:
         if delete_linux_user and user.linux_uid:
             try:
                 self._delete_linux_user(username)
+                # Refresh groups to remove the deleted user's GID
+                refresh_process_supplementary_groups()
             except Exception as e:
                 logger.warning(f"Failed to delete Linux user {username}: {e}")
                 # Continue with cleanup even if Linux user deletion fails

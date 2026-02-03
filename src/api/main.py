@@ -197,6 +197,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     logger.info("Database initialized")
 
+    # NOTE: Linux user sync happens in entrypoint-api.sh BEFORE this process starts.
+    # This ensures the process inherits correct supplementary groups (shared GID model).
+
     # Initialize SubagentManager singleton
     # This loads config/subagents.yaml and renders all prompt templates ONCE.
     # The same subagent definitions are shared across ALL users and sessions.

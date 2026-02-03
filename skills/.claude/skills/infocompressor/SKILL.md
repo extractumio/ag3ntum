@@ -6,328 +6,463 @@ description: |
   cheat sheet", "dense summary", "reference format", "compact version", "information-dense". NOT
   for casual summaries—only when user explicitly wants maximum density with zero data loss.
 ---
-# Information Compression Framework
+# Text Compression Skill
 
-## Core Principle
+Transform verbose documents into dense, human-readable reference specs.
 
-**Density = Essential Elements ÷ Character Count**
+## Core Principles
 
-The goal: maximize semantic content per unit of text while preserving instant human readability.
+- **Style:** Spec/reference guide — imperative, terse, scannable
+- **Format:** Markdown with minimal nesting
+- **Redundancy:** Zero. State each fact once.
+- **Notation:** Plain language with minimal intuitive symbols.
+- **Target:** 40-60% reduction for most technical documents.
+- **DRY:** Don't repeat. Reference existing docs instead of duplicating.
+- **Progressive disclosure:** Link to details, don't inline everything.
 
 ---
 
-## What Constitutes "Essential Information"
+## Referencing Other Documents
 
-| Category | Examples | Priority |
+When information exists elsewhere, reference it — don't copy it.
+
+**Syntax:**
+- `@DocumentName` — mention another doc in same system
+- `[Label](URL)` — link to external resource
+- Imperative prefix: "Read @Auth for token handling"
+
+**Patterns:**
+
+| Instead of... | Write... |
+|---------------|----------|
+| Copying auth flow from another doc | "Auth flow: Read @Authentication" |
+| Repeating error format spec | "Error format: See @APIConventions#errors" |
+| Duplicating setup instructions | "Setup: Follow @GettingStarted first" |
+
+**When to reference vs inline:**
+
+| Situation | Action |
+|-----------|--------|
+| Info exists in canonical source | Reference it |
+| Info is 1-2 lines, critical to flow | Inline it |
+| Reader needs context to proceed | Inline minimum, reference full |
+| Info changes frequently | Reference (single update point) |
+
+**Example:**
+
+```markdown
+## Create Order
+
+Purpose: Submit new order for processing
+
+`POST /orders`
+
+Prerequisites: Read @Authentication for token setup
+
+**Input:**
+- items: array of {sku, qty}
+- shipping: address object (see @DataTypes#address)
+
+**Flow:**
+Validate → Check inventory (@InventoryService) → Reserve → Confirm
+
+**Errors:**
+Standard error format. See @APIConventions#errors
+- 400: invalid items
+- 409: insufficient stock
+```
+
+---
+
+## Information Priority
+
+Preserve in order of criticality. Never lose critical items.
+
+| Priority | Category | Examples |
 |----------|----------|----------|
-| **Identifiers** | Names, IDs, versions, dates, codes | Critical |
-| **Values** | Numbers, measurements, thresholds, percentages | Critical |
-| **Entities** | People, systems, components, organizations | Critical |
-| **Relationships** | X→Y, A contains B, P depends on Q | High |
-| **Causality** | If X then Y, because, therefore, triggers | High |
-| **Attributes** | Properties, states, configurations, types | High |
-| **Actions/Decisions** | What was done, chosen, rejected | High |
-| **Sequences** | Order, steps, pipelines, workflows | Medium-High |
-| **Inputs/Outputs** | What enters, what exits, parameters | Medium-High |
-| **Constraints** | Limits, conditions, exceptions, rules | Medium |
+| Critical | Identifiers | Names, IDs, versions, dates, codes |
+| Critical | Values | Numbers, thresholds, percentages, limits |
+| Critical | Entities | People, systems, components, orgs |
+| High | Relationships | X depends on Y, A contains B |
+| High | Causality | If X then Y, triggers, because |
+| High | Actions | What was done, chosen, rejected |
+| Medium | Sequences | Order, steps, workflows |
+| Medium | Constraints | Limits, conditions, exceptions |
+| Low | Context | Background, history, rationale |
 
 ---
 
-## The Transformation Process
+## Representation Selection
 
-### Phase 1: Extraction Pass
+Pick the **first** format that fits:
 
-**Read and tag every instance of:**
-```
-[E] Entity/Name
-[V] Value/Number
-[I] Identifier/Code
-[R] Relationship
-[C] Causality/Condition
-[A] Attribute/Property
-[D] Decision/Action
-[S] Sequence step
-[IO] Input or Output
-```
+| Data Shape | Use |
+|------------|-----|
+| Single fact | Inline text |
+| List of items (no attributes) | Bullet points |
+| Named properties | `key: value` pairs |
+| Simple sequence (no branching) | Numbered list |
+| Sequence with branching | MermaidJS flowchart |
+| 2+ attributes per item | Table |
 
-### Phase 2: Redundancy Elimination
+---
 
-**Remove:**
-- Filler phrases ("It is important to note that...")
-- Repetition of same information in different words
-- Obvious/inferable context
-- Transitional prose ("Moving on to the next topic...")
-- Hedging language ("perhaps," "might," "it seems")
-- Attribution phrases when source is clear
+## Language Rules
 
-### Phase 3: Structural Transformation
+### Sentence Construction
 
-**Convert prose patterns to notation:**
+- **Imperative mood.** "Validate input" not "The input should be validated"
+- **Present tense.** "System returns error" not "System will return"
+- **Active voice.** "User submits form" not "Form is submitted by user"
+- **3-7 words per statement** when possible
 
-| Original Pattern | Compressed Form |
-|-----------------|-----------------|
-| "X causes Y" | X → Y |
+### Words to Cut
+
+| Remove | Replace With |
+|--------|--------------|
+| In order to | *(delete, use infinitive)* |
+| It is necessary to | Must |
+| Due to the fact that | Because |
+| In the event that | If |
+| At this point in time | Now |
+| Has the ability to | Can |
+| Is responsible for | *(verb directly)* |
+| Basically, essentially, actually | *(delete)* |
+| Please note that | *(delete)* |
+| The fact that | *(delete)* |
+| In cases where | When / If |
+| There is/are | *(rephrase)* |
+| It should be noted | *(delete)* |
+| As a matter of fact | *(delete)* |
+| For the purpose of | For / To |
+| In the process of | *(delete, use -ing verb)* |
+| On a daily basis | Daily |
+| At the present time | Now / Currently |
+| In the near future | Soon |
+| A large number of | Many |
+| The vast majority of | Most |
+| In spite of the fact that | Although / Despite |
+| Perhaps, might, it seems | *(delete or commit)* |
+| Moving on to | *(delete)* |
+| As mentioned earlier | *(delete)* |
+
+### Standard Qualifiers
+
+Use consistently throughout:
+
+- **Must** — required, will fail without
+- **Should** — recommended, best practice
+- **May** — optional, allowed
+- **Never** — prohibited
+
+### Relationship Notation
+
+Use these intuitive symbols inline when clearer than prose:
+
+| Symbol | Meaning | Example |
+|--------|---------|---------|
+| `→` | leads to, causes, then, outputs | `Input → Validate → Store` |
+| `←` | depends on, requires, from | `Service ← Database` |
+| `↔` | bidirectional | `Client ↔ Server` |
+| `\|` | or, alternative | `JSON \| XML` |
+| `+` | and, combined | `Auth + Logging` |
+| `?` `:` | if-then-else | `Valid ? Process : Reject` |
+| `..` | range | `1..100`, `A..Z` |
+
+### Pattern Transformations
+
+Convert verbose patterns to compact forms:
+
+| Verbose Pattern | Compressed |
+|-----------------|------------|
 | "X results in Y" | X → Y |
-| "X contains A, B, and C" | X: [A, B, C] |
-| "If X then Y, otherwise Z" | X ? Y : Z |
 | "X depends on Y" | X ← Y |
-| "X is related to Y" | X ↔ Y |
-| "X consists of Y" | X = {Y} |
-| "X equals Y" | X = Y |
-| "X is greater than Y" | X > Y |
-| "X becomes Y" | X → Y |
+| "X and Y communicate" | X ↔ Y |
+| "If X then Y, otherwise Z" | X ? Y : Z |
 | "from X to Y" | X..Y |
-| "X and Y" | X + Y |
 | "X or Y" | X \| Y |
-| "not X" | ¬X or !X |
+| "X followed by Y followed by Z" | X → Y → Z |
+| "X contains A, B, and C" | X: A, B, C |
+| "the value ranges from 10 to 100" | value: 10..100 |
 
-### Phase 4: Format Selection
+---
 
-**Choose based on information structure:**
+## Structure Templates
 
+### Concept / Definition
+
+```markdown
+## Term Name
+
+Short definition in one sentence.
+
+- property: value
+- property: value
+- related: Other Concept
 ```
-HIERARCHICAL DATA → Nested indentation
-  Component
-    Sub-component
-      Property: value
 
-SEQUENTIAL/WORKFLOW → Arrow chains
-  Step1 → Step2 → Step3 → Output
+### Process / Flow (with branching)
 
-COMPARATIVE DATA → Tables
-  | Entity | Attr1 | Attr2 |
+```markdown
+## Process Name
 
-KEY-VALUE PAIRS → Colon notation
-  name: value
-  config: {a:1, b:2}
+Brief purpose (1 line).
 
-CONDITIONAL LOGIC → Decision notation
-  condition ? result_true : result_false
+​```mermaid
+flowchart LR
+    A[Start] --> B{Condition?}
+    B -->|yes| C[Action 1]
+    B -->|no| D[Action 2]
+    C --> E[End]
+    D --> E
+​```
 
-MULTIPLE CATEGORIES → Section headers
-  ## Category
-  content
+**Errors:**
+- Condition X: return 400
+- Condition Y: return 401
+```
+
+### Process / Flow (linear)
+
+```markdown
+## Process Name
+
+1. Actor does action
+2. System validates
+3. System creates record
+4. Return confirmation
+```
+
+Or inline for simple flows:
+
+```markdown
+## Process Name
+
+Input → Validate → Transform → Store → Respond
+```
+
+### Constraint / Rule
+
+```markdown
+## Rule Name
+
+Applies to: [scope]
+
+- condition: description
+- condition: description
+
+Violation: what happens
+```
+
+### API Endpoint
+
+```markdown
+## Endpoint Name
+
+Purpose: what business problem this solves (1 line)
+
+`METHOD /path/{param}`
+
+**Input:**
+- param (path): description
+- field (body): type, constraints
+
+**Output:** description of success response
+
+**Errors:**
+- 400: invalid input
+- 401: not authenticated
+- 404: resource not found
+```
+
+### Configuration / Options (simple)
+
+```markdown
+## Config Section
+
+- timeout: 30s
+- retries: 3
+- cache: enabled
+```
+
+### Configuration / Options (with attributes)
+
+```markdown
+## Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| timeout | int | 30 | Seconds before abort |
+| retries | int | 3 | Max retry attempts |
+```
+
+### Decision Record
+
+```markdown
+## Decision Name
+
+Context: brief situation
+
+| Option | Outcome |
+|--------|---------|
+| A | consequence |
+| B | consequence |
+
+Chosen: A — reason
 ```
 
 ---
 
-## Compression Notation System
+## Compression Pipeline
 
-### Symbols & Operators
-```
-→  leads to, causes, outputs, then
-←  depends on, requires, inputs from
-↔  bidirectional relationship
-|  or, alternative
-&  and, combined with
-!  not, negation
-?  conditional, if
-:  has property, equals, contains
-::  type of, instance of
-=  equals, defined as
-≈  approximately
->  greater, more than
-<  less, fewer than
-≥≤ greater/less or equal
-∅  none, empty, null
-∞  unlimited, unbounded
-Δ  change, delta, difference
-#  count, number of
-@  at, located, reference
-*  important, key, required
-~  approximately, around
-+  plus, addition, includes
--  minus, excludes, removed
-/  per, divided by, ratio
-[]  optional, array, list
-{}  set, group, object
-()  grouping, parameters
-```
+### Step 1: Segment
 
-### Abbreviations (context-dependent)
-```
-cfg=config  fn=function  attr=attribute
-src=source  dst=destination  ref=reference
-req=required  opt=optional  def=default
-in=input  out=output  err=error
-init=initialize  exec=execute  ret=return
-prev=previous  curr=current  next=next
-min/max  avg  cnt=count  len=length
-```
+Read document. Tag each chunk:
 
----
+- **Concept** — defines something
+- **Flow** — describes sequence
+- **Rule** — states constraint
+- **Config** — lists settings
+- **Example** — shows usage
 
-## Template Structures
+### Step 2: Normalize
 
-### For Technical Documentation
-```
-## [Component Name]
-Purpose: [single line]
-Type: [classification]
-Inputs: [list]
-Outputs: [list]
-Config: {key:val, key:val}
-Dependencies: [list]
-Flow: step1 → step2 → step3
-Constraints: [conditions]
-```
+- Pick one term per concept. Use everywhere.
+- Convert to active voice, present tense.
+- Replace verbose phrases (see Words to Cut).
 
-### For Process/Workflow
-```
-## [Process Name]
-Trigger: [what initiates]
-Steps:
-  1. Action → Result
-  2. Action → Result
-  3. Decision? → PathA : PathB
-End state: [outcome]
-```
+### Step 3: Structure
 
-### For Entity/Concept
-```
-## [Entity]
-Definition: [one line]
-Properties:
-  attr1: value
-  attr2: value
-Relationships:
-  → produces [X]
-  ← requires [Y]
-  ↔ interacts [Z]
-```
+- Match each segment to a template.
+- Extract only required fields.
+- Discard prose that doesn't fit.
 
-### For Decision/Analysis
-```
-## [Decision Point]
-Context: [situation]
-Options: [A | B | C]
-Criteria: [evaluation factors]
-Choice: [selected] because [reason]
-Outcome: [result]
-```
+### Step 4: Compress
 
----
+- Shorten sentences to 3-7 words.
+- Remove articles (a, an, the) where clear.
+- Use bullets over paragraphs.
+- Use key-value over bullets when named.
+- Use flowchart over list when branching.
+- Apply relationship notation where clearer than words.
+- Remove hedging — commit to statements or omit.
+- Remove transitions between sections.
+- Remove attribution when source is obvious.
+- Replace duplicated content with @references to canonical source.
 
-## Transformation Examples
+### Step 5: Validate
 
-### Example 1: Technical Prose → Dense Format
-
-**Original (847 chars):**
-> The authentication system uses a multi-factor approach that combines something the user knows (their password) with something they have (a mobile device for receiving one-time codes). When a user attempts to log in, the system first validates their username and password against the database. If this primary authentication succeeds, the system then generates a six-digit code that expires after 30 seconds and sends it to the user's registered mobile number. The user must enter this code within the time limit to complete the authentication process. Failed attempts are logged and after five consecutive failures, the account is temporarily locked for 15 minutes.
-
-**Compressed (312 chars):**
-```
-## Auth System
-Type: Multi-factor (knowledge + possession)
-Flow:
-  1. User submits credentials
-  2. Validate username+password → DB
-  3. Success? → Generate 6-digit OTP (30s TTL) → SMS to registered mobile
-  4. User enters OTP within TTL → Authenticated
-Security:
-  - Failed attempts: logged
-  - 5 consecutive fails → account locked 15min
-```
-
-**Compression ratio: 63%**
-
----
-
-### Example 2: Business Process → Dense Format
-
-**Original (612 chars):**
-> When a customer submits a refund request, the customer service team first checks if the purchase was made within the last 30 days. If it was, they then verify that the product is in its original condition and packaging. Products that meet both criteria are approved for a full refund, which is processed within 5-7 business days back to the original payment method. Products purchased more than 30 days ago but less than 90 days may be eligible for store credit instead of a cash refund, subject to manager approval.
-
-**Compressed (267 chars):**
-```
-## Refund Process
-Request → Check purchase date:
-  ≤30 days + original condition → Full refund (5-7 days, original payment)
-  30-90 days + original condition → Store credit (req manager approval)
-  >90 days → Denied
-Requirements: original condition + packaging
-```
-
-**Compression ratio: 56%**
-
----
-
-## Master Instructions
-
-### Step-by-Step Protocol
-
-```
-1. SCAN
-   - Read entire source once
-   - Identify information type (technical/process/narrative/analytical)
-   
-2. EXTRACT
-   - Mark all entities, values, identifiers
-   - Mark all relationships and causality
-   - Mark all decisions and sequences
-   
-3. ELIMINATE
-   - Remove redundancy
-   - Remove filler/transitions
-   - Remove inferable context
-   
-4. STRUCTURE
-   - Choose optimal format for info type
-   - Group related elements
-   - Establish hierarchy
-   
-5. NOTATE
-   - Apply symbols for relationships
-   - Apply abbreviations consistently
-   - Use key:value for attributes
-   
-6. VERIFY
-   - Check: Can original be reconstructed?
-   - Check: Is anything essential missing?
-   - Check: Is it instantly readable?
-   
-7. REFINE
-   - Adjust density vs readability balance
-   - Ensure consistent notation
-   - Add section headers if >5 elements
-```
-
-### Quality Checklist
-```
-□ All named entities preserved
-□ All numerical values preserved  
-□ All identifiers/codes preserved
-□ All causal relationships captured
-□ All decision points captured
-□ Sequence/order maintained where relevant
-□ No ambiguity introduced
-□ Readable without reference to original
-□ Notation used consistently
-□ Compression ratio >40%
-```
+- [ ] All requirements preserved?
+- [ ] All error/edge cases listed?
+- [ ] All config options present?
+- [ ] No duplicate information?
+- [ ] Can reader reconstruct full meaning?
 
 ---
 
 ## Density Levels
 
-Choose based on audience and use case:
+Choose based on audience:
 
-| Level | Density | Use When |
-|-------|---------|----------|
-| **L1: Light** | 30-40% reduction | General audience, first read |
-| **L2: Medium** | 40-60% reduction | Technical audience, reference |
-| **L3: Heavy** | 60-75% reduction | Expert audience, quick lookup |
-| **L4: Extreme** | 75%+ reduction | Personal notes, known context |
+| Level | Reduction | Use For |
+|-------|-----------|---------|
+| Light | 30-40% | General audience, first-time readers |
+| Medium | 40-60% | Technical audience, reference docs |
+| Heavy | 60-75% | Expert audience, quick lookup, cheat sheets |
+
+Default to **Medium** for most technical documentation.
 
 ---
 
-## Key Principles
+## Example
 
-1. **Preserve semantics, compress syntax** — meaning stays, words shrink
-2. **Structure replaces prose** — formatting does the work of sentences
-3. **Symbols beat words** — → is faster than "leads to"
-4. **Hierarchy beats repetition** — indent once, don't restate parent
-5. **Consistency enables speed** — same notation = instant recognition
-6. **Completeness over brevity** — missing info = failed compression
-7. **Readability is mandatory** — if it needs decoding, it's too dense
+### Before (147 words)
 
+```
+User Authentication Process
+
+When a user wants to log in to the system, they need to provide their 
+email address and password. The system will first check if the email 
+exists in the database. If the email is not found, an error message 
+will be displayed indicating that the account does not exist.
+
+If the email is found, the system will then verify the password. The 
+password is checked against the hashed version stored in the database. 
+If the password is incorrect, the system will increment the failed 
+login counter and return an error. After 5 failed attempts, the 
+account will be temporarily locked for 15 minutes.
+
+If the password is correct, the system will generate a session token 
+and return it to the user. This token must be included in all 
+subsequent requests.
+```
+
+### After (67 words, 54% reduction)
+
+```markdown
+## Login
+
+Purpose: Authenticate user, issue session token for API access
+
+`POST /auth/login`
+
+**Input:**
+- email: string
+- password: string
+
+**Flow:**
+
+​```mermaid
+flowchart TD
+    A[Receive credentials] --> B{Email exists?}
+    B -->|no| C[404]
+    B -->|yes| D{Password valid?}
+    D -->|no| E[Increment fails]
+    E --> F{Fails >= 5?}
+    F -->|yes| G[Lock 15 min]
+    F -->|no| H[401]
+    G --> H
+    D -->|yes| I[Generate token]
+    I --> J[Return token]
+​```
+
+**Rules:**
+- Lock after: 5 failed attempts
+- Lock duration: 15 minutes
+- Token required for all subsequent requests
+
+**Errors:**
+- 404: email not found
+- 401: invalid password
+- 423: account locked
+```
+
+---
+
+## Final Checklist
+
+Before delivering compressed document:
+
+**Preservation (Critical)**
+- [ ] All numerical values present?
+- [ ] All identifiers/codes present?
+- [ ] All named entities present?
+- [ ] All causal relationships captured?
+- [ ] All decision points captured?
+- [ ] Sequence order maintained?
+
+**Quality**
+- [ ] Every sentence under 10 words?
+- [ ] No passive voice?
+- [ ] No filler phrases?
+- [ ] No hedging language?
+- [ ] Simplest representation used?
+- [ ] No repeated information?
+- [ ] References used instead of duplication?
+- [ ] All edge cases covered?
+
+**Readability**
+- [ ] Readable without original document?
+- [ ] No ambiguity introduced?
+- [ ] Notation used consistently?
+- [ ] Compression ratio 40-60%?

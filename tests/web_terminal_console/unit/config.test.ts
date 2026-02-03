@@ -50,6 +50,7 @@ describe('Config', () => {
   // ==========================================================================
   describe('Default Configuration', () => {
     it('returns default config when fetch fails', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const config = await loadConfig();
@@ -291,6 +292,7 @@ api:
       // Reset cached promise
       loadConfig.cachedPromise = null;
 
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('No fetch in SSR'));
 
       const config = await loadConfig();

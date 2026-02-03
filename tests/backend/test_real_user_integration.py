@@ -1,19 +1,22 @@
 """
 Real User Integration Tests.
 
-These tests create REAL user accounts with full infrastructure and verify:
-- User creation via UserService (same as ./run.sh create-user)
+Most test classes reuse pre-built test users (ag3ntum_tester_a / ag3ntum_tester_b)
+created by entrypoint-test.sh at container startup. This avoids the supplementary
+group problem (dynamic users' groups aren't picked up by the running API process)
+and is significantly faster.
+
+TestRealUserCreation is the exception — it tests the UserService.create_user() flow
+itself, so it must create users dynamically.
+
+Tests verify:
+- User creation via UserService (TestRealUserCreation only)
 - Directory structure and permissions
 - Venv installation and module availability
 - Mount access (read-only vs read-write)
 - File accessibility in mounted and persistent folders
 - User isolation (cannot access other user's files/processes)
 - Sandbox isolation between users
-
-WARNING: These tests are SLOW (~30-60 seconds per user creation) because they:
-- Create real Linux users via useradd
-- Create full directory structures with proper permissions
-- Install Python venv with pip packages
 
 Run these tests with: pytest tests/backend/test_real_user_integration.py -v --run-e2e
 Or as part of full suite: ./run.sh test
@@ -28,6 +31,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import AsyncGenerator, Generator
 
 import pytest
@@ -70,6 +74,22 @@ USERS_DIR = Path("/users")
 # These ensure consistent test users that don't conflict with production users
 TEST_RESERVED_UID_1 = 45046
 TEST_RESERVED_UID_2 = 45047
+
+from tests.constants import (
+    PREBUILT_USER_A_USERNAME,
+    PREBUILT_USER_A_UID,
+    PREBUILT_USER_B_USERNAME,
+    PREBUILT_USER_B_UID,
+)
+
+
+def _prebuilt_user(username: str, uid: int) -> SimpleNamespace:
+    """Create a User-like object for a pre-built test user (no DB session needed).
+
+    Returns a SimpleNamespace with .username and .linux_uid attributes,
+    compatible with build_simple_bwrap_command() and build_test_bwrap_command().
+    """
+    return SimpleNamespace(username=username, linux_uid=uid)
 
 
 class InfrastructureError(Exception):
@@ -433,6 +453,52 @@ def get_bwrap_lib_binds() -> list[str]:
     return args
 
 
+def build_simple_bwrap_command(
+    user: User,
+    command_args: list[str],
+    extra_binds: list[str] | None = None,
+) -> list[str]:
+    """
+    Build a simple bwrap command for testing as a specific user.
+
+    This uses 'sudo bwrap ... setpriv --reuid=UID ...' which matches production.
+    Use this for simple mount/filesystem tests that don't need full sandbox setup.
+
+    Args:
+        user: The User object with username and linux_uid
+        command_args: The command and arguments to run (e.g., ["/bin/cat", "/mnt/ro/file.txt"])
+        extra_binds: Additional bind mount arguments (e.g., ["--ro-bind", "/src", "/dst"])
+
+    Returns:
+        Complete command list for subprocess.run()
+    """
+    bwrap_cmd = [
+        "sudo", "/usr/bin/bwrap",
+        "--ro-bind", "/usr", "/usr",
+    ] + get_bwrap_lib_binds() + [
+        # Create a world-accessible tmpfs for /mnt so bind-mounted directories
+        # under /mnt are accessible after privilege drop via setpriv
+        "--tmpfs", "/mnt",
+    ]
+
+    if extra_binds:
+        bwrap_cmd.extend(extra_binds)
+
+    bwrap_cmd.extend([
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--die-with-parent",
+        "--",
+        "/usr/bin/setpriv",
+        f"--reuid={user.linux_uid}",
+        f"--regid={user.linux_uid}",
+        "--clear-groups",
+    ])
+    bwrap_cmd.extend(command_args)
+
+    return bwrap_cmd
+
+
 def build_test_bwrap_command(
     user: User,
     command: str,
@@ -441,8 +507,15 @@ def build_test_bwrap_command(
     """
     Build a bwrap command for testing sandbox execution as a specific user.
 
-    This uses 'sudo -u username bwrap ...' which works with the test infrastructure
-    since ag3ntum_api has sudo permissions to run commands as any user.
+    This uses 'sudo bwrap ... setpriv --reuid=UID ...' which matches the production
+    code path in sandbox.py. The approach is:
+    1. Run bwrap as root via sudo (mounts require root)
+    2. Use setpriv AFTER bwrap's -- to drop to the target user's UID/GID
+
+    This is necessary because:
+    - bwrap's --uid/--gid flags require --unshare-user
+    - With --unshare-user, root inside namespace can't access host files
+    - Using setpriv after mounts are set up avoids this issue
 
     Args:
         user: The User object with username and linux_uid
@@ -455,12 +528,11 @@ def build_test_bwrap_command(
     workspace_path = Path(f"/users/{user.username}/ag3ntum/persistent")
     venv_path = Path(f"/users/{user.username}/venv")
 
-    # Build bwrap command
-    # Note: Use full path /usr/bin/bwrap to match sudoers pattern
+    # Build bwrap command using "sudo bwrap" (run as root for mounts)
+    # Privilege dropping happens via setpriv after the -- separator
     bwrap_cmd = [
-        "sudo", "-u", user.username,
-        "/usr/bin/bwrap",
-        # Namespace isolation
+        "sudo", "/usr/bin/bwrap",
+        # Namespace isolation (no --unshare-user since we're using setpriv)
         "--unshare-pid",
         "--unshare-uts",
         "--unshare-ipc",
@@ -485,12 +557,7 @@ def build_test_bwrap_command(
 
     # Static mounts
     bwrap_cmd.extend(["--ro-bind", "/usr", "/usr"])
-    bwrap_cmd.extend(["--ro-bind", "/lib", "/lib"])
-
-    if Path("/lib64").exists():
-        bwrap_cmd.extend(["--ro-bind", "/lib64", "/lib64"])
-    if Path("/bin").exists():
-        bwrap_cmd.extend(["--ro-bind", "/bin", "/bin"])
+    bwrap_cmd.extend(get_bwrap_lib_binds())
 
     # Session mounts
     bwrap_cmd.extend(["--bind", str(workspace_path), "/workspace"])
@@ -505,8 +572,16 @@ def build_test_bwrap_command(
         "--chdir", "/workspace",
     ])
 
-    # Command to execute
-    bwrap_cmd.extend(["--", "bash", "-c", command])
+    # Command separator, then setpriv to drop privileges, then the actual command
+    # setpriv drops to target UID/GID and clears supplementary groups
+    bwrap_cmd.extend([
+        "--",
+        "/usr/bin/setpriv",
+        f"--reuid={user.linux_uid}",
+        f"--regid={user.linux_uid}",  # GID typically matches UID
+        "--clear-groups",
+        "bash", "-c", command,
+    ])
 
     return bwrap_cmd
 
@@ -858,29 +933,17 @@ class TestRealUserCreation:
 class TestPersistentStorageAccess:
     """
     Tests for persistent storage access within user account.
+
+    Uses pre-built test user ag3ntum_tester_a (created by entrypoint-test.sh).
     """
 
-    @pytest_asyncio.fixture
-    async def user_with_persistent_file(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[tuple[User, Path], None]:
-        """Create user and a test file in persistent storage."""
-        username = generate_test_username()
+    @pytest.fixture
+    def user_with_persistent_file(self) -> Generator[tuple[SimpleNamespace, Path], None, None]:
+        """Set up a test file in pre-built user's persistent storage."""
+        user = _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
 
-        async with real_session_factory() as session:
-            user = await user_service.create_user(
-                db=session,
-                username=username,
-                email=f"{username}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        # Create a test file in persistent storage
-        persistent_dir = Path(f"/users/{username}/ag3ntum/persistent")
-        test_file = persistent_dir / "test_persistent_file.txt"
+        persistent_dir = Path(f"/users/{user.username}/ag3ntum/persistent")
+        test_file = persistent_dir / f"_test_persistent_{uuid.uuid4().hex[:8]}.txt"
 
         # Write as root/api user, then change ownership
         test_file.write_text("Persistent test content")
@@ -891,11 +954,13 @@ class TestPersistentStorageAccess:
 
         yield user, test_file
 
-        await cleanup_test_user(user_service, real_session_factory, username)
+        # Cleanup test artifact
+        if test_file.exists():
+            test_file.unlink()
 
     @pytest.mark.asyncio
     async def test_persistent_file_readable(
-        self, user_with_persistent_file: tuple[User, Path]
+        self, user_with_persistent_file: tuple[SimpleNamespace, Path]
     ) -> None:
         """Verify files in persistent storage are readable."""
         user, test_file = user_with_persistent_file
@@ -906,14 +971,14 @@ class TestPersistentStorageAccess:
 
     @pytest.mark.asyncio
     async def test_persistent_storage_writable_by_user(
-        self, user_with_persistent_file: tuple[User, Path]
+        self, user_with_persistent_file: tuple[SimpleNamespace, Path]
     ) -> None:
         """Verify user can write to persistent storage."""
         user, test_file = user_with_persistent_file
         persistent_dir = test_file.parent
 
         # Create a new file as the user
-        new_file = persistent_dir / "user_created_file.txt"
+        new_file = persistent_dir / f"_test_user_write_{uuid.uuid4().hex[:8]}.txt"
 
         result = subprocess.run(
             ["sudo", "-u", user.username, "touch", str(new_file)],
@@ -923,6 +988,10 @@ class TestPersistentStorageAccess:
         assert result.returncode == 0, f"User cannot write to persistent: {result.stderr}"
         assert new_file.exists()
 
+        # Cleanup
+        if new_file.exists():
+            new_file.unlink()
+
 
 
 @pytest.mark.e2e
@@ -931,55 +1000,36 @@ class TestUserIsolation:
     """
     Tests for user isolation - verifying users cannot access each other's data.
 
-    Uses class-scoped fixture to create users once for all tests in this class.
+    Uses pre-built test users ag3ntum_tester_a and ag3ntum_tester_b.
     """
 
-    @pytest_asyncio.fixture(scope="class")
-    async def two_isolated_users(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[tuple[User, User], None]:
-        """Create two separate users for isolation testing (once per class)."""
-        username1 = generate_test_username()
-        username2 = generate_test_username()
-
-        async with real_session_factory() as session:
-            user1 = await user_service.create_user(
-                db=session,
-                username=username1,
-                email=f"{username1}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        async with real_session_factory() as session:
-            user2 = await user_service.create_user(
-                db=session,
-                username=username2,
-                email=f"{username2}@test.example.com",
-                password="TestPass456!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
+    @pytest.fixture(scope="class")
+    def two_isolated_users(self) -> Generator[tuple[SimpleNamespace, SimpleNamespace], None, None]:
+        """Return both pre-built test users for isolation testing."""
+        user1 = _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
+        user2 = _prebuilt_user(PREBUILT_USER_B_USERNAME, PREBUILT_USER_B_UID)
 
         # Create test files in each user's persistent storage
+        secret_files = []
         for user in [user1, user2]:
-            secret_file = Path(f"/users/{user.username}/ag3ntum/persistent/secret.txt")
+            secret_file = Path(f"/users/{user.username}/ag3ntum/persistent/_test_secret.txt")
             secret_file.write_text(f"Secret data for {user.username}")
             subprocess.run(
                 ["sudo", "chown", f"{user.linux_uid}:{user.linux_uid}", str(secret_file)],
                 check=True,
             )
+            secret_files.append(secret_file)
 
         yield user1, user2
 
-        # Cleanup both users
-        await cleanup_test_user(user_service, real_session_factory, username1)
-        await cleanup_test_user(user_service, real_session_factory, username2)
+        # Cleanup test artifacts
+        for f in secret_files:
+            if f.exists():
+                f.unlink()
 
     @pytest.mark.asyncio
     async def test_user_isolation_permissions(
-        self, two_isolated_users: tuple[User, User]
+        self, two_isolated_users: tuple[SimpleNamespace, SimpleNamespace]
     ) -> None:
         """
         Verify user isolation via directory permissions.
@@ -1056,33 +1106,16 @@ class TestSandboxIsolation:
     """
     Tests for bwrap sandbox isolation between users.
 
-    These tests verify that when running in sandbox mode:
+    Uses pre-built test user ag3ntum_tester_a. Verifies:
     - Users cannot see each other's processes
     - Filesystem isolation is enforced
     - Network namespace is isolated (if configured)
     """
 
-    @pytest_asyncio.fixture
-    async def sandbox_test_user(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[User, None]:
-        """Create a user for sandbox testing."""
-        username = generate_test_username()
-
-        async with real_session_factory() as session:
-            user = await user_service.create_user(
-                db=session,
-                username=username,
-                email=f"{username}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        yield user
-
-        await cleanup_test_user(user_service, real_session_factory, username)
+    @pytest.fixture
+    def sandbox_test_user(self) -> SimpleNamespace:
+        """Return pre-built test user for sandbox testing."""
+        return _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
 
     @pytest.mark.asyncio
     async def test_bwrap_available(self) -> None:
@@ -1096,7 +1129,7 @@ class TestSandboxIsolation:
 
     @pytest.mark.asyncio
     async def test_sandbox_hides_other_processes(
-        self, sandbox_test_user: User
+        self, sandbox_test_user: SimpleNamespace
     ) -> None:
         """
         Verify sandbox with --unshare-pid hides other processes.
@@ -1149,7 +1182,7 @@ class TestSandboxIsolation:
 
     @pytest.mark.asyncio
     async def test_sandbox_filesystem_isolation(
-        self, sandbox_test_user: User
+        self, sandbox_test_user: SimpleNamespace
     ) -> None:
         """
         Verify sandbox restricts filesystem access.
@@ -1160,18 +1193,12 @@ class TestSandboxIsolation:
         workspace = Path(f"/users/{user.username}/ag3ntum/persistent")
 
         # Run ls on /users inside sandbox - should fail or be empty
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--bind", str(workspace), "/workspace",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--unshare-all",
-            "--die-with-parent",
-            "/bin/ls", "/users",
-        ]
+        # Using build_simple_bwrap_command with setpriv for privilege dropping
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/ls", "/users"],
+            extra_binds=["--bind", str(workspace), "/workspace"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1192,34 +1219,17 @@ class TestMountAccess:
     """
     Tests for external mount access (read-only vs read-write).
 
-    Uses test mount directories from tests/backend/input/mounts/
-    Uses class-scoped fixture to create user once for all tests.
+    Uses pre-built test user ag3ntum_tester_a and test mount directories
+    from tests/backend/input/mounts/.
     """
 
-    @pytest_asyncio.fixture(scope="class")
-    async def user_with_mounts(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[User, None]:
-        """Create a user for mount testing (once per class)."""
-        username = generate_test_username()
-
-        async with real_session_factory() as session:
-            user = await user_service.create_user(
-                db=session,
-                username=username,
-                email=f"{username}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        yield user
-
-        await cleanup_test_user(user_service, real_session_factory, username)
+    @pytest.fixture(scope="class")
+    def user_with_mounts(self) -> SimpleNamespace:
+        """Return pre-built test user for mount testing."""
+        return _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
 
     @pytest.mark.asyncio
-    async def test_mount_access_permissions(self, user_with_mounts: User) -> None:
+    async def test_mount_access_permissions(self, user_with_mounts: SimpleNamespace) -> None:
         """
         Verify mount access permissions in sandbox.
 
@@ -1235,17 +1245,11 @@ class TestMountAccess:
         if not TEST_RO_MOUNT.exists():
             pytest.skip(f"Test RO mount not found: {TEST_RO_MOUNT}")
 
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--die-with-parent",
-            "/bin/cat", "/mnt/ro/readonly_file.txt",
-        ]
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/cat", "/mnt/ro/readonly_file.txt"],
+            extra_binds=["--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1257,17 +1261,11 @@ class TestMountAccess:
         assert "read-only test file" in result.stdout
 
         # === Test 2: Read-only mount cannot be written to ===
-        bwrap_cmd = [
-            "sudo", "-u", user.username,
-            "bwrap",
-            "--ro-bind", "/usr", "/usr",
-        ] + get_bwrap_lib_binds() + [
-            "--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--die-with-parent",
-            "/bin/sh", "-c", "echo 'hacked' > /mnt/ro/hacked.txt",
-        ]
+        bwrap_cmd = build_simple_bwrap_command(
+            user,
+            ["/bin/sh", "-c", "echo 'hacked' > /mnt/ro/hacked.txt"],
+            extra_binds=["--ro-bind", str(TEST_RO_MOUNT), "/mnt/ro"],
+        )
         result = subprocess.run(
             bwrap_cmd,
             capture_output=True,
@@ -1293,17 +1291,11 @@ class TestMountAccess:
             )
 
             # Test 3: Write to RW mount
-            bwrap_cmd = [
-                "sudo", "-u", user.username,
-                "bwrap",
-                "--ro-bind", "/usr", "/usr",
-            ] + get_bwrap_lib_binds() + [
-                "--bind", str(temp_rw_path), "/mnt/rw",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--die-with-parent",
-                "/bin/sh", "-c", f"echo 'test content' > /mnt/rw/{test_file_name}",
-            ]
+            bwrap_cmd = build_simple_bwrap_command(
+                user,
+                ["/bin/sh", "-c", f"echo 'test content' > /mnt/rw/{test_file_name}"],
+                extra_binds=["--bind", str(temp_rw_path), "/mnt/rw"],
+            )
             result = subprocess.run(
                 bwrap_cmd,
                 capture_output=True,
@@ -1316,17 +1308,11 @@ class TestMountAccess:
             assert "test content" in test_file.read_text()
 
             # Test 4: Read from RW mount
-            bwrap_cmd = [
-                "sudo", "-u", user.username,
-                "bwrap",
-                "--ro-bind", "/usr", "/usr",
-            ] + get_bwrap_lib_binds() + [
-                "--bind", str(temp_rw_path), "/mnt/rw",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--die-with-parent",
-                "/bin/cat", f"/mnt/rw/{test_file_name}",
-            ]
+            bwrap_cmd = build_simple_bwrap_command(
+                user,
+                ["/bin/cat", f"/mnt/rw/{test_file_name}"],
+                extra_binds=["--bind", str(temp_rw_path), "/mnt/rw"],
+            )
             result = subprocess.run(
                 bwrap_cmd,
                 capture_output=True,
@@ -1344,39 +1330,18 @@ class TestSandboxRealExecution:
     """
     Tests for real sandbox execution using production code paths.
 
-    These tests use the actual SandboxExecutor and execute_sandboxed_command()
-    functions to verify that commands run with correct UID, environment
-    isolation, and filesystem restrictions.
-
-    This tests the same code path used by mcp__ag3ntum__Bash in production.
-
-    Uses class-scoped fixture to create user once for all tests.
+    Uses pre-built test user ag3ntum_tester_a. Tests verify commands run with
+    correct UID, environment isolation, and filesystem restrictions — the same
+    code path used by mcp__ag3ntum__Bash in production.
     """
 
-    @pytest_asyncio.fixture(scope="class")
-    async def sandbox_user(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[User, None]:
-        """Create a user for sandbox execution testing (once per class)."""
-        username = generate_test_username()
-
-        async with real_session_factory() as session:
-            user = await user_service.create_user(
-                db=session,
-                username=username,
-                email=f"{username}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        yield user
-
-        await cleanup_test_user(user_service, real_session_factory, username)
+    @pytest.fixture(scope="class")
+    def sandbox_user(self) -> SimpleNamespace:
+        """Return pre-built test user for sandbox execution testing."""
+        return _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
 
     @pytest.mark.asyncio
-    async def test_sandbox_uid_isolation(self, sandbox_user: User) -> None:
+    async def test_sandbox_uid_isolation(self, sandbox_user: SimpleNamespace) -> None:
         """
         Verify commands in sandbox run as the user's UID, not ag3ntum_api (45045).
 
@@ -1420,7 +1385,7 @@ class TestSandboxRealExecution:
         )
 
     @pytest.mark.asyncio
-    async def test_sandbox_env_isolation(self, sandbox_user: User) -> None:
+    async def test_sandbox_env_isolation(self, sandbox_user: SimpleNamespace) -> None:
         """
         Verify host environment variables are NOT visible in sandbox.
 
@@ -1461,7 +1426,7 @@ class TestSandboxRealExecution:
         )
 
     @pytest.mark.asyncio
-    async def test_sandbox_filesystem_access(self, sandbox_user: User) -> None:
+    async def test_sandbox_filesystem_access(self, sandbox_user: SimpleNamespace) -> None:
         """
         Verify sandbox filesystem isolation.
 
@@ -1545,7 +1510,7 @@ class TestSandboxRealExecution:
         )
 
     @pytest.mark.asyncio
-    async def test_sandbox_proc_filtering(self, sandbox_user: User) -> None:
+    async def test_sandbox_proc_filtering(self, sandbox_user: SimpleNamespace) -> None:
         """
         Verify /proc filtering hides other processes.
 
@@ -1592,43 +1557,19 @@ class TestSandboxUserIsolation:
     """
     Tests for user-to-user isolation using real sandbox execution.
 
-    Creates two users and verifies that code running as user1 cannot
-    access user2's files, even through Python or bash commands.
-
-    Uses class-scoped fixture to create users once for all tests.
+    Uses both pre-built test users to verify that code running as user A
+    cannot access user B's files, even through Python or bash commands.
     """
 
-    @pytest_asyncio.fixture(scope="class")
-    async def two_sandbox_users(
-        self,
-        user_service: UserService,
-        real_session_factory: async_sessionmaker[AsyncSession],
-    ) -> AsyncGenerator[tuple[User, User], None]:
-        """Create two users for isolation testing (once per class)."""
-        username1 = generate_test_username()
-        username2 = generate_test_username()
-
-        async with real_session_factory() as session:
-            user1 = await user_service.create_user(
-                db=session,
-                username=username1,
-                email=f"{username1}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
-
-        async with real_session_factory() as session:
-            user2 = await user_service.create_user(
-                db=session,
-                username=username2,
-                email=f"{username2}@test.example.com",
-                password="TestPass123!",
-                skip_venv_install=True,  # Skip pip install for faster tests
-            )
+    @pytest.fixture(scope="class")
+    def two_sandbox_users(self) -> Generator[tuple[SimpleNamespace, SimpleNamespace], None, None]:
+        """Return both pre-built test users for isolation testing."""
+        user1 = _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
+        user2 = _prebuilt_user(PREBUILT_USER_B_USERNAME, PREBUILT_USER_B_UID)
 
         # Create a test file in user2's workspace
         user2_workspace = Path(f"/users/{user2.username}/ag3ntum/persistent")
-        test_file = user2_workspace / "secret_file.txt"
+        test_file = user2_workspace / "_test_secret_file.txt"
         test_file.write_text("user2_secret_content")
 
         # Set ownership to user2
@@ -1639,13 +1580,13 @@ class TestSandboxUserIsolation:
 
         yield user1, user2
 
-        # Cleanup
-        await cleanup_test_user(user_service, real_session_factory, username1)
-        await cleanup_test_user(user_service, real_session_factory, username2)
+        # Cleanup test artifacts
+        if test_file.exists():
+            test_file.unlink()
 
     @pytest.mark.asyncio
     async def test_sandbox_user_isolation(
-        self, two_sandbox_users: tuple[User, User]
+        self, two_sandbox_users: tuple[SimpleNamespace, SimpleNamespace]
     ) -> None:
         """
         Verify sandbox isolation between users.
@@ -1659,7 +1600,7 @@ class TestSandboxUserIsolation:
         user1, user2 = two_sandbox_users
 
         # === Test 1: User1 cannot read user2's files via bash ===
-        user2_path = f"/users/{user2.username}/ag3ntum/persistent/secret_file.txt"
+        user2_path = f"/users/{user2.username}/ag3ntum/persistent/_test_secret_file.txt"
 
         exit_code, stdout, stderr = await execute_test_sandbox_command(
             user1,
@@ -1697,43 +1638,46 @@ class TestSandboxUserIsolation:
         workspace1 = Path(f"/users/{user1.username}/ag3ntum/persistent")
         workspace2 = Path(f"/users/{user2.username}/ag3ntum/persistent")
 
-        marker1 = workspace1 / "user1_marker.txt"
-        marker2 = workspace2 / "user2_marker.txt"
+        marker1 = workspace1 / "_test_user1_marker.txt"
+        marker2 = workspace2 / "_test_user2_marker.txt"
 
-        marker1.write_text("I am user1")
-        marker2.write_text("I am user2")
+        try:
+            marker1.write_text("I am user1")
+            marker2.write_text("I am user2")
 
-        # Set ownership
-        _run_privileged(
-            ["chown", f"{user1.linux_uid}:{user1.linux_uid}", str(marker1)],
-            capture_output=True,
-        )
-        _run_privileged(
-            ["chown", f"{user2.linux_uid}:{user2.linux_uid}", str(marker2)],
-            capture_output=True,
-        )
+            # Set ownership
+            _run_privileged(
+                ["chown", f"{user1.linux_uid}:{user1.linux_uid}", str(marker1)],
+                capture_output=True,
+            )
+            _run_privileged(
+                ["chown", f"{user2.linux_uid}:{user2.linux_uid}", str(marker2)],
+                capture_output=True,
+            )
 
-        # User1 should see user1_marker but not user2_marker
-        exit_code, stdout, stderr = await execute_test_sandbox_command(
-            user1,
-            "ls /workspace && cat /workspace/user1_marker.txt",
-            timeout=30,
-        )
+            # User1 should see _test_user1_marker but not _test_user2_marker
+            exit_code, stdout, stderr = await execute_test_sandbox_command(
+                user1,
+                "ls /workspace && cat /workspace/_test_user1_marker.txt",
+                timeout=30,
+            )
 
-        assert exit_code == 0, f"User1 sandbox failed: {stderr}"
-        assert "I am user1" in stdout
-        assert "user2_marker" not in stdout
+            assert exit_code == 0, f"User1 sandbox failed: {stderr}"
+            assert "I am user1" in stdout
+            assert "_test_user2_marker" not in stdout
 
-        # User2 should see user2_marker but not user1_marker
-        exit_code, stdout, stderr = await execute_test_sandbox_command(
-            user2,
-            "ls /workspace && cat /workspace/user2_marker.txt",
-            timeout=30,
-        )
+            # User2 should see _test_user2_marker but not _test_user1_marker
+            exit_code, stdout, stderr = await execute_test_sandbox_command(
+                user2,
+                "ls /workspace && cat /workspace/_test_user2_marker.txt",
+                timeout=30,
+            )
 
-        assert exit_code == 0, f"User2 sandbox failed: {stderr}"
-        assert "I am user2" in stdout
-        assert "user1_marker" not in stdout
-
-        # Cleanup marker files
-        marker1.unlink()
+            assert exit_code == 0, f"User2 sandbox failed: {stderr}"
+            assert "I am user2" in stdout
+            assert "_test_user1_marker" not in stdout
+        finally:
+            # Cleanup marker files
+            for m in [marker1, marker2]:
+                if m.exists():
+                    m.unlink()

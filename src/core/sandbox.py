@@ -122,6 +122,10 @@ class SandboxConfig(BaseModel):
     static_mounts: dict[str, SandboxMount] = Field(default_factory=dict)
     session_mounts: dict[str, SandboxMount] = Field(default_factory=dict)
     dynamic_mounts: list[SandboxMount] = Field(default_factory=list)
+    original_path_mounts: list[SandboxMount] = Field(
+        default_factory=list,
+        description="Original-path mounts: bind Docker paths to original locations"
+    )
     network: SandboxNetworkConfig = Field(default_factory=SandboxNetworkConfig)
     environment: SandboxEnvConfig = Field(default_factory=SandboxEnvConfig)
     proc_filtering: ProcFilteringConfig = Field(default_factory=ProcFilteringConfig)
@@ -161,6 +165,7 @@ class SandboxConfig(BaseModel):
             static_mounts=resolve_mounts(self.static_mounts),
             session_mounts=resolve_mounts(self.session_mounts),
             dynamic_mounts=[mount.resolve(placeholders) for mount in self.dynamic_mounts],
+            original_path_mounts=[mount.resolve(placeholders) for mount in self.original_path_mounts],
             network=self.network,
             environment=fresh_environment,
             proc_filtering=self.proc_filtering,
@@ -324,6 +329,26 @@ class SandboxExecutor:
                 )
             cmd.extend(_mount_args(mount))
 
+        # Mount original-path mounts
+        # These bind Docker paths (e.g., /mounts/paths/_var_log) to original locations (/var/log)
+        for mount in config.original_path_mounts:
+            source_path = Path(mount.source)
+            if not source_path.exists():
+                if mount.optional:
+                    logger.debug(f"BWRAP: Skipping optional original-path mount: {mount.source} (not found)")
+                    continue
+                raise SandboxMountError(
+                    f"SECURITY: Original-path mount source does not exist: {mount.source}. "
+                    "Refusing to execute command without proper sandbox isolation."
+                )
+            # Create parent directory structure for the target path
+            target_dir = str(Path(mount.target).parent)
+            if target_dir and target_dir != "/":
+                cmd.extend(["--dir", target_dir])
+            # Bind the Docker path to the original location
+            cmd.extend(_mount_args(mount))
+            logger.debug(f"BWRAP: Original-path mount: {mount.source} -> {mount.target} [{mount.mode}]")
+
         # Network isolation - only if not in nested container
         if not allow_network and config.network_sandboxing and not nested_container:
             cmd.append("--unshare-net")
@@ -413,6 +438,7 @@ class SandboxExecutor:
         missing = []
         mounts = list(self._config.static_mounts.values()) + list(self._config.session_mounts.values())
         mounts += list(self._config.dynamic_mounts)
+        mounts += list(self._config.original_path_mounts)
         for mount in mounts:
             if not Path(mount.source).exists() and not mount.optional:
                 missing.append(mount.source)

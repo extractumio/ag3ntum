@@ -113,27 +113,32 @@ class TestPathSanitizer:
 
 
 class TestExternalMountNormalization:
-    """Test external mount path normalization."""
+    """Test external mount path normalization.
+
+    Uses flattened mount structure where mounts are at /mounts/{name}
+    instead of /mounts/{type}/{name}.
+    """
 
     @pytest.fixture
     def temp_mounts(self, tmp_path: Path) -> dict[str, Path]:
-        """Create temporary mount structure."""
-        ro_dir = tmp_path / "mounts" / "ro" / "downloads"
-        rw_dir = tmp_path / "mounts" / "rw" / "projects"
+        """Create temporary mount structure (flattened)."""
+        # Flattened structure: /mounts/{name} (no ro/rw subdirs)
+        downloads = tmp_path / "mounts" / "downloads"
+        projects = tmp_path / "mounts" / "projects"
         persistent = tmp_path / "users" / "testuser" / "ag3ntum" / "persistent"
         workspace = tmp_path / "workspace"
 
-        for d in [ro_dir, rw_dir, persistent, workspace]:
+        for d in [downloads, projects, persistent, workspace]:
             d.mkdir(parents=True)
 
         # Create test files
-        (ro_dir / "readme.txt").write_text("readonly content")
-        (rw_dir / "editable.txt").write_text("writable content")
+        (downloads / "readme.txt").write_text("readonly content")
+        (projects / "editable.txt").write_text("writable content")
         (persistent / "cache.json").write_text("{}")
 
         return {
-            "ro": tmp_path / "mounts" / "ro",
-            "rw": tmp_path / "mounts" / "rw",
+            "downloads": downloads,  # RO mount
+            "projects": projects,    # RW mount
             "persistent": persistent,
             "workspace": workspace,
             "root": tmp_path,
@@ -141,11 +146,11 @@ class TestExternalMountNormalization:
 
     @pytest.fixture
     def validator(self, temp_mounts: dict[str, Path]) -> Ag3ntumPathValidator:
-        """Create validator with mount configuration."""
+        """Create validator with flattened mount configuration."""
         config = PathValidatorConfig(
             workspace_path=temp_mounts["workspace"],
-            external_ro_base=temp_mounts["ro"],
-            external_rw_base=temp_mounts["rw"],
+            global_mounts_ro={"downloads": temp_mounts["downloads"]},
+            global_mounts_rw={"projects": temp_mounts["projects"]},
             persistent_path=temp_mounts["persistent"],
         )
         return Ag3ntumPathValidator(config)
@@ -155,7 +160,7 @@ class TestExternalMountNormalization:
     ) -> None:
         """Read-only mount path is normalized correctly."""
         result = validator._normalize_path("/workspace/external/ro/downloads/readme.txt")
-        expected = temp_mounts["ro"] / "downloads" / "readme.txt"
+        expected = temp_mounts["downloads"] / "readme.txt"
         assert result == expected
 
     def test_rw_mount_path_normalized(
@@ -163,7 +168,7 @@ class TestExternalMountNormalization:
     ) -> None:
         """Read-write mount path is normalized correctly."""
         result = validator._normalize_path("/workspace/external/rw/projects/editable.txt")
-        expected = temp_mounts["rw"] / "projects" / "editable.txt"
+        expected = temp_mounts["projects"] / "editable.txt"
         assert result == expected
 
     def test_persistent_path_normalized(
@@ -179,7 +184,7 @@ class TestExternalMountNormalization:
     ) -> None:
         """Relative external paths are normalized correctly."""
         result = validator._normalize_path("./external/ro/downloads/readme.txt")
-        expected = temp_mounts["ro"] / "downloads" / "readme.txt"
+        expected = temp_mounts["downloads"] / "readme.txt"
         assert result == expected
 
 
@@ -193,22 +198,22 @@ class TestExternalMountValidation:
 
     @pytest.fixture
     def temp_mounts(self, tmp_path: Path) -> dict[str, Path]:
-        """Create temporary mount structure."""
-        ro_dir = tmp_path / "mounts" / "ro" / "downloads"
-        rw_dir = tmp_path / "mounts" / "rw" / "projects"
+        """Create temporary mount structure (flattened)."""
+        downloads = tmp_path / "mounts" / "downloads"
+        projects = tmp_path / "mounts" / "projects"
         persistent = tmp_path / "users" / "testuser" / "ag3ntum" / "persistent"
         workspace = tmp_path / "workspace"
 
-        for d in [ro_dir, rw_dir, persistent, workspace]:
+        for d in [downloads, projects, persistent, workspace]:
             d.mkdir(parents=True)
 
         # Create test files
-        (ro_dir / "readme.txt").write_text("readonly content")
-        (rw_dir / "editable.txt").write_text("writable content")
+        (downloads / "readme.txt").write_text("readonly content")
+        (projects / "editable.txt").write_text("writable content")
 
         return {
-            "ro": tmp_path / "mounts" / "ro",
-            "rw": tmp_path / "mounts" / "rw",
+            "downloads": downloads,  # RO mount
+            "projects": projects,    # RW mount
             "persistent": persistent,
             "workspace": workspace,
             "root": tmp_path,
@@ -216,11 +221,11 @@ class TestExternalMountValidation:
 
     @pytest.fixture
     def validator(self, temp_mounts: dict[str, Path]) -> Ag3ntumPathValidator:
-        """Create validator with mount configuration."""
+        """Create validator with flattened mount configuration."""
         config = PathValidatorConfig(
             workspace_path=temp_mounts["workspace"],
-            external_ro_base=temp_mounts["ro"],
-            external_rw_base=temp_mounts["rw"],
+            global_mounts_ro={"downloads": temp_mounts["downloads"]},
+            global_mounts_rw={"projects": temp_mounts["projects"]},
             persistent_path=temp_mounts["persistent"],
         )
         return Ag3ntumPathValidator(config)
@@ -267,8 +272,8 @@ class TestExternalMountValidation:
         self, validator: Ag3ntumPathValidator, temp_mounts: dict[str, Path]
     ) -> None:
         """Blocklisted files in external mounts should be blocked."""
-        # Create .env file in RW mount
-        env_file = temp_mounts["rw"] / "projects" / ".env"
+        # Create .env file in RW mount (flattened: directly in projects dir)
+        env_file = temp_mounts["projects"] / ".env"
         env_file.write_text("SECRET=xxx")
 
         with pytest.raises(PathValidationError) as exc_info:
@@ -311,7 +316,7 @@ class TestSymlinkSecurity:
         """Symlink escaping boundary should be detected."""
         config = PathValidatorConfig(
             workspace_path=temp_mounts["workspace"],
-            external_rw_base=temp_mounts["allowed"],
+            global_mounts_rw={"allowed": temp_mounts["allowed"]},
         )
         validator = Ag3ntumPathValidator(config)
 
@@ -401,8 +406,8 @@ class TestPathTraversalAttacks:
         """Create validator."""
         config = PathValidatorConfig(
             workspace_path=temp_workspace,
-            external_ro_base=temp_workspace / "external" / "ro",
-            external_rw_base=temp_workspace / "external" / "rw",
+            global_mounts_ro={"downloads": temp_workspace / "external" / "ro"},
+            global_mounts_rw={"projects": temp_workspace / "external" / "rw"},
         )
         return Ag3ntumPathValidator(config)
 

@@ -29,7 +29,7 @@ When code runs in Docker (not inside bwrap), paths must be translated:
 
     /workspace/file.txt → /users/{user}/sessions/{sid}/workspace/file.txt
     /workspace/persistent/img.png → /users/{user}/ag3ntum/persistent/img.png
-    /workspace/external/ro/name/file.csv → /mounts/ro/name/file.csv
+    /workspace/external/ro/name/file.csv → /mounts/name/file.csv
     /venv/bin/python3 → /users/{user}/venv/bin/python3
 
 EXECUTION CONTEXTS:
@@ -267,14 +267,12 @@ class SandboxPathContext:
     persistent_sandbox: str = "/workspace/persistent"
     persistent_docker: str = ""  # Set in __post_init__
 
-    # External mounts bases
-    external_ro_sandbox: str = "/mounts/ro"
-    external_ro_docker: str = "/mounts/ro"
+    # Global mounts (name -> container_path mappings, flattened structure)
+    # With flattened mounts, all mounts are at /mounts/{name}
+    global_mounts_ro: dict[str, str] = field(default_factory=dict)
+    global_mounts_rw: dict[str, str] = field(default_factory=dict)
 
-    external_rw_sandbox: str = "/mounts/rw"
-    external_rw_docker: str = "/mounts/rw"
-
-    # Per-user mounts (name -> host_path mappings)
+    # Per-user mounts (name -> container_path mappings)
     user_mounts_ro: dict[str, str] = field(default_factory=dict)
     user_mounts_rw: dict[str, str] = field(default_factory=dict)
 
@@ -344,37 +342,39 @@ class SandboxPathContext:
                 mount_type="persistent",
             ))
 
-        # External RO mounts (same path in both contexts)
-        mounts.append(MountMapping(
-            sandbox_path=self.external_ro_sandbox,
-            docker_path=self.external_ro_docker,
-            mode="ro",
-            mount_type="external_ro",
-        ))
+        # Global mounts (flattened structure: /mounts/{name})
+        # Sandbox and docker paths are the same for global mounts
+        for name, container_path in self.global_mounts_ro.items():
+            mounts.append(MountMapping(
+                sandbox_path=container_path,  # e.g., /mounts/global_var_log
+                docker_path=container_path,   # Same path in docker
+                mode="ro",
+                mount_type="global_mount_ro",
+            ))
 
-        # External RW mounts (same path in both contexts)
-        mounts.append(MountMapping(
-            sandbox_path=self.external_rw_sandbox,
-            docker_path=self.external_rw_docker,
-            mode="rw",
-            mount_type="external_rw",
-        ))
+        for name, container_path in self.global_mounts_rw.items():
+            mounts.append(MountMapping(
+                sandbox_path=container_path,
+                docker_path=container_path,
+                mode="rw",
+                mount_type="global_mount_rw",
+            ))
 
-        # Per-user mounts
-        for name, host_path in self.user_mounts_ro.items():
+        # Per-user mounts (flattened structure: /mounts/{name})
+        for name, container_path in self.user_mounts_ro.items():
             # User-ro mounts: sandbox sees /workspace/external/user-ro/{name}
-            # which is a symlink to the actual host path
+            # which is a symlink to /mounts/{name}
             mounts.append(MountMapping(
                 sandbox_path=f"/workspace/external/user-ro/{name}",
-                docker_path=host_path,
+                docker_path=container_path,
                 mode="ro",
                 mount_type="user_mount_ro",
             ))
 
-        for name, host_path in self.user_mounts_rw.items():
+        for name, container_path in self.user_mounts_rw.items():
             mounts.append(MountMapping(
                 sandbox_path=f"/workspace/external/user-rw/{name}",
-                docker_path=host_path,
+                docker_path=container_path,
                 mode="rw",
                 mount_type="user_mount_rw",
             ))
@@ -571,18 +571,60 @@ class SandboxPathResolver:
                 return self._context.persistent_docker
 
             elif external_part.startswith("ro/") or external_part == "ro":
-                # Map to external RO mount
+                # Map to global read-only mount (flattened: /mounts/{name})
                 if external_part == "ro":
-                    return self._context.external_ro_docker
-                suffix = external_part[len("ro/"):]
-                return f"{self._context.external_ro_docker}/{suffix}"
+                    raise PathResolutionError(
+                        "Cannot resolve external/ro without mount name",
+                        path=sandbox_path,
+                        reason="INVALID_PATH",
+                    )
+                # Parse mount name from path: ro/{name}/... or ro/{name}
+                remaining = external_part[len("ro/"):]
+                if "/" in remaining:
+                    mount_name, suffix = remaining.split("/", 1)
+                else:
+                    mount_name = remaining
+                    suffix = ""
+
+                if mount_name in self._context.global_mounts_ro:
+                    container_path = self._context.global_mounts_ro[mount_name]
+                    if suffix:
+                        return f"{container_path}/{suffix}"
+                    return container_path
+                else:
+                    raise PathResolutionError(
+                        f"Unknown global-ro mount: {mount_name}",
+                        path=sandbox_path,
+                        reason="UNKNOWN_MOUNT",
+                    )
 
             elif external_part.startswith("rw/") or external_part == "rw":
-                # Map to external RW mount
+                # Map to global read-write mount (flattened: /mounts/{name})
                 if external_part == "rw":
-                    return self._context.external_rw_docker
-                suffix = external_part[len("rw/"):]
-                return f"{self._context.external_rw_docker}/{suffix}"
+                    raise PathResolutionError(
+                        "Cannot resolve external/rw without mount name",
+                        path=sandbox_path,
+                        reason="INVALID_PATH",
+                    )
+                # Parse mount name from path: rw/{name}/... or rw/{name}
+                remaining = external_part[len("rw/"):]
+                if "/" in remaining:
+                    mount_name, suffix = remaining.split("/", 1)
+                else:
+                    mount_name = remaining
+                    suffix = ""
+
+                if mount_name in self._context.global_mounts_rw:
+                    container_path = self._context.global_mounts_rw[mount_name]
+                    if suffix:
+                        return f"{container_path}/{suffix}"
+                    return container_path
+                else:
+                    raise PathResolutionError(
+                        f"Unknown global-rw mount: {mount_name}",
+                        path=sandbox_path,
+                        reason="UNKNOWN_MOUNT",
+                    )
 
             elif external_part.startswith("user-ro/"):
                 # Map to per-user RO mount
@@ -873,6 +915,8 @@ def configure_sandbox_path_resolver(
     session_id: str,
     username: str,
     workspace_docker: Optional[str] = None,
+    global_mounts_ro: Optional[dict[str, str]] = None,
+    global_mounts_rw: Optional[dict[str, str]] = None,
     user_mounts_ro: Optional[dict[str, str]] = None,
     user_mounts_rw: Optional[dict[str, str]] = None,
 ) -> SandboxPathResolver:
@@ -886,8 +930,10 @@ def configure_sandbox_path_resolver(
         session_id: The session ID
         username: The username for this session
         workspace_docker: Override the Docker workspace path
-        user_mounts_ro: Per-user read-only mounts {name: host_path}
-        user_mounts_rw: Per-user read-write mounts {name: host_path}
+        global_mounts_ro: Global read-only mounts {name: container_path}
+        global_mounts_rw: Global read-write mounts {name: container_path}
+        user_mounts_ro: Per-user read-only mounts {name: container_path}
+        user_mounts_rw: Per-user read-write mounts {name: container_path}
 
     Returns:
         The configured SandboxPathResolver
@@ -896,6 +942,8 @@ def configure_sandbox_path_resolver(
         session_id=session_id,
         username=username,
         workspace_docker=workspace_docker or f"/users/{username}/sessions/{session_id}/workspace",
+        global_mounts_ro=global_mounts_ro or {},
+        global_mounts_rw=global_mounts_rw or {},
         user_mounts_ro=user_mounts_ro or {},
         user_mounts_rw=user_mounts_rw or {},
     )

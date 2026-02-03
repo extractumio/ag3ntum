@@ -19,7 +19,8 @@ import {
   uploadFiles,
   type DynamicMountRequest,
 } from './api';
-import { DynamicMountSelector } from './components/DynamicMountSelector';
+import { MountSelectorPopup } from './components/MountSelectorPopup';
+import { getBoolean, setBoolean, getString, setString, getNumber, setNumber } from './storage';
 import { AuthProvider, useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import {
@@ -1722,6 +1723,10 @@ function InputField({
   model,
   onModelChange,
   availableModels,
+  baseUrl,
+  token,
+  dynamicMounts,
+  onMountsChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -1734,6 +1739,10 @@ function InputField({
   model: string;
   onModelChange: (model: string) => void;
   availableModels: string[];
+  baseUrl?: string;
+  token?: string;
+  dynamicMounts: DynamicMountRequest[];
+  onMountsChange: (mounts: DynamicMountRequest[]) => void;
 }): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1933,6 +1942,15 @@ function InputField({
             style={{ display: 'none' }}
           />
 
+          {baseUrl && token && (
+            <MountSelectorPopup
+              baseUrl={baseUrl}
+              token={token}
+              selectedMounts={dynamicMounts}
+              onMountsChange={onMountsChange}
+            />
+          )}
+
           <div className="input-spacer" />
 
           <div className="dropdown input-model-dropdown">
@@ -2048,41 +2066,6 @@ function StatusFooter({
   );
 }
 
-// Cookie/localStorage helpers for panel preference
-function getStoredPanelCollapsed(): boolean {
-  try {
-    const stored = localStorage.getItem('ag3ntum_right_panel_collapsed');
-    return stored === 'true';
-  } catch {
-    return false;
-  }
-}
-
-function setStoredPanelCollapsed(collapsed: boolean): void {
-  try {
-    localStorage.setItem('ag3ntum_right_panel_collapsed', collapsed ? 'true' : 'false');
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-// localStorage helpers for model preference
-function getStoredSelectedModel(): string | null {
-  try {
-    return localStorage.getItem('ag3ntum_selected_model');
-  } catch {
-    return null;
-  }
-}
-
-function setStoredSelectedModel(model: string): void {
-  try {
-    localStorage.setItem('ag3ntum_selected_model', model);
-  } catch {
-    // Ignore storage errors
-  }
-}
-
 // Detect mobile viewport
 function useIsMobile(breakpoint: number = 768): boolean {
   const [isMobile, setIsMobile] = useState(() => 
@@ -2129,7 +2112,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [dynamicMounts, setDynamicMounts] = useState<DynamicMountRequest[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => getStoredPanelCollapsed());
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState<boolean>(() => getBoolean('ag3ntum_right_panel_collapsed'));
   const [mobileExpandedMessages, setMobileExpandedMessages] = useState<Set<string>>(new Set());
   const [systemEventsExpanded, setSystemEventsExpanded] = useState(false);
   const [fileExplorerVisible, setFileExplorerVisible] = useState(false);
@@ -2140,10 +2123,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   // Session badges for non-current session status changes
   const { badges: sessionBadges, addBadge: addSessionBadge, clearBadge: clearSessionBadge, badgeCounts: sessionBadgeCounts } = useSessionBadges(currentSession?.id ?? null);
   // Resizable panel state
-  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
-    const stored = localStorage.getItem('rightPanelWidth');
-    return stored ? parseInt(stored, 10) : 400;
-  });
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => getNumber('ag3ntum_right_panel_width'));
   const [isDraggingDivider, setIsDraggingDivider] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
   const [fileExplorerRefreshKey, setFileExplorerRefreshKey] = useState(0);
@@ -2200,7 +2180,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
       .then((apiConfig) => {
         setAvailableModels(apiConfig.models_available);
         // Check for stored model preference
-        const storedModel = getStoredSelectedModel();
+        const storedModel = getString('ag3ntum_selected_model');
         if (storedModel && apiConfig.models_available.includes(storedModel)) {
           // Use stored model if it's still available
           setSelectedModel(storedModel);
@@ -3171,7 +3151,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
   const handleModelChange = useCallback((model: string) => {
     setSelectedModel(model);
-    setStoredSelectedModel(model);
+    setString('ag3ntum_selected_model', model);
   }, []);
 
   /**
@@ -3381,7 +3361,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const toggleRightPanel = useCallback(() => {
     setRightPanelCollapsed((prev) => {
       const next = !prev;
-      setStoredPanelCollapsed(next);
+      setBoolean('ag3ntum_right_panel_collapsed', next);
       return next;
     });
   }, []);
@@ -3421,7 +3401,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
     const handleMouseUp = () => {
       setIsDraggingDivider(false);
       // Persist to localStorage
-      localStorage.setItem('rightPanelWidth', String(rightPanelWidth));
+      setNumber('ag3ntum_right_panel_width', rightPanelWidth);
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -4770,13 +4750,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         )}
         <div className="input-wrapper">
           <div className="input-section">
-            {config && token && (
-              <DynamicMountSelector
-                baseUrl={config.api.base_url}
-                token={token}
-                onMountsChange={setDynamicMounts}
-              />
-            )}
             <InputField
               value={inputValue}
               onChange={setInputValue}
@@ -4789,6 +4762,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               model={selectedModel}
               onModelChange={handleModelChange}
               availableModels={availableModels}
+              baseUrl={config?.api.base_url}
+              token={token}
+              dynamicMounts={dynamicMounts}
+              onMountsChange={setDynamicMounts}
             />
             <div className={`input-message ${error ? (reconnecting || connectionState === 'polling' ? 'warning' : 'error') : ''}`}>
               {error || '\u00A0'}

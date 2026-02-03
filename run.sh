@@ -10,6 +10,7 @@ MOUNTS_RO=()
 MOUNTS_USER_RW=()
 MOUNTS_USER_RO=()
 MOUNTS_DYNAMIC=()  # Dynamic mount bases (format: "path:name:mode")
+MOUNTS_ORIGINAL=() # Original-path mounts (format: "path:encoded:mode")
 
 # Track used mount names to detect duplicates (space-separated string for Bash 3 compat)
 USED_MOUNT_NAMES=""
@@ -21,10 +22,38 @@ CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
+# Safely remove a file that may be owned by root (from a previous container build).
+# Uses sudo only on Linux and only when the file exists and is not owned by the current user.
+function safe_remove_file() {
+  local file="$1"
+  [[ ! -e "${file}" ]] && return 0
+
+  # Try normal rm first (covers macOS, Windows, and Linux files owned by current user)
+  if rm -f "${file}" 2>/dev/null; then
+    return 0
+  fi
+
+  # On Linux, fall back to sudo for container-owned files
+  local os_type
+  os_type="$(uname -s)"
+  if [[ "${os_type}" == "Linux" ]]; then
+    sudo rm -f "$(pwd)/${file}" 2>/dev/null || {
+      echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
+      return 0
+    }
+  else
+    echo "Warning: Cannot remove ${file}. Check file permissions."
+    return 0
+  fi
+}
+
 # Directories that container needs to WRITE to (need ownership fix on Linux)
 # Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
 # src/web_terminal_client needs write access for Vite's temp files during dev mode
-WRITABLE_DIRS=("logs" "data" "users" "src/web_terminal_client")
+WRITABLE_DIRS=("logs" "data" "users")
+
+# Directories that need to exist but should stay user-owned (for script to write, container reads)
+SCRIPT_DIRS=("data/auto-generated")
 
 # Directories that container only READS from (just need to exist)
 READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests")
@@ -158,17 +187,23 @@ function check_privileges() {
     exit 1
   fi
 
-  # Test if sudo works (will prompt for password if needed, or fail if not allowed)
-  if ! sudo -n true 2>/dev/null; then
+  # Test if sudo chown works (using actual command that will be needed)
+  # This allows specific sudoers rules for chown without requiring general sudo access
+  local test_dir="$(pwd)/${WRITABLE_DIRS[0]}"
+  mkdir -p "${test_dir}" 2>/dev/null || true
+
+  if ! sudo -n chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
     echo ""
     echo "NOTE: This script requires sudo privileges to set directory ownership."
     echo "You may be prompted for your password."
     echo ""
     # Try sudo with prompt - if it fails, user doesn't have sudo access
-    if ! sudo true; then
+    if ! sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
       echo ""
-      echo "ERROR: Cannot obtain sudo privileges."
-      echo "Please run as root or configure sudo access for your user."
+      echo "ERROR: Cannot obtain sudo privileges for chown."
+      echo "Please run as root or add to /etc/sudoers.d/ag3ntum:"
+      echo ""
+      echo "  ${USER} ALL=(ALL) NOPASSWD: /usr/bin/chown -R ${CONTAINER_UID}\\:${CONTAINER_UID} $(pwd)/*"
       echo ""
       exit 1
     fi
@@ -186,10 +221,11 @@ function setup_directories() {
   check_privileges
 
   # Create all required directories
-  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
+  # On Linux, parent dirs may be owned by container UID from previous runs, so use sudo if needed
+  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}" "${SCRIPT_DIRS[@]}"; do
     if [[ ! -d "${dir}" ]]; then
       echo "  Creating ${dir}/"
-      mkdir -p "${dir}"
+      mkdir -p "${dir}" 2>/dev/null || sudo mkdir -p "$(pwd)/${dir}"
     fi
   done
 
@@ -224,8 +260,23 @@ function setup_directories() {
         chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
       else
         # Running as regular user - need sudo (already verified in check_privileges)
+        # Use full path for sudoers rule matching
         echo "  Setting ownership (sudo): ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
+        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${dir}"
+      fi
+    fi
+  done
+
+  # SCRIPT_DIRS should be user-owned (script writes, container reads)
+  # This MUST happen AFTER the WRITABLE_DIRS loop above, because chown -R on parent
+  # dirs (like "data") would otherwise overwrite these subdirectories
+  for dir in "${SCRIPT_DIRS[@]}"; do
+    if [[ -d "${dir}" ]]; then
+      local owner_uid
+      owner_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
+      if [[ "${owner_uid}" != "$(id -u)" ]]; then
+        echo "  Fixing ownership (sudo): ${dir}/ -> $(id -u):$(id -g)"
+        sudo chown -R "$(id -u):$(id -g)" "$(pwd)/${dir}"
       fi
     fi
   done
@@ -391,6 +442,22 @@ function load_mounts_from_yaml() {
         MOUNTS_DYNAMIC+=("${validated}:${mount_mode}")
         echo "  Added dynamic base: ${mount_name} -> ${mount_path} [${mount_mode}]"
       fi
+    elif [[ "${mount_type}" == "MOUNT_ORIGINAL" ]]; then
+      # Original-path mount (format: MOUNT_ORIGINAL:path:encoded:mode)
+      # These mount host paths at /mounts/paths/{encoded} for access at original locations
+      rest="${line#*:}"
+      local orig_path="${rest%%:*}"
+      rest="${rest#*:}"
+      local encoded="${rest%%:*}"
+      local mount_mode="${rest##*:}"
+
+      # Validate the original path exists
+      if [[ -e "${orig_path}" ]]; then
+        MOUNTS_ORIGINAL+=("${orig_path}:${encoded}:${mount_mode}")
+        echo "  Added original-path mount: ${orig_path} -> /mounts/paths/${encoded} [${mount_mode}]"
+      else
+        echo "  Skipping original-path mount (path not found): ${orig_path}"
+      fi
     fi
   done <<< "${mounts_output}"
 }
@@ -539,7 +606,17 @@ function render_ui_config() {
   HOSTNAME="$(read_config_value 'server.hostname' 'localhost')"
   PROTOCOL="$(read_config_value 'server.protocol' 'http')"
 
-  cat > src/web_terminal_client/public/config.yaml <<EOF
+  local target="src/web_terminal_client/public/config.yaml"
+  local target_dir
+  target_dir="$(dirname "${target}")"
+
+  # Remove existing file first (may be owned by container user from previous build)
+  safe_remove_file "${target}"
+
+  # On Linux, the parent directory may be owned by container UID (45045) from a
+  # previous build. Write to a temp file and sudo-move if not writable.
+  if [[ -w "${target_dir}" ]]; then
+    cat > "${target}" <<EOF
 server:
   port: ${WEB_PORT}
   host: "0.0.0.0"
@@ -553,6 +630,27 @@ ui:
   max_output_lines: 1000
   auto_scroll: true
 EOF
+  else
+    local tmpfile
+    tmpfile="$(mktemp)"
+    cat > "${tmpfile}" <<EOF
+server:
+  port: ${WEB_PORT}
+  host: "0.0.0.0"
+
+api:
+  # API URL derived from server.hostname and server.protocol in api.yaml
+  # Frontend will replace "localhost" with browser hostname if accessed remotely
+  base_url: "${PROTOCOL}://${HOSTNAME}:${API_PORT}"
+
+ui:
+  max_output_lines: 1000
+  auto_scroll: true
+EOF
+    sudo mv "${tmpfile}" "$(pwd)/${target}"
+    sudo chown "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${target}"
+    sudo chmod 644 "$(pwd)/${target}"
+  fi
 
   echo "  Frontend config: ${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 }
@@ -562,12 +660,15 @@ function generate_compose_override() {
   local override_file="docker-compose.override.yml"
   local manifest_file="data/auto-generated/auto-generated-mounts.yaml"
 
-  # Ensure the auto-generated directory exists
-  mkdir -p "data/auto-generated"
+  # Ensure the auto-generated directory exists (may need sudo on Linux after setup_directories)
+  mkdir -p "data/auto-generated" 2>/dev/null || sudo mkdir -p "data/auto-generated" 2>/dev/null || true
+
+  # Remove existing generated files (may be owned by root from previous container build)
+  safe_remove_file "${override_file}"
+  safe_remove_file "${manifest_file}"
 
   if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 && ${#MOUNTS_USER_RW[@]} -eq 0 && ${#MOUNTS_USER_RO[@]} -eq 0 && ${#MOUNTS_DYNAMIC[@]} -eq 0 ]]; then
-    # No mounts specified, remove override file and create empty manifest
-    rm -f "${override_file}"
+    # No mounts specified, create empty manifest (override already removed above)
     cat > "${manifest_file}" <<EOF
 # =============================================================================
 # AUTO-GENERATED FILE - DO NOT EDIT
@@ -618,71 +719,79 @@ EOF
 mounts:
 EOF
 
-  # Write RO section
+  # Write RO section (flattened: /mounts/{name} instead of /mounts/ro/{name})
   if [[ ${#MOUNTS_RO[@]} -gt 0 ]]; then
     echo "  ro:" >> "${manifest_file}"
     for mount in "${MOUNTS_RO[@]}"; do
       local abs_path="${mount%%:*}"
       local name="${mount##*:}"
-      echo "      - ${abs_path}:/mounts/ro/${name}:ro" >> "${override_file}"
+      echo "      - ${abs_path}:/mounts/${name}:ro" >> "${override_file}"
       echo "    - name: \"${name}\"" >> "${manifest_file}"
       echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-      echo "      container_path: \"/mounts/ro/${name}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
       echo "      workspace_path: \"./external/ro/${name}\"" >> "${manifest_file}"
+      echo "      mount_type: \"global_ro\"" >> "${manifest_file}"
+      echo "      mode: \"ro\"" >> "${manifest_file}"
     done
   else
     echo "  ro: []" >> "${manifest_file}"
   fi
 
-  # Write RW section
+  # Write RW section (flattened: /mounts/{name} instead of /mounts/rw/{name})
   if [[ ${#MOUNTS_RW[@]} -gt 0 ]]; then
     echo "  rw:" >> "${manifest_file}"
     for mount in "${MOUNTS_RW[@]}"; do
       local abs_path="${mount%%:*}"
       local name="${mount##*:}"
-      echo "      - ${abs_path}:/mounts/rw/${name}:rw" >> "${override_file}"
+      echo "      - ${abs_path}:/mounts/${name}:rw" >> "${override_file}"
       echo "    - name: \"${name}\"" >> "${manifest_file}"
       echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-      echo "      container_path: \"/mounts/rw/${name}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
       echo "      workspace_path: \"./external/rw/${name}\"" >> "${manifest_file}"
+      echo "      mount_type: \"global_rw\"" >> "${manifest_file}"
+      echo "      mode: \"rw\"" >> "${manifest_file}"
     done
   else
     echo "  rw: []" >> "${manifest_file}"
   fi
 
-  # Write per-user RO section (mounted at /mounts/user-ro/{name})
+  # Write per-user RO section (flattened: /mounts/{name} instead of /mounts/user-ro/{name})
   if [[ ${#MOUNTS_USER_RO[@]} -gt 0 ]]; then
     echo "  user-ro:" >> "${manifest_file}"
     for mount in "${MOUNTS_USER_RO[@]}"; do
       local abs_path="${mount%%:*}"
       local name="${mount##*:}"
-      echo "      - ${abs_path}:/mounts/user-ro/${name}:ro" >> "${override_file}"
+      echo "      - ${abs_path}:/mounts/${name}:ro" >> "${override_file}"
       echo "    - name: \"${name}\"" >> "${manifest_file}"
       echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-      echo "      container_path: \"/mounts/user-ro/${name}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
       echo "      workspace_path: \"./external/user-ro/${name}\"" >> "${manifest_file}"
+      echo "      mount_type: \"user_ro\"" >> "${manifest_file}"
+      echo "      mode: \"ro\"" >> "${manifest_file}"
     done
   else
     echo "  user-ro: []" >> "${manifest_file}"
   fi
 
-  # Write per-user RW section (mounted at /mounts/user-rw/{name})
+  # Write per-user RW section (flattened: /mounts/{name} instead of /mounts/user-rw/{name})
   if [[ ${#MOUNTS_USER_RW[@]} -gt 0 ]]; then
     echo "  user-rw:" >> "${manifest_file}"
     for mount in "${MOUNTS_USER_RW[@]}"; do
       local abs_path="${mount%%:*}"
       local name="${mount##*:}"
-      echo "      - ${abs_path}:/mounts/user-rw/${name}:rw" >> "${override_file}"
+      echo "      - ${abs_path}:/mounts/${name}:rw" >> "${override_file}"
       echo "    - name: \"${name}\"" >> "${manifest_file}"
       echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-      echo "      container_path: \"/mounts/user-rw/${name}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
       echo "      workspace_path: \"./external/user-rw/${name}\"" >> "${manifest_file}"
+      echo "      mount_type: \"user_rw\"" >> "${manifest_file}"
+      echo "      mode: \"rw\"" >> "${manifest_file}"
     done
   else
     echo "  user-rw: []" >> "${manifest_file}"
   fi
 
-  # Write dynamic mount bases section (mounted at /mounts/dynamic/{name})
+  # Write dynamic mount bases section (flattened: /mounts/{name} instead of /mounts/dynamic/{name})
   if [[ ${#MOUNTS_DYNAMIC[@]} -gt 0 ]]; then
     echo "  dynamic:" >> "${manifest_file}"
     for mount in "${MOUNTS_DYNAMIC[@]}"; do
@@ -696,8 +805,9 @@ EOF
       if [[ "${abs_path}" == *"{username}"* ]]; then
         echo "    - name: \"${name}\"" >> "${manifest_file}"
         echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-        echo "      container_path: \"/mounts/dynamic/${name}\"" >> "${manifest_file}"
+        echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
         echo "      max_mode: \"${mode}\"" >> "${manifest_file}"
+        echo "      mount_type: \"dynamic\"" >> "${manifest_file}"
         echo "      has_placeholder: true" >> "${manifest_file}"
         echo "  Note: Dynamic base '${name}' has {username} placeholder - Docker volume skipped"
       else
@@ -706,16 +816,47 @@ EOF
         if [[ "${mode}" == "rw" ]]; then
           docker_mode="rw"
         fi
-        echo "      - ${abs_path}:/mounts/dynamic/${name}:${docker_mode}" >> "${override_file}"
+        echo "      - ${abs_path}:/mounts/${name}:${docker_mode}" >> "${override_file}"
         echo "    - name: \"${name}\"" >> "${manifest_file}"
         echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
-        echo "      container_path: \"/mounts/dynamic/${name}\"" >> "${manifest_file}"
+        echo "      container_path: \"/mounts/${name}\"" >> "${manifest_file}"
         echo "      max_mode: \"${mode}\"" >> "${manifest_file}"
+        echo "      mount_type: \"dynamic\"" >> "${manifest_file}"
         echo "      has_placeholder: false" >> "${manifest_file}"
       fi
     done
   else
     echo "  dynamic: []" >> "${manifest_file}"
+  fi
+
+  # Generate original-path mounts (if any)
+  # These mount paths at /mounts/paths/{encoded} for access at original locations
+  if [[ ${#MOUNTS_ORIGINAL[@]} -gt 0 ]]; then
+    echo "  original_paths:" >> "${manifest_file}"
+    for mount in "${MOUNTS_ORIGINAL[@]}"; do
+      # Format: path:encoded:mode
+      local orig_path="${mount%%:*}"
+      local rest="${mount#*:}"
+      local encoded="${rest%%:*}"
+      local mode="${rest##*:}"
+
+      # Get absolute path
+      local abs_path
+      abs_path="$(cd "$(dirname "${orig_path}")" 2>/dev/null && pwd)/$(basename "${orig_path}")"
+
+      # Add Docker volume at /mounts/paths/{encoded}
+      echo "      - ${abs_path}:/mounts/paths/${encoded}:${mode}" >> "${override_file}"
+
+      # Add to manifest
+      echo "    - path: \"${orig_path}\"" >> "${manifest_file}"
+      echo "      encoded: \"${encoded}\"" >> "${manifest_file}"
+      echo "      host_path: \"${abs_path}\"" >> "${manifest_file}"
+      echo "      container_path: \"/mounts/paths/${encoded}\"" >> "${manifest_file}"
+      echo "      mode: \"${mode}\"" >> "${manifest_file}"
+      echo "      mount_type: \"original_path\"" >> "${manifest_file}"
+    done
+  else
+    echo "  original_paths: []" >> "${manifest_file}"
   fi
 
   echo ""
@@ -743,7 +884,16 @@ EOF
       local rest="${mount#*:}"
       local name="${rest%%:*}"
       local mode="${rest##*:}"
-      echo "  ./dynamic/${name}/ [max: ${mode}]"
+      echo "  ./${name}/ [max: ${mode}]"
+    done
+  fi
+  if [[ ${#MOUNTS_ORIGINAL[@]} -gt 0 ]]; then
+    echo "Original-path mounts (accessible at original locations):"
+    for mount in "${MOUNTS_ORIGINAL[@]}"; do
+      local orig_path="${mount%%:*}"
+      local rest="${mount#*:}"
+      local mode="${rest##*:}"
+      echo "  ${orig_path} [${mode}]"
     done
   fi
   echo "Persistent storage (always available):"
@@ -818,6 +968,7 @@ function do_cleanup() {
   echo "Removing generated files..."
   rm -f docker-compose.override.yml
   rm -f .env.bak
+  rm -f src/web_terminal_client/public/config.yaml 2>/dev/null || true
 
   # Step 7: Kill any orphaned processes that might be using ports
   echo "Checking for orphaned processes on configured ports..."
@@ -977,11 +1128,16 @@ fi
 run_ui_tests() {
   echo "=== Running UI/React tests ==="
 
-  # Check if ag3ntum-web container is running
+  # Ensure ag3ntum-web container is running (test setup may have stopped it)
   if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
-    echo "Error: ag3ntum-web container is not running."
-    echo "Start it first with: ./run.sh build"
-    return 1
+    echo "Starting ag3ntum-web container..."
+    docker compose up -d ag3ntum-web
+    sleep 2
+    if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+      echo "Error: ag3ntum-web container failed to start."
+      echo "Check logs with: docker compose logs ag3ntum-web"
+      return 1
+    fi
   fi
 
   # Check if node_modules needs reinstalling (platform mismatch between host and container)
@@ -1003,8 +1159,8 @@ run_ui_tests() {
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
     docker compose exec -T ag3ntum-web sh -c '
       cd /src/web_terminal_client && \
-      rm -rf node_modules package-lock.json && \
-      npm install --no-fund --no-audit
+      rm -rf node_modules && \
+      npm install --no-fund --no-audit --no-package-lock
     '
   fi
 
@@ -1031,15 +1187,38 @@ if [[ "${ACTION}" == "test" ]]; then
 
   # Set up test logging - output goes to both console and log file
   TEST_LOG_FILE="logs/latest-test-results.log"
-  mkdir -p logs
+  mkdir -p logs 2>/dev/null || true
 
-  # Initialize log file with header
-  {
-    echo "========================================"
-    echo "Test Run: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "========================================"
-    echo ""
-  } > "$TEST_LOG_FILE"
+  # Remove stale log file that may be owned by container user from previous build
+  safe_remove_file "$TEST_LOG_FILE"
+
+  # Check if we can write to the log file (directory may be owned by container UID)
+  if touch "$TEST_LOG_FILE" 2>/dev/null; then
+    # Initialize log file with header
+    {
+      echo "========================================"
+      echo "Test Run: $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "========================================"
+      echo ""
+    } > "$TEST_LOG_FILE"
+    CAN_LOG=1
+  elif docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    # logs/ directory is owned by container UID (45045). Use the running container
+    # to create a world-writable log file so tee -a can append without sudo.
+    docker compose exec -T ag3ntum-api sh -c "
+      echo '========================================' > /logs/latest-test-results.log &&
+      echo 'Test Run: $(date '+%Y-%m-%d %H:%M:%S')' >> /logs/latest-test-results.log &&
+      echo '========================================' >> /logs/latest-test-results.log &&
+      echo '' >> /logs/latest-test-results.log &&
+      chmod 646 /logs/latest-test-results.log
+    "
+    CAN_LOG=1
+  else
+    echo "Warning: Cannot write to ${TEST_LOG_FILE} (permission denied)"
+    echo "Test output will only be shown in console."
+    TEST_LOG_FILE="/dev/null"
+    CAN_LOG=0
+  fi
 
   # Helper function to run commands with tee (preserves exit code)
   run_with_log() {
@@ -1051,6 +1230,11 @@ if [[ "${ACTION}" == "test" ]]; then
   # Use test compose override for test runs
   # This mounts test sudoers and uses test entrypoint
   COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+
+  # Exec options for running commands as ag3ntum_api (required because container starts as root)
+  # The test container starts as root to install sudoers, then drops to ag3ntum_api for uvicorn.
+  # But docker exec defaults to root, so we need to specify the user explicitly.
+  EXEC_OPTS="-T -u ag3ntum_api"
 
   # Check if test configuration files exist
   if [[ ! -f "docker-compose.test.yml" ]]; then
@@ -1089,14 +1273,19 @@ if [[ "${ACTION}" == "test" ]]; then
 
   echo ""
 
-  # Build pytest command
-  PYTEST_CMD="python -m pytest"
+  # Build pytest command (--color=yes forces colors even when piped through tee)
+  PYTEST_CMD="python -m pytest --color=yes"
 
   # Parse test arguments
+  # Default: run ALL tests (backend+e2e+security+sandboxing+UI)
+  # Specific flags run only that subset
   QUICK_MODE=""
   SUBSET=""
   BACKEND_ONLY=""
   UI_ONLY=""
+  SECURITY_ONLY=""
+  E2E_ONLY=""
+  SANDBOXING_ONLY=""
 
   ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
   i=0
@@ -1112,8 +1301,17 @@ if [[ "${ACTION}" == "test" ]]; then
       --ui|--frontend)
         UI_ONLY="1"
         ;;
+      --security)
+        SECURITY_ONLY="1"
+        ;;
+      --e2e)
+        E2E_ONLY="1"
+        ;;
+      --sandboxing)
+        SANDBOXING_ONLY="1"
+        ;;
       --subset)
-        ((i++))
+        i=$((i + 1))
         if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
           SUBSET="${ARGS_ARRAY[$i]}"
         else
@@ -1126,11 +1324,21 @@ if [[ "${ACTION}" == "test" ]]; then
         ;;
       *)
         echo "Unknown test option: ${arg}"
-        echo "Usage: ./run.sh test [--quick] [--backend] [--ui] [--subset <names>]"
+        echo ""
+        echo "Usage: ./run.sh test [OPTIONS]"
+        echo ""
+        echo "Options (default: run ALL tests):"
+        echo "  --backend     Run only backend tests (includes e2e)"
+        echo "  --security    Run only security tests"
+        echo "  --e2e         Run only e2e tests"
+        echo "  --sandboxing  Run only sandboxing tests"
+        echo "  --ui          Run only UI/frontend tests"
+        echo "  --quick       Run fast tests only (no e2e/slow)"
+        echo "  --subset X    Run tests matching pattern X"
         exit 1
         ;;
     esac
-    ((i++))
+    i=$((i + 1))
   done
 
   # Handle UI-only mode
@@ -1146,6 +1354,53 @@ if [[ "${ACTION}" == "test" ]]; then
     exit 1
   fi
 
+  # Handle specific test suite modes
+  if [[ -n "${SECURITY_ONLY}" ]]; then
+    echo "=== Running security tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${E2E_ONLY}" ]]; then
+    echo "=== Running e2e tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short -m "e2e"
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${SANDBOXING_ONLY}" ]]; then
+    echo "=== Running sandboxing tests only ===" | tee -a "$TEST_LOG_FILE"
+    # Look for sandboxing tests in various locations
+    SANDBOX_DIRS=""
+    if ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api test -d /tests/sandboxing 2>/dev/null; then
+      SANDBOX_DIRS="/tests/sandboxing/"
+    fi
+    # Also run sandbox-related tests in backend
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${BACKEND_ONLY}" ]]; then
+    echo "=== Running backend tests only (with e2e) ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
   # Build test arguments
   PYTEST_ARGS=()
 
@@ -1158,7 +1413,7 @@ if [[ "${ACTION}" == "test" ]]; then
       # Trim whitespace
       name="${name// /}"
       # Find matching test files in container
-      MATCHES=$(${COMPOSE_TEST} exec ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
+      MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
       if [[ -n "${MATCHES}" ]]; then
         while IFS= read -r file; do
           TEST_FILES+=("${file}")
@@ -1170,7 +1425,7 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "No test files found matching: ${SUBSET}"
       echo ""
       echo "Available test files:"
-      ${COMPOSE_TEST} exec ag3ntum-api find /tests -name "test_*.py" | sort
+      ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*.py" | sort
       exit 1
     fi
 
@@ -1195,7 +1450,7 @@ if [[ "${ACTION}" == "test" ]]; then
       # Use || true to prevent set -e from exiting on test failures
       BACKEND_RESULT=0
       if [[ -z "${UI_ONLY}" ]]; then
-        run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
+        run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}" || BACKEND_RESULT=$?
       fi
 
       # Run UI tests unless backend-only
@@ -1250,16 +1505,16 @@ if [[ "${ACTION}" == "test" ]]; then
       # First run: backend tests with --run-e2e flag
       echo "=== Running backend tests (with E2E) ===" | tee -a "$TEST_LOG_FILE"
       BACKEND_RESULT=0
-      run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
 
       # Second run: security tests (no --run-e2e flag)
       echo "" | tee -a "$TEST_LOG_FILE"
       echo "=== Running security tests ===" | tee -a "$TEST_LOG_FILE"
       SECURITY_RESULT=0
-      run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
 
       # Check for other test directories and run them
-      OTHER_DIRS=$(${COMPOSE_TEST} exec ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
+      OTHER_DIRS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
       OTHER_RESULT=0
 
       if [[ -n "${OTHER_DIRS}" ]]; then
@@ -1267,12 +1522,12 @@ if [[ "${ACTION}" == "test" ]]; then
           dir_name=$(basename "${dir}")
           if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
             # Check if directory has any test files
-            HAS_TESTS=$(${COMPOSE_TEST} exec ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
+            HAS_TESTS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
             if [[ -n "${HAS_TESTS}" ]]; then
               echo "" | tee -a "$TEST_LOG_FILE"
               echo "=== Running ${dir_name} tests ===" | tee -a "$TEST_LOG_FILE"
               DIR_RESULT=0
-              run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
+              run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
               if [[ ${DIR_RESULT} -ne 0 ]]; then
                 OTHER_RESULT=1
               fi
@@ -1290,7 +1545,7 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
 
       # Print combined summary (to console and log)
-      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       {
         echo ""
         echo "========================================"
@@ -1349,7 +1604,7 @@ if [[ "${ACTION}" == "test" ]]; then
   echo "" | tee -a "$TEST_LOG_FILE"
 
   # Run tests in container with logging
-  run_with_log ${COMPOSE_TEST} exec ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
+  run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
   TEST_EXIT_CODE=$?
 
   # Print result summary
@@ -1413,12 +1668,14 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
 
   # Use test compose override for cleanup (needs elevated permissions)
   COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+  EXEC_OPTS="-T -u ag3ntum_api"
 
   # Check if test configuration files exist
   if [[ ! -f "docker-compose.test.yml" ]] || [[ ! -f "config/test/sudoers-test" ]]; then
     echo "Warning: Test configuration files not found, using standard compose."
     echo "Some cleanup operations may fail without test permissions."
     COMPOSE_TEST="docker compose"
+    EXEC_OPTS="-T"  # No user override needed for standard compose
   fi
 
   # Ensure container is running with test configuration for cleanup
@@ -1433,14 +1690,9 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
     exit 1
   fi
 
-  # Run cleanup script inside container
-  if [ -t 0 ]; then
-    ${COMPOSE_TEST} exec ag3ntum-api \
-      python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
-  else
-    ${COMPOSE_TEST} exec ag3ntum-api \
-      python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
-  fi
+  # Run cleanup script inside container (run as ag3ntum_api to use test sudoers)
+  ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api \
+    python3 -m src.cli.cleanup_test_users ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
 
   # Restore container to production mode
   echo ""

@@ -8,11 +8,9 @@ import { useEffect, useState } from 'react';
 import { SPINNER_FRAMES } from '../constants';
 
 // Re-export all hooks
-export { useAppConfig, type UseAppConfigResult } from './useAppConfig';
 export { useSessionManager, type UseSessionManagerResult, type SessionStats } from './useSessionManager';
 export { useSSEConnection, type UseSSEConnectionResult, type ConnectionState } from './useSSEConnection';
 export { useFileOperations, type UseFileOperationsResult, type AttachedFile } from './useFileOperations';
-export { useUIState, type UseUIStateResult } from './useUIState';
 
 /**
  * Hook for spinner animation frames

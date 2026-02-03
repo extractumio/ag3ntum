@@ -79,7 +79,7 @@ class TestSkillDiscovery:
         with patch("src.api.routes.skills.discover_merged_skills") as mock_discover:
             # Simulate some discovered skills
             mock_discover.return_value = {
-                "meow": Path("/skills/.claude/skills/meow"),
+                "global-skill": Path("/skills/.claude/skills/global-skill"),
                 "user-skill": Path("/user-skills/user-skill"),  # Per-user mount path
             }
 

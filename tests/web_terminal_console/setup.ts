@@ -25,6 +25,17 @@ afterAll(() => {
   server.close();
 });
 
+// Suppress React 18 act() warnings from userEvent and async state updates.
+// These are false positives caused by React 18's batching model interacting
+// with Testing Library — tests pass correctly and behavior is verified.
+const originalConsoleError = console.error;
+console.error = (...args: unknown[]) => {
+  if (typeof args[0] === 'string' && args[0].includes('was not wrapped in act')) {
+    return;
+  }
+  originalConsoleError(...args);
+};
+
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -55,3 +66,17 @@ let objectUrlCounter = 0;
 
 URL.createObjectURL = vi.fn(() => `blob:test-url-${++objectUrlCounter}`);
 URL.revokeObjectURL = vi.fn();
+
+// Mock ClipboardItem (not available in jsdom)
+if (typeof globalThis.ClipboardItem === 'undefined') {
+  globalThis.ClipboardItem = class ClipboardItem {
+    readonly types: string[];
+    constructor(private items: Record<string, Blob>) {
+      this.types = Object.keys(items);
+    }
+    getType(type: string): Promise<Blob> {
+      const blob = this.items[type];
+      return blob ? Promise.resolve(blob) : Promise.reject(new Error(`Type ${type} not found`));
+    }
+  } as unknown as typeof globalThis.ClipboardItem;
+}
