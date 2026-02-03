@@ -507,7 +507,7 @@ class DynamicMountService:
             base = DynamicMountBase(
                 name=base_config["name"],
                 host_path=base_config["host_path"],
-                container_path=f"/mounts/dynamic/{base_config['name']}",
+                container_path=f"/mounts/{base_config['name']}",
                 description=base_config.get("description", ""),
                 max_mode=base_config.get("max_mode", "ro"),
                 authorization_mode=auth.get("mode", "allowlist"),

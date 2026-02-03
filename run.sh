@@ -1198,14 +1198,19 @@ if [[ "${ACTION}" == "test" ]]; then
 
   echo ""
 
-  # Build pytest command
-  PYTEST_CMD="python -m pytest"
+  # Build pytest command (--color=yes forces colors even when piped through tee)
+  PYTEST_CMD="python -m pytest --color=yes"
 
   # Parse test arguments
+  # Default: run ALL tests (backend+e2e+security+sandboxing+UI)
+  # Specific flags run only that subset
   QUICK_MODE=""
   SUBSET=""
   BACKEND_ONLY=""
   UI_ONLY=""
+  SECURITY_ONLY=""
+  E2E_ONLY=""
+  SANDBOXING_ONLY=""
 
   ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
   i=0
@@ -1221,6 +1226,15 @@ if [[ "${ACTION}" == "test" ]]; then
       --ui|--frontend)
         UI_ONLY="1"
         ;;
+      --security)
+        SECURITY_ONLY="1"
+        ;;
+      --e2e)
+        E2E_ONLY="1"
+        ;;
+      --sandboxing)
+        SANDBOXING_ONLY="1"
+        ;;
       --subset)
         ((i++))
         if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
@@ -1235,7 +1249,17 @@ if [[ "${ACTION}" == "test" ]]; then
         ;;
       *)
         echo "Unknown test option: ${arg}"
-        echo "Usage: ./run.sh test [--quick] [--backend] [--ui] [--subset <names>]"
+        echo ""
+        echo "Usage: ./run.sh test [OPTIONS]"
+        echo ""
+        echo "Options (default: run ALL tests):"
+        echo "  --backend     Run only backend tests (includes e2e)"
+        echo "  --security    Run only security tests"
+        echo "  --e2e         Run only e2e tests"
+        echo "  --sandboxing  Run only sandboxing tests"
+        echo "  --ui          Run only UI/frontend tests"
+        echo "  --quick       Run fast tests only (no e2e/slow)"
+        echo "  --subset X    Run tests matching pattern X"
         exit 1
         ;;
     esac
@@ -1253,6 +1277,53 @@ if [[ "${ACTION}" == "test" ]]; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
+  fi
+
+  # Handle specific test suite modes
+  if [[ -n "${SECURITY_ONLY}" ]]; then
+    echo "=== Running security tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${E2E_ONLY}" ]]; then
+    echo "=== Running e2e tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short -m "e2e"
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${SANDBOXING_ONLY}" ]]; then
+    echo "=== Running sandboxing tests only ===" | tee -a "$TEST_LOG_FILE"
+    # Look for sandboxing tests in various locations
+    SANDBOX_DIRS=""
+    if ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api test -d /tests/sandboxing 2>/dev/null; then
+      SANDBOX_DIRS="/tests/sandboxing/"
+    fi
+    # Also run sandbox-related tests in backend
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${BACKEND_ONLY}" ]]; then
+    echo "=== Running backend tests only (with e2e) ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to production mode..."
+    docker compose up -d ag3ntum-api
+    exit ${TEST_RESULT}
   fi
 
   # Build test arguments

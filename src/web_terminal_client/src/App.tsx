@@ -19,7 +19,7 @@ import {
   uploadFiles,
   type DynamicMountRequest,
 } from './api';
-import { DynamicMountSelector } from './components/DynamicMountSelector';
+import { MountSelectorPopup } from './components/MountSelectorPopup';
 import { AuthProvider, useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import {
@@ -1722,6 +1722,10 @@ function InputField({
   model,
   onModelChange,
   availableModels,
+  baseUrl,
+  token,
+  dynamicMounts,
+  onMountsChange,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -1734,6 +1738,10 @@ function InputField({
   model: string;
   onModelChange: (model: string) => void;
   availableModels: string[];
+  baseUrl?: string;
+  token?: string;
+  dynamicMounts: DynamicMountRequest[];
+  onMountsChange: (mounts: DynamicMountRequest[]) => void;
 }): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1932,6 +1940,15 @@ function InputField({
             onChange={handleFileSelect}
             style={{ display: 'none' }}
           />
+
+          {baseUrl && token && (
+            <MountSelectorPopup
+              baseUrl={baseUrl}
+              token={token}
+              selectedMounts={dynamicMounts}
+              onMountsChange={onMountsChange}
+            />
+          )}
 
           <div className="input-spacer" />
 
@@ -4770,13 +4787,6 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         )}
         <div className="input-wrapper">
           <div className="input-section">
-            {config && token && (
-              <DynamicMountSelector
-                baseUrl={config.api.base_url}
-                token={token}
-                onMountsChange={setDynamicMounts}
-              />
-            )}
             <InputField
               value={inputValue}
               onChange={setInputValue}
@@ -4789,6 +4799,10 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               model={selectedModel}
               onModelChange={handleModelChange}
               availableModels={availableModels}
+              baseUrl={config?.api.base_url}
+              token={token}
+              dynamicMounts={dynamicMounts}
+              onMountsChange={setDynamicMounts}
             />
             <div className={`input-message ${error ? (reconnecting || connectionState === 'polling' ? 'warning' : 'error') : ''}`}>
               {error || '\u00A0'}

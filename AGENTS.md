@@ -1,1 +1,1 @@
-see @CLAUDE.md
+Read @CLAUDE.md
