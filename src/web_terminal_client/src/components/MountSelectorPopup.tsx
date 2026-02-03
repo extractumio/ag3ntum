@@ -11,6 +11,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { DynamicMountRequest, DynamicBaseInfo, AvailableDynamicMountsResponse } from '../api';
+import { getJson, setJson } from '../storage';
 
 // Re-export types for consumers that import from this module
 export type { DynamicMountRequest, DynamicBaseInfo, AvailableDynamicMountsResponse };
@@ -20,33 +21,6 @@ interface Props {
   token: string;
   selectedMounts: DynamicMountRequest[];
   onMountsChange: (mounts: DynamicMountRequest[]) => void;
-}
-
-const STORAGE_KEY = 'ag3ntum_dynamic_mounts';
-
-// localStorage helpers (same pattern as model/panel persistence)
-function getStoredMounts(): DynamicMountRequest[] | null {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch {
-    // Invalid data, ignore
-  }
-  return null;
-}
-
-function setStoredMounts(mounts: DynamicMountRequest[]): void {
-  try {
-    if (mounts.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(mounts));
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
-    }
-  } catch {
-    // Ignore storage errors
-  }
 }
 
 export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsChange }: Props): JSX.Element | null {
@@ -84,7 +58,7 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
   }, [baseUrl, token]);
 
   useEffect(() => {
-    const saved = getStoredMounts();
+    const saved = getJson('ag3ntum_dynamic_mounts');
     if (saved) {
       onMountsChange(saved);
     }
@@ -93,7 +67,7 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
 
   const updateMounts = useCallback((mounts: DynamicMountRequest[]) => {
     onMountsChange(mounts);
-    setStoredMounts(mounts);
+    setJson('ag3ntum_dynamic_mounts', mounts);
   }, [onMountsChange]);
 
   useEffect(() => {

@@ -23,6 +23,7 @@ services:
     build: .
     # Runs as ag3ntum_api (UID 45045) as defined in Dockerfile
     # Do NOT override with user: directive - breaks sudo inside container
+    entrypoint: ["/entrypoint-api.sh"]
     command:
       - python
       - -m
@@ -73,7 +74,7 @@ services:
   ag3ntum-web:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
-    # Runs as ag3ntum_api (UID 45045) as defined in Dockerfile
+    # Web container doesn't need shared GID — entrypoint drops to ag3ntum_api
     entrypoint: ["/entrypoint-web.sh"]
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
     working_dir: /src/web_terminal_client

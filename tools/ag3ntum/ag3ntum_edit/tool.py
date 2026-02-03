@@ -17,6 +17,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.core.path_validator import get_path_validator, PathValidationError
+from src.core.sessions import chown_to_session_user
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,8 @@ Examples:
             path.write_text(new_content, encoding="utf-8")
         except Exception as e:
             return _error(f"Failed to write file: {e}")
+
+        chown_to_session_user(path, bound_session_id)
 
         # Truncate for display
         old_display = old_string[:200] + ("..." if len(old_string) > 200 else "")

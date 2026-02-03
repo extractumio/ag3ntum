@@ -1237,6 +1237,20 @@ class Ag3ntumPathValidator:
 # Session-scoped validators (NOT singleton - each session has its own)
 _session_validators: dict[str, Ag3ntumPathValidator] = {}
 
+# Session-scoped linux UIDs for file ownership (sandbox user UID per session)
+_session_linux_uids: dict[str, int] = {}
+
+
+def set_session_linux_uid(session_id: str, linux_uid: int) -> None:
+    """Store the linux_uid (sandbox user UID) for a session."""
+    _session_linux_uids[session_id] = linux_uid
+    logger.debug(f"PATH_VALIDATOR: Set linux_uid={linux_uid} for session {session_id}")
+
+
+def get_session_linux_uid(session_id: str) -> int | None:
+    """Get the linux_uid for a session, or None if not set."""
+    return _session_linux_uids.get(session_id)
+
 
 def get_path_validator(session_id: str) -> Ag3ntumPathValidator:
     """
@@ -1386,6 +1400,9 @@ def cleanup_path_validator(session_id: str) -> None:
     if session_id in _session_validators:
         del _session_validators[session_id]
         logger.info(f"PATH_VALIDATOR: Cleaned up validator for session {session_id}")
+
+    # Also cleanup session linux_uid
+    _session_linux_uids.pop(session_id, None)
 
     # Also cleanup SandboxPathResolver
     cleanup_sandbox_path_resolver(session_id)

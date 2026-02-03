@@ -22,10 +22,35 @@ CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
+# Safely remove a file that may be owned by root (from a previous container build).
+# Uses sudo only on Linux and only when the file exists and is not owned by the current user.
+function safe_remove_file() {
+  local file="$1"
+  [[ ! -e "${file}" ]] && return 0
+
+  # Try normal rm first (covers macOS, Windows, and Linux files owned by current user)
+  if rm -f "${file}" 2>/dev/null; then
+    return 0
+  fi
+
+  # On Linux, fall back to sudo for container-owned files
+  local os_type
+  os_type="$(uname -s)"
+  if [[ "${os_type}" == "Linux" ]]; then
+    sudo rm -f "$(pwd)/${file}" 2>/dev/null || {
+      echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
+      return 0
+    }
+  else
+    echo "Warning: Cannot remove ${file}. Check file permissions."
+    return 0
+  fi
+}
+
 # Directories that container needs to WRITE to (need ownership fix on Linux)
 # Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
 # src/web_terminal_client needs write access for Vite's temp files during dev mode
-WRITABLE_DIRS=("logs" "data" "users" "src/web_terminal_client")
+WRITABLE_DIRS=("logs" "data" "users")
 
 # Directories that need to exist but should stay user-owned (for script to write, container reads)
 SCRIPT_DIRS=("data/auto-generated")
@@ -581,10 +606,17 @@ function render_ui_config() {
   HOSTNAME="$(read_config_value 'server.hostname' 'localhost')"
   PROTOCOL="$(read_config_value 'server.protocol' 'http')"
 
-  # Remove existing file first (may be owned by container user from previous build)
-  rm -f src/web_terminal_client/public/config.yaml 2>/dev/null || true
+  local target="src/web_terminal_client/public/config.yaml"
+  local target_dir
+  target_dir="$(dirname "${target}")"
 
-  cat > src/web_terminal_client/public/config.yaml <<EOF
+  # Remove existing file first (may be owned by container user from previous build)
+  safe_remove_file "${target}"
+
+  # On Linux, the parent directory may be owned by container UID (45045) from a
+  # previous build. Write to a temp file and sudo-move if not writable.
+  if [[ -w "${target_dir}" ]]; then
+    cat > "${target}" <<EOF
 server:
   port: ${WEB_PORT}
   host: "0.0.0.0"
@@ -598,6 +630,27 @@ ui:
   max_output_lines: 1000
   auto_scroll: true
 EOF
+  else
+    local tmpfile
+    tmpfile="$(mktemp)"
+    cat > "${tmpfile}" <<EOF
+server:
+  port: ${WEB_PORT}
+  host: "0.0.0.0"
+
+api:
+  # API URL derived from server.hostname and server.protocol in api.yaml
+  # Frontend will replace "localhost" with browser hostname if accessed remotely
+  base_url: "${PROTOCOL}://${HOSTNAME}:${API_PORT}"
+
+ui:
+  max_output_lines: 1000
+  auto_scroll: true
+EOF
+    sudo mv "${tmpfile}" "$(pwd)/${target}"
+    sudo chown "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${target}"
+    sudo chmod 644 "$(pwd)/${target}"
+  fi
 
   echo "  Frontend config: ${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 }
@@ -610,9 +663,12 @@ function generate_compose_override() {
   # Ensure the auto-generated directory exists (may need sudo on Linux after setup_directories)
   mkdir -p "data/auto-generated" 2>/dev/null || sudo mkdir -p "data/auto-generated" 2>/dev/null || true
 
+  # Remove existing generated files (may be owned by root from previous container build)
+  safe_remove_file "${override_file}"
+  safe_remove_file "${manifest_file}"
+
   if [[ ${#MOUNTS_RW[@]} -eq 0 && ${#MOUNTS_RO[@]} -eq 0 && ${#MOUNTS_USER_RW[@]} -eq 0 && ${#MOUNTS_USER_RO[@]} -eq 0 && ${#MOUNTS_DYNAMIC[@]} -eq 0 ]]; then
-    # No mounts specified, remove override file and create empty manifest
-    rm -f "${override_file}"
+    # No mounts specified, create empty manifest (override already removed above)
     cat > "${manifest_file}" <<EOF
 # =============================================================================
 # AUTO-GENERATED FILE - DO NOT EDIT
@@ -1072,11 +1128,16 @@ fi
 run_ui_tests() {
   echo "=== Running UI/React tests ==="
 
-  # Check if ag3ntum-web container is running
+  # Ensure ag3ntum-web container is running (test setup may have stopped it)
   if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
-    echo "Error: ag3ntum-web container is not running."
-    echo "Start it first with: ./run.sh build"
-    return 1
+    echo "Starting ag3ntum-web container..."
+    docker compose up -d ag3ntum-web
+    sleep 2
+    if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+      echo "Error: ag3ntum-web container failed to start."
+      echo "Check logs with: docker compose logs ag3ntum-web"
+      return 1
+    fi
   fi
 
   # Check if node_modules needs reinstalling (platform mismatch between host and container)
@@ -1098,8 +1159,8 @@ run_ui_tests() {
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
     docker compose exec -T ag3ntum-web sh -c '
       cd /src/web_terminal_client && \
-      rm -rf node_modules package-lock.json && \
-      npm install --no-fund --no-audit
+      rm -rf node_modules && \
+      npm install --no-fund --no-audit --no-package-lock
     '
   fi
 
@@ -1128,7 +1189,10 @@ if [[ "${ACTION}" == "test" ]]; then
   TEST_LOG_FILE="logs/latest-test-results.log"
   mkdir -p logs 2>/dev/null || true
 
-  # Check if we can write to the log file
+  # Remove stale log file that may be owned by container user from previous build
+  safe_remove_file "$TEST_LOG_FILE"
+
+  # Check if we can write to the log file (directory may be owned by container UID)
   if touch "$TEST_LOG_FILE" 2>/dev/null; then
     # Initialize log file with header
     {
@@ -1137,6 +1201,17 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "========================================"
       echo ""
     } > "$TEST_LOG_FILE"
+    CAN_LOG=1
+  elif docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+    # logs/ directory is owned by container UID (45045). Use the running container
+    # to create a world-writable log file so tee -a can append without sudo.
+    docker compose exec -T ag3ntum-api sh -c "
+      echo '========================================' > /logs/latest-test-results.log &&
+      echo 'Test Run: $(date '+%Y-%m-%d %H:%M:%S')' >> /logs/latest-test-results.log &&
+      echo '========================================' >> /logs/latest-test-results.log &&
+      echo '' >> /logs/latest-test-results.log &&
+      chmod 646 /logs/latest-test-results.log
+    "
     CAN_LOG=1
   else
     echo "Warning: Cannot write to ${TEST_LOG_FILE} (permission denied)"
@@ -1236,7 +1311,7 @@ if [[ "${ACTION}" == "test" ]]; then
         SANDBOXING_ONLY="1"
         ;;
       --subset)
-        ((i++))
+        i=$((i + 1))
         if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
           SUBSET="${ARGS_ARRAY[$i]}"
         else
@@ -1263,7 +1338,7 @@ if [[ "${ACTION}" == "test" ]]; then
         exit 1
         ;;
     esac
-    ((i++))
+    i=$((i + 1))
   done
 
   # Handle UI-only mode

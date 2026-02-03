@@ -2,7 +2,7 @@
 E2E Mount Access Tests.
 
 Comprehensive tests for mount functionality using actual agent queries.
-Uses a SINGLE test user for all tests (created once, cleaned up at end).
+Uses pre-built test users (ag3ntum_tester_a/b) created by entrypoint-test.sh.
 
 Tests cover:
 - Persistent storage (read, write, list)
@@ -14,33 +14,20 @@ Tests cover:
 - Access denial for paths outside mounts
 
 Prerequisites:
-- Container must be running (./run.sh build)
+- Container must be running with test entrypoint (./run.sh test)
 - External mounts configured in external-mounts.yaml
 
 Run these tests:
     docker exec project-ag3ntum-api-1 pytest tests/backend/test_mount_e2e.py -v --run-e2e -s
 """
-import asyncio
 import json
 import os
-import subprocess
-import sys
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator
 
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.db.database import Base
-from src.db.models import User
-from src.services.user_service import UserService
 
 # API configuration
 API_BASE_URL = "http://127.0.0.1:40080"
@@ -49,7 +36,15 @@ API_V1_URL = f"{API_BASE_URL}/api/v1"
 # Test timeout for agent queries (seconds)
 AGENT_TIMEOUT = 120
 
-# Test file content for verification
+from tests.constants import (
+    PREBUILT_USER_A_USERNAME as TEST_USER_USERNAME,
+    PREBUILT_USER_A_EMAIL as TEST_USER_EMAIL,
+    PREBUILT_USER_A_PASSWORD as TEST_USER_PASSWORD,
+    PREBUILT_USER_A_UID as TEST_USER_UID,
+)
+TEST_USER_PERSISTENT_DIR = Path(f"/users/{TEST_USER_USERNAME}/ag3ntum/persistent")
+
+# Unique marker per test run to avoid collisions
 TEST_MARKER = f"E2E_TEST_MARKER_{uuid.uuid4().hex[:8]}"
 
 
@@ -72,7 +67,7 @@ def _api_accessible() -> bool:
 
 
 # =============================================================================
-# Module-Scoped Fixtures (Single Setup for All Tests)
+# Module-Scoped Fixtures
 # =============================================================================
 
 @pytest.fixture(scope="module")
@@ -84,123 +79,64 @@ def check_environment():
         pytest.skip("API not accessible at localhost:40080")
 
 
-@pytest_asyncio.fixture(scope="module")
-async def db_engine():
-    """Connect to the real database."""
-    db_path = Path("/data/ag3ntum.db")
-    if not db_path.exists():
-        pytest.skip("Real database not found")
-
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{db_path}",
-        echo=False,
-    )
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture(scope="module")
-async def db_session_factory(db_engine):
-    """Create session factory for real database."""
-    return async_sessionmaker(
-        db_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
-
-
-@pytest_asyncio.fixture(scope="module")
-async def user_service():
-    """Get UserService instance."""
-    return UserService()
-
-
-@pytest_asyncio.fixture(scope="module")
-async def test_user(
-    user_service: UserService,
-    db_session_factory,
-    check_environment,
-) -> AsyncGenerator[dict, None]:
+@pytest.fixture(scope="module")
+def test_user(check_environment) -> dict:
     """
-    Create a SINGLE test user for ALL mount tests.
+    Return credentials for the pre-built test user.
 
-    This user is created once at module start and deleted at module end.
-    Returns dict with username, email, password, user object, and paths.
+    The user (ag3ntum_tester_a) is created by entrypoint-test.sh with:
+    - Linux account (UID 50000)
+    - Database entry with known credentials
+    - Python venv
+    - Persistent storage directory
+    - Correct group permissions (shared GID model)
+
+    No dynamic user creation — avoids the supplementary group refresh issue.
     """
-    username = f"mount_e2e_{uuid.uuid4().hex[:8]}"
-    email = f"{username}@test.example.com"
-    password = "MountTest123!"
-
-    print(f"\n{'='*60}")
-    print(f"[MODULE SETUP] Creating test user: {username}")
-    print(f"{'='*60}")
-
-    async with db_session_factory() as session:
-        user = await user_service.create_user(
-            db=session,
-            username=username,
-            email=email,
-            password=password,
-            skip_venv_install=True,
+    if not TEST_USER_PERSISTENT_DIR.exists():
+        pytest.skip(
+            f"Test user persistent dir not found: {TEST_USER_PERSISTENT_DIR}. "
+            "Run with test entrypoint (./run.sh test) to create test users."
         )
-        print(f"[SETUP] User created with UID: {user.linux_uid}")
 
-    # Create test files in persistent storage for verification
-    persistent_dir = Path(f"/users/{username}/ag3ntum/persistent")
-    test_file = persistent_dir / "_e2e_test_marker.txt"
-    test_file.write_text(f"PERSISTENT_MARKER:{TEST_MARKER}")
-    print(f"[SETUP] Created test marker file: {test_file}")
+    # Create test marker file for this run
+    marker_file = TEST_USER_PERSISTENT_DIR / "_e2e_test_marker.txt"
+    marker_file.write_text(f"PERSISTENT_MARKER:{TEST_MARKER}")
 
     yield {
-        "username": username,
-        "email": email,
-        "password": password,
-        "user": user,
-        "persistent_dir": persistent_dir,
+        "username": TEST_USER_USERNAME,
+        "email": TEST_USER_EMAIL,
+        "password": TEST_USER_PASSWORD,
+        "uid": TEST_USER_UID,
+        "persistent_dir": TEST_USER_PERSISTENT_DIR,
         "test_marker": TEST_MARKER,
     }
 
-    # Cleanup
-    print(f"\n{'='*60}")
-    print(f"[MODULE TEARDOWN] Cleaning up test user: {username}")
-    print(f"{'='*60}")
-
-    # Remove test files
-    if test_file.exists():
-        test_file.unlink()
-
-    # Delete user
-    async with db_session_factory() as session:
-        try:
-            # Get fresh user from DB
-            from sqlalchemy import select
-            result = await session.execute(
-                select(User).where(User.username == username)
-            )
-            db_user = result.scalar_one_or_none()
-            if db_user:
-                await user_service.delete_user(db=session, user=db_user)
-                print(f"[TEARDOWN] User deleted successfully")
-        except Exception as e:
-            print(f"[TEARDOWN] Warning: {e}")
+    # Cleanup test artifacts (marker files, written test files)
+    for pattern in ["_e2e_test_marker*", "_write_test_*", "_python_test_*"]:
+        for f in TEST_USER_PERSISTENT_DIR.glob(pattern):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 @pytest_asyncio.fixture(scope="module")
 async def auth_token(test_user: dict) -> str:
-    """Get JWT token for test user (created once per module)."""
-    email = test_user["email"]
-    password = test_user["password"]
-
+    """Get JWT token for pre-built test user."""
     async with httpx.AsyncClient(base_url=API_V1_URL, timeout=30.0) as client:
         response = await client.post(
             "/auth/login",
-            json={"email": email, "password": password},
+            json={"email": test_user["email"], "password": test_user["password"]},
         )
         if response.status_code != 200:
-            pytest.fail(f"Failed to login: {response.status_code} - {response.text}")
-
+            pytest.fail(
+                f"Failed to login as {test_user['email']}: "
+                f"{response.status_code} - {response.text}. "
+                "Ensure test users have DB entries (entrypoint-test.sh step 3f)."
+            )
         token = response.json()["access_token"]
-        print(f"[SETUP] Got auth token for {email}")
+        print(f"[SETUP] Got auth token for {test_user['email']}")
         return token
 
 

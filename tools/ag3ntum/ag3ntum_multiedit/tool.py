@@ -17,6 +17,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.core.path_validator import get_path_validator, PathValidationError
+from src.core.sessions import chown_to_session_user
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ Example:
 
             try:
                 path.write_text(new_content, encoding="utf-8")
+                chown_to_session_user(path, bound_session_id)
                 results.append(f"✓ `{file_path}`: 1 replacement")
             except Exception as e:
                 # This shouldn't happen after validation, but handle gracefully

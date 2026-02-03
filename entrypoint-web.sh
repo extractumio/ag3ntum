@@ -3,19 +3,15 @@ set -e
 
 cd /src/web_terminal_client
 
-# Ensure node_modules directory exists and is writable
+# Ensure node_modules directory exists and is writable by ag3ntum_api
 # Named Docker volumes are created with root ownership by default
-# Fix ownership on first use so npm can write to it
 if [ ! -d "node_modules" ]; then
     echo "Creating node_modules directory..."
     mkdir -p node_modules
 fi
 
-if [ ! -w "node_modules" ]; then
-    echo "Fixing node_modules permissions (first run)..."
-    # Use absolute path to match sudoers rule: /src/web_terminal_client/*
-    sudo chown -R "$(id -u):$(id -g)" /src/web_terminal_client/node_modules
-fi
+# Fix ownership (running as root, target user is ag3ntum_api 45045)
+chown -R 45045:45045 /src/web_terminal_client/node_modules
 
 # Check if node_modules needs (re)installation
 # Reinstall if: missing, empty, or missing platform-specific rollup binary
@@ -35,7 +31,7 @@ else
     else
         ROLLUP_PLATFORM="linux-x64-gnu"
     fi
-    
+
     if [ ! -d "node_modules/@rollup/rollup-${ROLLUP_PLATFORM}" ]; then
         NEEDS_INSTALL=1
         echo "Platform-specific rollup binary missing (@rollup/rollup-${ROLLUP_PLATFORM})"
@@ -46,10 +42,10 @@ if [ "$NEEDS_INSTALL" = "1" ]; then
     echo "Installing frontend dependencies..."
     # Clear node_modules contents (can't remove the directory itself if it's a volume mount)
     rm -rf node_modules/* node_modules/.[!.]* 2>/dev/null || true
-    rm -f package-lock.json
-    npm install --no-fund --no-audit
+    # Run npm as ag3ntum_api (--no-package-lock avoids writing to the bind-mounted source tree)
+    setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- npm install --no-fund --no-audit --no-package-lock
     echo "Frontend dependencies installed."
 fi
 
-exec "$@"
-
+# Drop to ag3ntum_api for the main process
+exec setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- "$@"

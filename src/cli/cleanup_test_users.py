@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 USERS_DIR = Path("/users")
 
 # Test user patterns to clean up
-TEST_PATTERNS = ["testuser_", "testuser2_", "e2e_user_"]
+TEST_PATTERNS = ["testuser_", "testuser2_", "e2e_user_", "mount_e2e_", "realtest_"]
 
 
 def cleanup_test_user_directories(dry_run: bool = False) -> int:
@@ -123,6 +123,54 @@ def cleanup_test_linux_users(dry_run: bool = False) -> int:
     return removed
 
 
+def cleanup_test_db_entries(dry_run: bool = False) -> int:
+    """
+    Clean up test user entries from the database.
+
+    Removes DB rows for users matching TEST_PATTERNS.
+
+    Args:
+        dry_run: If True, only show what would be deleted
+
+    Returns:
+        Number of entries removed/would be removed
+    """
+    import sqlite3
+
+    db_path = Path("/data/ag3ntum.db")
+    if not db_path.exists():
+        logger.debug("Database not found at /data/ag3ntum.db")
+        return 0
+
+    removed = 0
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            users = conn.execute("SELECT username FROM users").fetchall()
+
+            for (username,) in users:
+                for pattern in TEST_PATTERNS:
+                    if username.startswith(pattern):
+                        if dry_run:
+                            logger.info(f"Would delete DB entry: {username}")
+                            removed += 1
+                        else:
+                            try:
+                                conn.execute("DELETE FROM users WHERE username = ?", (username,))
+                                logger.info(f"Deleted DB entry: {username}")
+                                removed += 1
+                            except Exception as e:
+                                logger.error(f"Failed to delete DB entry {username}: {e}")
+                        break
+
+            if not dry_run:
+                conn.commit()
+
+    except Exception as e:
+        logger.error(f"Failed to clean up database entries: {e}")
+
+    return removed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Clean up test users from Ag3ntum",
@@ -160,13 +208,19 @@ Examples:
     user_count = cleanup_test_linux_users(dry_run=args.dry_run)
 
     logger.info("")
+    logger.info("Cleaning up test database entries...")
+    db_count = cleanup_test_db_entries(dry_run=args.dry_run)
+
+    logger.info("")
     logger.info("=== Summary ===")
     if args.dry_run:
         logger.info(f"Would remove {dir_count} directories")
         logger.info(f"Would delete {user_count} Linux users")
+        logger.info(f"Would delete {db_count} database entries")
     else:
         logger.info(f"Removed {dir_count} directories")
         logger.info(f"Deleted {user_count} Linux users")
+        logger.info(f"Deleted {db_count} database entries")
 
     return 0
 

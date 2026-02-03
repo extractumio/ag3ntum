@@ -13,6 +13,14 @@ Security:
 - Verifies path is writable before attempting write
 - Verifies file was actually written after operation
 
+File Ownership:
+- After writing, files are chown'd to the session's sandbox user (UID 50000-60000)
+- Permissions set to 0o660 (owner rw + group rw, no world access)
+- ag3ntum_api is in the sandbox user's group (shared GID model), so both
+  the API process and Bash sandbox can access files
+- Parent directories created by mkdir are also chown'd
+- Post-execution, ensure_secure_session_files() re-applies 660 as defense-in-depth
+
 Sensitive Data:
 - Scans content for API keys, tokens, passwords before writing
 - Detected secrets are redacted with same-length placeholders to preserve formatting
@@ -26,6 +34,7 @@ from typing import Any, Optional
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from src.core.path_validator import get_path_validator, PathValidationError, get_resolver_for_session
+from src.core.sessions import chown_to_session_user
 from src.security import scan_and_redact, is_scanner_enabled
 
 logger = logging.getLogger(__name__)
@@ -123,6 +132,28 @@ def _verify_file_written(path: Path, expected_content: str) -> tuple[bool, str]:
     # (not implemented to avoid performance overhead for large files)
 
     return True, ""
+
+
+def _chown_new_parents(path: Path, session_id: str) -> None:
+    """
+    Chown parent directories created by mkdir that are still owned by the API user.
+
+    When Write tool creates parent directories (path.parent.mkdir), they are
+    owned by the API process (UID 45045). This walks up the tree and chowns
+    any directories still owned by the API user to the session's sandbox user.
+    """
+    API_UID = 45045
+    current = path.parent
+    while current != current.parent:
+        try:
+            st = current.stat()
+            if st.st_uid == API_UID:
+                chown_to_session_user(current, session_id)
+            else:
+                break  # Already owned correctly, stop walking up
+        except OSError:
+            break
+        current = current.parent
 
 
 async def _write_impl(
@@ -235,6 +266,15 @@ async def _write_impl(
         return _error("Permission denied: cannot write to file")
     except OSError as e:
         return _error(f"Failed to write file: {e}")
+
+    # 660 = owner rw + group rw, no world access (shared GID model)
+    try:
+        os.chmod(path, 0o660)
+    except OSError:
+        pass
+
+    chown_to_session_user(path, session_id)
+    _chown_new_parents(path, session_id)
 
     # Verify file was actually written
     verified, verify_error = _verify_file_written(path, content_to_write)

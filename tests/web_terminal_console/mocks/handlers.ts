@@ -16,6 +16,26 @@ const BASE_URL = 'http://localhost:40080';
 
 export const handlers = [
   // =============================================================================
+  // Static Assets (served by Vite from public/)
+  // =============================================================================
+
+  http.get('/config.yaml', () => {
+    const yaml = [
+      'server:',
+      '  port: 50080',
+      '  host: "0.0.0.0"',
+      'api:',
+      `  base_url: "${BASE_URL}"`,
+      'ui:',
+      '  max_output_lines: 1000',
+      '  auto_scroll: true',
+    ].join('\n');
+    return new HttpResponse(yaml, {
+      headers: { 'Content-Type': 'text/yaml' },
+    });
+  }),
+
+  // =============================================================================
   // Authentication Endpoints
   // =============================================================================
 

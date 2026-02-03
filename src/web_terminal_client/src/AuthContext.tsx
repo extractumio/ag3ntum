@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { login as apiLogin, logout as apiLogout, getCurrentUser, invalidateAllCaches } from './api';
+import { getString, setString, remove } from './storage';
 import { loadConfig } from './config';
 import type { User } from './types';
 
@@ -28,7 +29,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setApiBaseUrl(config.api.base_url);
       
       // Then check for stored token
-      const storedToken = localStorage.getItem('auth_token');
+      const storedToken = getString('auth_token');
       if (storedToken) {
         verifyToken(storedToken, config.api.base_url);
       } else {
@@ -45,7 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(user);
       setToken(token);
     } catch (err) {
-      localStorage.removeItem('auth_token');
+      remove('auth_token');
       setError('Session expired. Please login again.');
     } finally {
       setIsLoading(false);
@@ -60,7 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const response = await apiLogin(apiBaseUrl, email, password);
 
       setToken(response.access_token);
-      localStorage.setItem('auth_token', response.access_token);
+      setString('auth_token', response.access_token);
 
       const user = await getCurrentUser(apiBaseUrl, response.access_token);
       setUser(user);
@@ -83,7 +84,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       invalidateAllCaches();
       setUser(null);
       setToken(null);
-      localStorage.removeItem('auth_token');
+      remove('auth_token');
     }
   };
 

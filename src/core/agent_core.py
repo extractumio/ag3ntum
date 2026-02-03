@@ -77,6 +77,7 @@ from tools.ag3ntum import (
 from .path_validator import (
     configure_path_validator,
     cleanup_path_validator,
+    set_session_linux_uid,
 )
 
 logger = logging.getLogger(__name__)
@@ -894,6 +895,10 @@ class ClaudeAgent:
                 f"user_mounts={len(user_mounts_ro_paths)} RO/{len(user_mounts_rw_paths)} RW, "
                 f"original_paths={len(original_path_mounts_ro)} RO/{len(original_path_mounts_rw)} RW"
             )
+            # Register sandbox UID so file tools can chown files to the session user
+            if self._linux_uid is not None:
+                set_session_linux_uid(session_context.session_id, self._linux_uid)
+
         except Exception as e:
             logger.error(f"Failed to configure PathValidator: {e}")
             raise AgentError(f"PathValidator configuration failed: {e}")
