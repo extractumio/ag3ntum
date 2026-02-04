@@ -35,6 +35,17 @@ async function apiRequest<T>(
 
   if (!response.ok) {
     const text = await response.text();
+    // Parse JSON error responses (FastAPI returns {"detail": "..."})
+    if (text) {
+      try {
+        const json = JSON.parse(text);
+        if (typeof json.detail === 'string') {
+          throw new Error(json.detail);
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message !== text) throw e;
+      }
+    }
     throw new Error(text || `Request failed: ${response.status}`);
   }
 
@@ -100,7 +111,7 @@ export async function getSession(
 export interface DynamicMountRequest {
   base: string;
   subpath?: string;
-  alias: string;
+  alias?: string;
   mode?: 'ro' | 'rw';
 }
 
@@ -109,12 +120,40 @@ export interface DynamicBaseInfo {
   description: string;
   max_mode: string;
   requires_subpath: boolean;
+  host_path: string;
 }
 
 export interface AvailableDynamicMountsResponse {
   enabled: boolean;
   bases: DynamicBaseInfo[];
   max_mounts_per_session: number;
+}
+
+// Session mount metadata (for File Explorer display)
+export interface MountEntry {
+  name: string;
+  path: string;
+  sandbox_path: string;
+  mode: 'ro' | 'rw';
+  mount_type: string;
+  host_path?: string;
+}
+
+export interface SessionMountsResponse {
+  mounts: MountEntry[];
+}
+
+export async function getSessionMounts(
+  baseUrl: string,
+  token: string,
+  sessionId: string
+): Promise<SessionMountsResponse> {
+  return apiRequest<SessionMountsResponse>(
+    baseUrl,
+    `/api/v1/files/${sessionId}/mounts`,
+    { method: 'GET' },
+    token
+  );
 }
 
 export async function getAvailableDynamicMounts(

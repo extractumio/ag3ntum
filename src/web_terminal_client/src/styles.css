@@ -3372,6 +3372,23 @@ resume-context {
   cursor: not-allowed;
 }
 
+.mount-form-alias-toggle {
+  background: none;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+  padding: 4px 8px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.mount-form-alias-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
+}
+
 /* Hint and Limit Text */
 .mount-popup-hint,
 .mount-popup-limit {
@@ -5164,6 +5181,42 @@ resume-context {
 
 .file-tree-row.file-readonly:hover {
   opacity: 0.85;
+}
+
+/* Mount directory colors — RW mounts are yellow, RO mounts are yellow-grey with 30% transparency */
+.file-tree-mount-rw .file-tree-name {
+  color: var(--color-warning);
+}
+
+.file-tree-mount-ro {
+  opacity: 0.7;
+}
+.file-tree-mount-ro .file-tree-name {
+  color: var(--color-warning);
+}
+.file-tree-mount-ro:hover {
+  opacity: 0.85;
+}
+
+/* Mount type badge */
+.mount-badge {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 2px;
+  margin-left: 4px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.mount-badge-rw {
+  background: var(--color-warning);
+  color: var(--color-bg);
+}
+.mount-badge-ro {
+  background: var(--color-text-muted);
+  color: var(--color-bg);
+  opacity: 0.7;
 }
 
 /* File Delete Modal */

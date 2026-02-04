@@ -249,6 +249,155 @@ def get_global_mounts_for_path_validator() -> dict[str, dict[str, Path]]:
     return result
 
 
+def get_all_mounts_with_host_paths(username: str | None = None) -> dict[str, list[dict]]:
+    """
+    Get all external mounts with their host paths for original-path mount support.
+
+    This enables agents to use host paths (e.g., /var/log) directly, not just
+    internal workspace paths (e.g., ./external/ro/global_var_log).
+
+    Args:
+        username: Username for resolving user-specific mounts ({username} placeholder)
+
+    Returns:
+        Dict with keys 'ro' and 'rw', each containing a list of mount info dicts:
+        {
+            'ro': [
+                {'name': 'global_var_log', 'host_path': '/var/log', 'container_path': '/mounts/global_var_log'}
+            ],
+            'rw': [...]
+        }
+    """
+    result: dict[str, list[dict]] = {"ro": [], "rw": []}
+
+    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    if not manifest_path.exists():
+        logger.debug(f"No mounts manifest at {manifest_path}")
+        return result
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = yaml.safe_load(f) or {}
+
+        mounts_data = manifest.get("mounts", {})
+
+        # Process global mounts (ro, rw)
+        for mode in ("ro", "rw"):
+            for mount in mounts_data.get(mode, []):
+                if not isinstance(mount, dict) or not mount.get("name") or not mount.get("host_path"):
+                    continue
+                name = mount["name"]
+                host_path = mount["host_path"]
+                container_path = mount.get("container_path", f"/mounts/{name}")
+                # Verify container path exists
+                if Path(container_path).exists():
+                    result[mode].append({
+                        "name": name,
+                        "host_path": host_path,
+                        "container_path": container_path,
+                    })
+
+        # Process user-specific mounts (user-ro, user-rw) if username provided
+        if username:
+            for mode, target_mode in (("user-ro", "ro"), ("user-rw", "rw")):
+                for mount in mounts_data.get(mode, []):
+                    if not isinstance(mount, dict) or not mount.get("name") or not mount.get("host_path"):
+                        continue
+                    name = mount["name"]
+                    # Resolve {username} placeholder in host_path
+                    host_path = mount["host_path"].replace("{username}", username)
+                    container_path = mount.get("container_path", f"/mounts/{name}")
+                    # Verify container path exists
+                    if Path(container_path).exists():
+                        result[target_mode].append({
+                            "name": name,
+                            "host_path": host_path,
+                            "container_path": container_path,
+                        })
+
+        ro_count = len(result["ro"])
+        rw_count = len(result["rw"])
+        if ro_count > 0 or rw_count > 0:
+            logger.debug(
+                f"Loaded mounts with host_paths for original-path support: {ro_count} RO, {rw_count} RW"
+            )
+
+    except Exception as e:
+        logger.warning(f"Failed to load mounts with host_paths from manifest: {e}")
+
+    return result
+
+
+def get_path_display_mapping(username: str | None = None) -> dict[str, str]:
+    """
+    Build a mapping of internal mount paths to host paths for display transformation.
+
+    This enables transforming paths in agent output from internal format
+    (e.g., ./external/ro/global_var_log/syslog) to user-friendly host paths
+    (e.g., /var/log/syslog).
+
+    Args:
+        username: Username for resolving user-specific mounts ({username} placeholder)
+
+    Returns:
+        Dict mapping internal path prefix to host path:
+        {
+            "external/ro/global_var_log": "/var/log",
+            "external/user-ro/all_documents": "/Users/greg/Documents",
+            ...
+        }
+    """
+    result: dict[str, str] = {}
+
+    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    if not manifest_path.exists():
+        return result
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = yaml.safe_load(f) or {}
+
+        mounts_data = manifest.get("mounts", {})
+
+        # Map section names to internal path prefixes
+        # ro -> external/ro, rw -> external/rw, user-ro -> external/user-ro, etc.
+        section_to_prefix = {
+            "ro": "external/ro",
+            "rw": "external/rw",
+            "user-ro": "external/user-ro",
+            "user-rw": "external/user-rw",
+        }
+
+        for section, prefix in section_to_prefix.items():
+            for mount in mounts_data.get(section, []):
+                if not isinstance(mount, dict) or not mount.get("name") or not mount.get("host_path"):
+                    continue
+                name = mount["name"]
+                host_path = mount["host_path"]
+
+                # Resolve {username} placeholder if username provided
+                if "{username}" in host_path:
+                    if username:
+                        host_path = host_path.replace("{username}", username)
+                    else:
+                        # Skip user-specific mounts if no username
+                        continue
+
+                # Verify the mount exists (container path)
+                container_path = mount.get("container_path", f"/mounts/{name}")
+                if Path(container_path).exists():
+                    internal_path = f"{prefix}/{name}"
+                    result[internal_path] = host_path
+
+        if result:
+            logger.debug(f"Built path display mapping with {len(result)} entries")
+
+    except Exception as e:
+        logger.warning(f"Failed to build path display mapping: {e}")
+
+    return result
+
+
 def invalidate_cache() -> None:
     """Force reload of configuration on next access."""
     global _cached_config, _config_mtime

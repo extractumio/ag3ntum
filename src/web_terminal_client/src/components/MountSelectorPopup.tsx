@@ -5,6 +5,8 @@
  * Features:
  * - Prominent folder icon trigger button
  * - Popup with mount selection form
+ * - Shows original host paths (e.g., /var/log) for clarity
+ * - Auto-generates alias from host path when not manually specified
  * - One-line status showing active mounts
  * - Persistent storage via localStorage for follow-up sessions
  */
@@ -23,10 +25,29 @@ interface Props {
   onMountsChange: (mounts: DynamicMountRequest[]) => void;
 }
 
+/** Convert a host path (+ optional subpath) to a safe alias string. */
+export function hostPathToAlias(hostPath: string, subpath?: string): string {
+  let raw = hostPath;
+  if (subpath) {
+    raw = raw + '/' + subpath;
+  }
+  return raw.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64);
+}
+
+/** Build display path: host_path + subpath. */
+function displayPath(base: DynamicBaseInfo, subpath?: string): string {
+  let p = base.host_path;
+  if (subpath) {
+    p = p.replace(/\/+$/, '') + '/' + subpath;
+  }
+  return p;
+}
+
 export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsChange }: Props): JSX.Element | null {
   const [availableBases, setAvailableBases] = useState<DynamicBaseInfo[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [newMount, setNewMount] = useState<Partial<DynamicMountRequest>>({});
+  const [showAlias, setShowAlias] = useState(false);
   const [loading, setLoading] = useState(true);
   const [enabled, setEnabled] = useState(false);
   const [maxMounts, setMaxMounts] = useState(10);
@@ -95,14 +116,36 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
     };
   }, [isOpen]);
 
+  // Auto-generate alias when base or subpath changes
+  const handleBaseChange = (baseName: string) => {
+    const baseInfo = availableBases.find(b => b.name === baseName);
+    if (baseInfo) {
+      const autoAlias = hostPathToAlias(baseInfo.host_path, newMount.subpath);
+      setNewMount({ ...newMount, base: baseName, alias: autoAlias });
+    } else {
+      setNewMount({ ...newMount, base: baseName, alias: undefined });
+    }
+    setShowAlias(false);
+  };
+
+  const handleSubpathChange = (subpath: string) => {
+    const baseInfo = availableBases.find(b => b.name === newMount.base);
+    const autoAlias = baseInfo ? hostPathToAlias(baseInfo.host_path, subpath || undefined) : newMount.alias;
+    setNewMount({ ...newMount, subpath, alias: autoAlias });
+  };
+
   const handleAddMount = () => {
-    if (!newMount.base || !newMount.alias) {
-      setError('Base and alias are required');
+    if (!newMount.base) {
+      setError('Select a mount base');
       return;
     }
 
-    if (selectedMounts.some(m => m.alias === newMount.alias)) {
-      setError('Alias already in use');
+    // Use auto-generated alias if none set
+    const baseInfo = availableBases.find(b => b.name === newMount.base);
+    const alias = newMount.alias || (baseInfo ? hostPathToAlias(baseInfo.host_path, newMount.subpath) : newMount.base);
+
+    if (selectedMounts.some(m => m.alias === alias)) {
+      setError('Alias "' + alias + '" already in use');
       return;
     }
 
@@ -111,19 +154,19 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
       return;
     }
 
-    const baseInfo = availableBases.find(b => b.name === newMount.base);
     const requestedMode = newMount.mode || 'ro';
     const effectiveMode = baseInfo && baseInfo.max_mode === 'ro' ? 'ro' : requestedMode;
 
     const mount: DynamicMountRequest = {
       base: newMount.base,
       subpath: newMount.subpath || undefined,
-      alias: newMount.alias,
+      alias,
       mode: effectiveMode,
     };
 
     updateMounts([...selectedMounts, mount]);
     setNewMount({});
+    setShowAlias(false);
     setError(null);
   };
 
@@ -145,12 +188,22 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
     return null;
   }
 
+  /** Resolve the display path for a saved mount request. */
+  const getMountDisplayPath = (mount: DynamicMountRequest): string => {
+    const baseInfo = availableBases.find(b => b.name === mount.base);
+    if (baseInfo) {
+      return displayPath(baseInfo, mount.subpath);
+    }
+    // Fallback: base name + subpath
+    return mount.base + (mount.subpath ? '/' + mount.subpath : '');
+  };
+
   const getMountStatusText = (): string => {
     if (selectedMounts.length === 0) {
       return 'Mount';
     }
     if (selectedMounts.length === 1) {
-      return selectedMounts[0].alias;
+      return getMountDisplayPath(selectedMounts[0]);
     }
     return selectedMounts.length + ' mounts';
   };
@@ -161,7 +214,7 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
         type="button"
         className={'mount-trigger-btn ' + (selectedMounts.length > 0 ? 'has-mounts' : '')}
         onClick={() => setIsOpen(!isOpen)}
-        title={selectedMounts.length > 0 ? 'Mounts: ' + selectedMounts.map(m => m.alias).join(', ') : 'Configure mounts'}
+        title={selectedMounts.length > 0 ? 'Mounts: ' + selectedMounts.map(m => getMountDisplayPath(m)).join(', ') : 'Configure mounts'}
       >
         <span className="mount-trigger-icon">+</span>
         <span className="mount-trigger-text">[{getMountStatusText()}]</span>
@@ -200,15 +253,20 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
                 <div key={mount.alias} className="mount-popup-item">
                   <span className="mount-item-icon">{mount.mode === 'rw' ? 'R/W' : 'R/O'}</span>
                   <div className="mount-item-info">
-                    <span className="mount-item-alias">{mount.alias}</span>
-                    <span className="mount-item-path">
-                      {mount.base}{mount.subpath ? '/' + mount.subpath : ''}
-                    </span>
+                    <span className="mount-item-alias">{getMountDisplayPath(mount)}</span>
+                    {mount.alias !== hostPathToAlias(
+                      availableBases.find(b => b.name === mount.base)?.host_path || mount.base,
+                      mount.subpath
+                    ) && (
+                      <span className="mount-item-path">
+                        alias: {mount.alias}
+                      </span>
+                    )}
                   </div>
                   <button
                     type="button"
                     className="mount-item-remove"
-                    onClick={() => handleRemoveMount(mount.alias)}
+                    onClick={() => handleRemoveMount(mount.alias!)}
                     title="Remove mount"
                   >
                     x
@@ -223,13 +281,13 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
               <div className="mount-form-row">
                 <select
                   value={newMount.base || ''}
-                  onChange={(e) => setNewMount({ ...newMount, base: e.target.value })}
+                  onChange={(e) => handleBaseChange(e.target.value)}
                   className="mount-form-select"
                 >
                   <option value="">Select mount base...</option>
                   {availableBases.map((base) => (
                     <option key={base.name} value={base.name}>
-                      {base.name} ({base.max_mode})
+                      {base.host_path} ({base.max_mode})
                     </option>
                   ))}
                 </select>
@@ -240,12 +298,9 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
                   <div className="mount-form-row mount-form-row-split">
                     <input
                       type="text"
-                      placeholder="Alias (required)"
-                      value={newMount.alias || ''}
-                      onChange={(e) => setNewMount({
-                        ...newMount,
-                        alias: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '')
-                      })}
+                      placeholder="Subpath (optional)"
+                      value={newMount.subpath || ''}
+                      onChange={(e) => handleSubpathChange(e.target.value)}
                       className="mount-form-input"
                     />
                     <select
@@ -259,22 +314,37 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
                     </select>
                   </div>
 
-                  <div className="mount-form-row">
-                    <input
-                      type="text"
-                      placeholder="Subpath (optional)"
-                      value={newMount.subpath || ''}
-                      onChange={(e) => setNewMount({ ...newMount, subpath: e.target.value })}
-                      className="mount-form-input"
-                    />
-                  </div>
+                  {showAlias ? (
+                    <div className="mount-form-row">
+                      <input
+                        type="text"
+                        placeholder="Alias (auto-generated)"
+                        value={newMount.alias || ''}
+                        onChange={(e) => setNewMount({
+                          ...newMount,
+                          alias: e.target.value.replace(/[^a-zA-Z0-9_-]/g, '')
+                        })}
+                        className="mount-form-input"
+                      />
+                    </div>
+                  ) : (
+                    <div className="mount-form-row">
+                      <button
+                        type="button"
+                        className="mount-form-alias-toggle"
+                        onClick={() => setShowAlias(true)}
+                      >
+                        Alias: {newMount.alias || '(auto)'} — click to edit
+                      </button>
+                    </div>
+                  )}
 
                   <div className="mount-form-actions">
                     <button
                       type="button"
                       className="mount-form-add"
                       onClick={handleAddMount}
-                      disabled={!newMount.base || !newMount.alias}
+                      disabled={!newMount.base}
                     >
                       + Add Mount
                     </button>
@@ -284,7 +354,7 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
 
               {!newMount.base && selectedMounts.length === 0 && (
                 <p className="mount-popup-hint">
-                  Select a base folder to mount into the agent workspace.
+                  Select a host folder to mount into the agent workspace.
                 </p>
               )}
             </div>

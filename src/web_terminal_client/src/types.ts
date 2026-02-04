@@ -153,7 +153,7 @@ export interface FileInfo {
   is_viewable: boolean;
   is_readonly: boolean;  // True if file/folder is in read-only area
   is_external: boolean;  // True if file is in external mount
-  mount_type: 'ro' | 'rw' | 'persistent' | 'user-ro' | 'user-rw' | null;  // Type of external mount
+  mount_type: 'ro' | 'rw' | 'persistent' | 'user-ro' | 'user-rw' | 'dynamic' | null;
   children?: FileInfo[] | null;
 }
 

@@ -146,6 +146,9 @@ export function createMockFileInfo(overrides: Partial<FileInfo> = {}): FileInfo 
     mime_type: 'text/plain',
     is_hidden: false,
     is_viewable: true,
+    is_readonly: false,
+    is_external: false,
+    mount_type: null,
     children: null,
     ...overrides,
   };

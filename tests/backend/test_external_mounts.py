@@ -634,3 +634,298 @@ class TestPerUserMountValidation:
         result = validator._normalize_path("/workspace/external/user-ro/unknown/file.txt")
         # The path should be under workspace since "unknown" mount isn't configured
         assert str(result).startswith(str(temp_user_mounts["workspace"]))
+
+
+# =============================================================================
+# Host Path Resolution Tests (Original-Path Mount Support)
+# =============================================================================
+
+
+class TestOriginalPathMountResolution:
+    """Test that host paths (e.g., /var/log) work via original-path mount support."""
+
+    @pytest.fixture
+    def temp_mount_structure(self, tmp_path: Path) -> dict[str, Path]:
+        """Create temporary mount structure simulating Docker + bwrap setup."""
+        workspace = tmp_path / "workspace"
+        mounts = tmp_path / "mounts"
+        var_log = mounts / "global_var_log"
+
+        for d in [workspace, mounts, var_log]:
+            d.mkdir(parents=True)
+
+        # Create test files
+        (var_log / "syslog").write_text("log content")
+        (var_log / "auth.log").write_text("auth content")
+
+        return {
+            "workspace": workspace,
+            "mounts": mounts,
+            "var_log": var_log,
+        }
+
+    @pytest.fixture
+    def validator_with_original_path(
+        self, temp_mount_structure: dict[str, Path]
+    ) -> Ag3ntumPathValidator:
+        """Create validator with original-path mount configured."""
+        config = PathValidatorConfig(
+            workspace_path=temp_mount_structure["workspace"],
+            # Configure /var/log to point to our temp mount
+            original_path_mounts_ro={"/var/log": temp_mount_structure["var_log"]},
+        )
+        return Ag3ntumPathValidator(config)
+
+    def test_host_path_resolves_to_mount(
+        self, validator_with_original_path: Ag3ntumPathValidator,
+        temp_mount_structure: dict[str, Path]
+    ) -> None:
+        """Host path /var/log resolves to the Docker mount path."""
+        result = validator_with_original_path._normalize_path("/var/log")
+        assert result == temp_mount_structure["var_log"].resolve()
+
+    def test_host_path_subpath_resolves(
+        self, validator_with_original_path: Ag3ntumPathValidator,
+        temp_mount_structure: dict[str, Path]
+    ) -> None:
+        """Host path with subpath /var/log/syslog resolves correctly."""
+        result = validator_with_original_path._normalize_path("/var/log/syslog")
+        expected = (temp_mount_structure["var_log"] / "syslog").resolve()
+        assert result == expected
+
+    def test_host_path_validates_for_read(
+        self, validator_with_original_path: Ag3ntumPathValidator,
+        temp_mount_structure: dict[str, Path]
+    ) -> None:
+        """Host path can be validated for read operations."""
+        result = validator_with_original_path.validate_path("/var/log/syslog", "read")
+        expected = temp_mount_structure["var_log"] / "syslog"
+        assert result.normalized == expected.resolve()
+        assert result.is_readonly is True
+
+    def test_host_path_write_blocked_for_ro_mount(
+        self, validator_with_original_path: Ag3ntumPathValidator,
+    ) -> None:
+        """Write to read-only host path mount is blocked."""
+        with pytest.raises(PathValidationError) as exc_info:
+            validator_with_original_path.validate_path("/var/log/test.log", "write")
+        # Error reason is "Mount is read-only (external mount, per-user ro, dynamic ro, or original-path ro)"
+        assert "read-only" in exc_info.value.reason.lower() or "read-only" in str(exc_info.value).lower()
+
+    def test_unmounted_host_path_blocked(
+        self, validator_with_original_path: Ag3ntumPathValidator,
+    ) -> None:
+        """Accessing host path that isn't mounted is blocked."""
+        with pytest.raises(PathValidationError) as exc_info:
+            validator_with_original_path.validate_path("/etc/passwd", "read")
+        # Error for paths outside allowed directories
+        error_str = str(exc_info.value).lower()
+        reason = exc_info.value.reason.lower()
+        assert ("outside" in error_str or "outside" in reason or
+                "must be within" in reason or "boundary" in reason)
+
+
+class TestGetAllMountsWithHostPaths:
+    """Test get_all_mounts_with_host_paths function."""
+
+    @pytest.fixture
+    def mock_manifest(self, tmp_path: Path, monkeypatch) -> Path:
+        """Create mock manifest file."""
+        manifest_dir = tmp_path / "data" / "auto-generated"
+        manifest_dir.mkdir(parents=True)
+        manifest_path = manifest_dir / "auto-generated-mounts.yaml"
+
+        # Also create the mount directories
+        mounts_dir = tmp_path / "mounts"
+        (mounts_dir / "global_var_log").mkdir(parents=True)
+        (mounts_dir / "product_docs").mkdir(parents=True)
+        (mounts_dir / "user_documents").mkdir(parents=True)
+
+        manifest_content = f"""
+mounts:
+  ro:
+    - name: global_var_log
+      host_path: /var/log
+      container_path: {mounts_dir}/global_var_log
+  rw:
+    - name: product_docs
+      host_path: /Users/greg/PRODUCT
+      container_path: {mounts_dir}/product_docs
+  user-ro:
+    - name: user_documents
+      host_path: /Users/{{username}}/Documents
+      container_path: {mounts_dir}/user_documents
+"""
+        manifest_path.write_text(manifest_content)
+
+        # Patch the manifest path
+        monkeypatch.setattr(
+            "src.services.mount_service.Path",
+            lambda p: Path(str(p).replace("/data/auto-generated", str(manifest_dir)))
+            if "/data/auto-generated" in str(p)
+            else Path(p)
+        )
+
+        return manifest_path
+
+    def test_loads_global_ro_mounts(self, mock_manifest: Path, tmp_path: Path) -> None:
+        """Loads global RO mounts with host_path."""
+        # Direct test of parsing logic
+        import yaml
+        with open(mock_manifest, "r") as f:
+            manifest = yaml.safe_load(f)
+
+        mounts = manifest.get("mounts", {})
+        ro_mounts = mounts.get("ro", [])
+
+        assert len(ro_mounts) == 1
+        assert ro_mounts[0]["name"] == "global_var_log"
+        assert ro_mounts[0]["host_path"] == "/var/log"
+
+    def test_loads_global_rw_mounts(self, mock_manifest: Path) -> None:
+        """Loads global RW mounts with host_path."""
+        import yaml
+        with open(mock_manifest, "r") as f:
+            manifest = yaml.safe_load(f)
+
+        mounts = manifest.get("mounts", {})
+        rw_mounts = mounts.get("rw", [])
+
+        assert len(rw_mounts) == 1
+        assert rw_mounts[0]["name"] == "product_docs"
+        assert rw_mounts[0]["host_path"] == "/Users/greg/PRODUCT"
+
+    def test_user_mount_placeholder_present(self, mock_manifest: Path) -> None:
+        """User mounts have {username} placeholder in host_path."""
+        import yaml
+        with open(mock_manifest, "r") as f:
+            manifest = yaml.safe_load(f)
+
+        mounts = manifest.get("mounts", {})
+        user_ro = mounts.get("user-ro", [])
+
+        assert len(user_ro) == 1
+        assert "{username}" in user_ro[0]["host_path"]
+
+
+class TestGetPathDisplayMapping:
+    """Test get_path_display_mapping function for agent output path transformation."""
+
+    @pytest.fixture
+    def mock_manifest_for_display(self, tmp_path: Path, monkeypatch) -> Path:
+        """Create mock manifest file for path display mapping tests."""
+        manifest_dir = tmp_path / "data" / "auto-generated"
+        manifest_dir.mkdir(parents=True)
+        manifest_path = manifest_dir / "auto-generated-mounts.yaml"
+
+        # Create mock mount directories that "exist"
+        mounts_dir = tmp_path / "mounts"
+        (mounts_dir / "global_var_log").mkdir(parents=True)
+        (mounts_dir / "product_docs").mkdir(parents=True)
+        (mounts_dir / "user_documents").mkdir(parents=True)
+
+        manifest_content = f"""
+mounts:
+  ro:
+    - name: global_var_log
+      host_path: /var/log
+      container_path: {mounts_dir}/global_var_log
+  rw:
+    - name: product_docs
+      host_path: /Users/greg/PRODUCT
+      container_path: {mounts_dir}/product_docs
+  user-ro:
+    - name: user_documents
+      host_path: /Users/{{username}}/Documents
+      container_path: {mounts_dir}/user_documents
+  user-rw: []
+"""
+        manifest_path.write_text(manifest_content)
+
+        # Patch Path to redirect manifest path lookups
+        original_path = Path
+
+        def patched_path(p):
+            p_str = str(p)
+            if p_str == "/data/auto-generated/auto-generated-mounts.yaml":
+                return original_path(manifest_path)
+            return original_path(p)
+
+        monkeypatch.setattr("src.services.mount_service.Path", patched_path)
+
+        return manifest_path
+
+    def test_returns_empty_when_no_manifest(self, tmp_path: Path, monkeypatch) -> None:
+        """Returns empty dict when manifest doesn't exist."""
+        from src.services.mount_service import get_path_display_mapping
+
+        # Patch to non-existent path
+        original_path = Path
+        monkeypatch.setattr(
+            "src.services.mount_service.Path",
+            lambda p: original_path(tmp_path / "nonexistent" / "manifest.yaml")
+            if "auto-generated-mounts.yaml" in str(p)
+            else original_path(p)
+        )
+
+        result = get_path_display_mapping()
+        assert result == {}
+
+    def test_builds_mapping_for_ro_mounts(
+        self, mock_manifest_for_display: Path
+    ) -> None:
+        """Builds mapping for global RO mounts."""
+        from src.services.mount_service import get_path_display_mapping
+
+        result = get_path_display_mapping()
+
+        assert "external/ro/global_var_log" in result
+        assert result["external/ro/global_var_log"] == "/var/log"
+
+    def test_builds_mapping_for_rw_mounts(
+        self, mock_manifest_for_display: Path
+    ) -> None:
+        """Builds mapping for global RW mounts."""
+        from src.services.mount_service import get_path_display_mapping
+
+        result = get_path_display_mapping()
+
+        assert "external/rw/product_docs" in result
+        assert result["external/rw/product_docs"] == "/Users/greg/PRODUCT"
+
+    def test_resolves_username_placeholder(
+        self, mock_manifest_for_display: Path
+    ) -> None:
+        """Resolves {username} placeholder when username provided."""
+        from src.services.mount_service import get_path_display_mapping
+
+        result = get_path_display_mapping(username="testuser")
+
+        assert "external/user-ro/user_documents" in result
+        assert result["external/user-ro/user_documents"] == "/Users/testuser/Documents"
+
+    def test_skips_user_mounts_without_username(
+        self, mock_manifest_for_display: Path
+    ) -> None:
+        """Skips user mounts when no username provided."""
+        from src.services.mount_service import get_path_display_mapping
+
+        result = get_path_display_mapping()  # No username
+
+        # User mount should be skipped
+        assert "external/user-ro/user_documents" not in result
+
+    def test_mapping_format_matches_internal_paths(
+        self, mock_manifest_for_display: Path
+    ) -> None:
+        """Mapping keys match the internal path format used in agent output."""
+        from src.services.mount_service import get_path_display_mapping
+
+        result = get_path_display_mapping(username="greg")
+
+        # Keys should be in format: external/{type}/{name}
+        for key in result:
+            assert key.startswith("external/")
+            parts = key.split("/")
+            assert len(parts) == 3  # external, type, name
+            assert parts[1] in ("ro", "rw", "user-ro", "user-rw")

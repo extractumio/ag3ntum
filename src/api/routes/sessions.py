@@ -13,6 +13,7 @@ Provides endpoints for:
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -395,6 +396,7 @@ async def get_available_dynamic_mounts(
                 description=base.description,
                 max_mode=base.max_mode,
                 requires_subpath=base.host_path.count("/") > 3,  # Heuristic for deep paths
+                host_path=base.host_path.replace("{username}", user.username),
             )
             for base in available_bases
         ],
@@ -460,6 +462,19 @@ async def run_task(
         from ...services.mount_service import get_dynamic_mount_service
 
         mount_service = get_dynamic_mount_service()
+
+        # Auto-generate alias from host_path when not provided
+        for mount_req in request.dynamic_mounts:
+            if not mount_req.alias:
+                base_obj = mount_service.bases.get(mount_req.base)
+                if base_obj:
+                    # Build alias from host_path + subpath: /var/log -> var-log
+                    raw = base_obj.host_path.replace("{username}", user.username)
+                    if mount_req.subpath:
+                        raw = f"{raw}/{mount_req.subpath}"
+                    mount_req.alias = re.sub(r'[^a-zA-Z0-9]+', '-', raw).strip('-')[:64]
+                else:
+                    mount_req.alias = mount_req.base
 
         # Validate each mount request
         for mount_req in request.dynamic_mounts:

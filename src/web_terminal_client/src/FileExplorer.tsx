@@ -15,8 +15,10 @@ import {
   deleteFile,
   downloadFile,
   getFileContent,
+  getSessionMounts,
   uploadFiles,
 } from './api';
+import type { MountEntry } from './api';
 import { useToast } from './components';
 import type {
   FileContentResponse,
@@ -44,6 +46,8 @@ interface FileExplorerProps {
   onNavigateComplete?: () => void;
   /** Callback when a filename should be inserted into the input (double-click or drag) */
   onFileNameInsert?: (filename: string) => void;
+  /** Incremented to trigger a refresh (preserves expanded/collapsed state) */
+  refreshTrigger?: number;
 }
 
 interface ExpandedFolders {
@@ -396,6 +400,9 @@ interface FileTreeNodeProps {
   getIsLoading: (path: string) => boolean;
   getChildren: (path: string) => FileInfo[] | undefined;
   getIsHighlighted: (path: string) => boolean;
+  getIsMountRoot: (path: string) => boolean;
+  getMountLabel: (path: string) => string | null;
+  getHostPath: (path: string) => string | null;
   onToggle: (path: string) => void;
   onView: (file: FileInfo) => void;
   onDownload: (file: FileInfo) => void;
@@ -410,6 +417,9 @@ function FileTreeNode({
   getIsLoading,
   getChildren,
   getIsHighlighted,
+  getIsMountRoot,
+  getMountLabel,
+  getHostPath,
   onToggle,
   onView,
   onDownload,
@@ -430,11 +440,19 @@ function FileTreeNode({
     // Binary files: do nothing on single click (no download)
   };
 
-  // Convert path to relative format starting with ./
+  // Convert path to user-friendly format
+  // For mounted paths, use host path (e.g., /var/log/syslog)
+  // For workspace paths, use relative format (e.g., ./file.txt)
   const getRelativePath = (path: string): string => {
+    // Check if this path is inside a mount with a host_path
+    const hostPath = getHostPath(path);
+    if (hostPath) {
+      // Return the host path - agent can use this directly
+      return hostPath;
+    }
+    // Fall back to relative path for workspace files
     if (path.startsWith('./')) return path;
     if (path.startsWith('/')) {
-      // For absolute paths, just use the path as-is (workspace context handles this)
       return path;
     }
     return './' + path;
@@ -453,26 +471,39 @@ function FileTreeNode({
     e.dataTransfer.effectAllowed = 'copy';
   };
 
+  const isMountRoot = file.is_directory && getIsMountRoot(file.path);
+  const mountLabel = isMountRoot ? getMountLabel(file.path) : null;
+  const mountClass = file.mount_type
+    ? file.is_readonly ? 'file-tree-mount-ro' : 'file-tree-mount-rw'
+    : '';
+
   return (
     <div className="file-tree-node">
       <div
-        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}${file.is_readonly ? ' file-readonly' : ''}`}
+        className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}${file.is_readonly ? ' file-readonly' : ''} ${mountClass}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         draggable
         onDragStart={handleDragStart}
         title={file.is_directory
-          ? `${file.name}\nDouble-click or drag to insert path`
+          ? `${mountLabel || file.name}${mountLabel && mountLabel !== file.name ? ' (alias: ' + file.name + ')' : ''}\nDouble-click or drag to insert path`
           : `${file.name}\nSize: ${formatFileSize(file.size)}\nModified: ${new Date(file.modified_at).toLocaleString()}\nDouble-click or drag to insert path`}
       >
         <span className="file-tree-toggle">
           {file.is_directory ? (isExpanded ? '▼' : '▶') : '\u00A0'}
         </span>
         <span className="file-tree-icon">{renderFileIcon(file)}</span>
-        <span className="file-tree-name" title={sanitizeFilename(file.name)}>
-          {truncateFilename(file.name)}
+        <span className="file-tree-name" title={mountLabel ? (mountLabel !== file.name ? mountLabel + ' (alias: ' + file.name + ')' : mountLabel) : sanitizeFilename(file.name)}>
+          {mountLabel || truncateFilename(file.name)}
         </span>
+        {isMountRoot && file.mount_type && (
+          <span className={`mount-badge ${file.is_readonly ? 'mount-badge-ro' : 'mount-badge-rw'}`}>
+            {file.mount_type === 'dynamic' ? 'M' :
+             file.mount_type === 'persistent' ? 'P' :
+             file.is_readonly ? 'R' : 'RW'}
+          </span>
+        )}
         <span className="file-tree-size">
           {file.is_directory ? '' : formatFileSize(file.size)}
         </span>
@@ -528,6 +559,9 @@ function FileTreeNode({
                 getIsLoading={getIsLoading}
                 getChildren={getChildren}
                 getIsHighlighted={getIsHighlighted}
+                getIsMountRoot={getIsMountRoot}
+                getMountLabel={getMountLabel}
+                getHostPath={getHostPath}
                 onToggle={onToggle}
                 onView={onView}
                 onDownload={onDownload}
@@ -561,6 +595,7 @@ export function FileExplorer({
   navigateTo,
   onNavigateComplete,
   onFileNameInsert,
+  refreshTrigger = 0,
 }: FileExplorerProps): JSX.Element {
   // State
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -570,6 +605,9 @@ export function FileExplorer({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [truncatedInfo, setTruncatedInfo] = useState<{ truncated: boolean; totalCount: number; shownCount: number } | null>(null);
+
+  // Mount metadata (for display badges, colors, and host path labels)
+  const [mountMap, setMountMap] = useState<Map<string, MountEntry>>(new Map());
 
   // Sorting state
   const [sortBy, setSortBy] = useState<FileSortField>('modified_at');
@@ -717,13 +755,56 @@ export function FileExplorer({
     setTruncatedInfo(null);
 
     try {
-      const listing = await browseFiles(baseUrl, token, sessionId, '', {
-        includeHidden: showHiddenFiles,
-        sortBy,
-        sortOrder,
-      });
-      setFiles(listing.files);
-      // Track truncation info for warning display
+      // Fetch file listing and mount metadata in parallel
+      const [listing, mountsResponse] = await Promise.all([
+        browseFiles(baseUrl, token, sessionId, '', {
+          includeHidden: showHiddenFiles,
+          sortBy,
+          sortOrder,
+        }),
+        getSessionMounts(baseUrl, token, sessionId).catch(() => ({ mounts: [] as MountEntry[] })),
+      ]);
+
+      // Build mount map for badges/labels
+      const map = new Map<string, MountEntry>();
+      for (const m of mountsResponse.mounts) {
+        map.set(m.path, m);
+      }
+      setMountMap(map);
+
+      // Flatten external mounts: remove 'external/' directory from root,
+      // inject each external mount as a top-level virtual entry with host_path label
+      const externalMounts = mountsResponse.mounts.filter(
+        m => m.mount_type === 'external_ro' || m.mount_type === 'external_rw'
+          || m.mount_type === 'user_ro' || m.mount_type === 'user_rw'
+      );
+
+      const now = new Date().toISOString();
+      const syntheticEntries: FileInfo[] = externalMounts.map(m => ({
+        name: m.host_path || m.name,
+        path: m.path,                    // e.g., "external/ro/global_var_log"
+        is_directory: true,
+        size: 0,
+        created_at: now,
+        modified_at: now,
+        mime_type: null,
+        is_hidden: false,
+        is_viewable: false,
+        is_readonly: m.mode === 'ro',
+        is_external: true,
+        mount_type: m.mount_type === 'external_ro' ? 'ro' as const
+                  : m.mount_type === 'external_rw' ? 'rw' as const
+                  : m.mount_type === 'user_ro' ? 'user-ro' as const
+                  : m.mount_type === 'user_rw' ? 'user-rw' as const
+                  : null,
+      }));
+
+      // Filter out the 'external' directory if we have flattened mounts
+      const filteredFiles = externalMounts.length > 0
+        ? listing.files.filter(f => f.name !== 'external')
+        : listing.files;
+
+      setFiles([...syntheticEntries, ...filteredFiles]);
       setTruncatedInfo({
         truncated: listing.truncated,
         totalCount: listing.total_count,
@@ -1080,6 +1161,16 @@ export function FileExplorer({
     loadRootFiles();
   }, [loadRootFiles]);
 
+  // Auto-refresh when refreshTrigger increments (e.g., on agent_complete)
+  // Preserves expanded/collapsed state via refreshAll()
+  const prevRefreshTrigger = useRef(0);
+  useEffect(() => {
+    if (refreshTrigger > prevRefreshTrigger.current) {
+      prevRefreshTrigger.current = refreshTrigger;
+      refreshAll();
+    }
+  }, [refreshTrigger, refreshAll]);
+
   // Render sorting header
   const SortButton = ({
     field,
@@ -1121,6 +1212,53 @@ export function FileExplorer({
     [highlightedPath]
   );
 
+  const getIsMountRoot = useCallback(
+    (path: string) => mountMap.has(path),
+    [mountMap]
+  );
+
+  const getMountLabel = useCallback(
+    (path: string): string | null => {
+      const entry = mountMap.get(path);
+      if (!entry) return null;
+      // Show host_path for dynamic and external mounts if available
+      if (entry.host_path) return entry.host_path;
+      return null;
+    },
+    [mountMap]
+  );
+
+  // Translate internal path to host path for any file inside a mount
+  // e.g., "external/ro/global_var_log/syslog" -> "/var/log/syslog"
+  const getHostPath = useCallback(
+    (path: string): string | null => {
+      // Find the mount that contains this path (longest prefix match)
+      let bestMatch: { mountPath: string; hostPath: string } | null = null;
+      let bestLen = 0;
+
+      for (const [mountPath, entry] of mountMap.entries()) {
+        if (!entry.host_path) continue;
+        // Check if path is the mount root or inside it
+        if (path === mountPath || path.startsWith(mountPath + '/')) {
+          if (mountPath.length > bestLen) {
+            bestMatch = { mountPath, hostPath: entry.host_path };
+            bestLen = mountPath.length;
+          }
+        }
+      }
+
+      if (!bestMatch) return null;
+
+      // Replace internal prefix with host path
+      if (path === bestMatch.mountPath) {
+        return bestMatch.hostPath;
+      }
+      const relative = path.slice(bestMatch.mountPath.length + 1); // +1 for the /
+      return bestMatch.hostPath + '/' + relative;
+    },
+    [mountMap]
+  );
+
   // Render recursive tree with expanded state
   const renderFileTree = (fileList: FileInfo[], depth: number = 0): JSX.Element[] => {
     return fileList.map((file) => (
@@ -1132,6 +1270,9 @@ export function FileExplorer({
         getIsLoading={getIsLoading}
         getChildren={getChildren}
         getIsHighlighted={getIsHighlighted}
+        getIsMountRoot={getIsMountRoot}
+        getMountLabel={getMountLabel}
+        getHostPath={getHostPath}
         onToggle={handleToggleFolder}
         onView={handleViewFile}
         onDownload={handleDownloadFile}

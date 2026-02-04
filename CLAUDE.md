@@ -13,7 +13,7 @@ Consult these before fixing bugs or designing features:
 | `current_sse.md` | SSE implementation, Redis streaming, sequence numbers, reconnection |
 | `current_event_hooks_callbacks.md` | Event hook system, tracer callbacks, lifecycle events |
 | `task_queue_and_auto_resume.md` | Redis priority queue, quotas (4 global/2 user/50 daily), auto-resume on restart |
-| `external_mounts.md` | Mount lifecycle, two-part system (Docker volumes + symlink auth), rebuild rules |
+| `external_mounts_guide.md` | **Mount reference guide**: types, use cases, restart rules, path display |
 | `dynamic_mounts_security_analysis.md` | Security analysis of mount system, attack surface |
 | `how-to-connect-custom-llm.md` | LLM API proxy setup for local/custom models (llama.cpp, Ollama, etc.) |
 | `how-to-debug-agent-with-ag3ntum_debug.md` | Debug script flags, artifact locations, auth vs filesystem usernames |

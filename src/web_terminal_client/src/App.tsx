@@ -2127,6 +2127,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const [isDraggingDivider, setIsDraggingDivider] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
   const [fileExplorerRefreshKey, setFileExplorerRefreshKey] = useState(0);
+  const [fileExplorerRefreshTrigger, setFileExplorerRefreshTrigger] = useState(0);
   const [fileExplorerModalOpen, setFileExplorerModalOpen] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [navigateToPath, setNavigateToPath] = useState<string | null>(null);
@@ -2535,6 +2536,9 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         // Invalidate cache and refresh to sync with server
         invalidateSessionsCache();
         refreshSessions();
+
+        // Auto-refresh File Explorer (preserves expanded/collapsed state)
+        setFileExplorerRefreshTrigger(prev => prev + 1);
       }
 
       if (event.type === 'cancelled') {
@@ -4902,6 +4906,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   onModalStateChange={setFileExplorerModalOpen}
                   navigateTo={navigateToPath}
                   onNavigateComplete={handleNavigateComplete}
+                  refreshTrigger={fileExplorerRefreshTrigger}
                   onFileNameInsert={(filename) => {
                     setInputValue((prev) => {
                       const needsSpace = prev.length > 0 && !prev.endsWith(' ');

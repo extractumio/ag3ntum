@@ -811,6 +811,8 @@ class ClaudeAgent:
             # Build dynamic mount paths for PathValidator
             dynamic_mounts_ro_paths: dict[str, Path] = {}
             dynamic_mounts_rw_paths: dict[str, Path] = {}
+            # Also track host paths for original-path support
+            dynamic_host_paths: list[tuple[str, str, str]] = []  # (host_path, container_path, mode)
             if dynamic_mounts:
                 for mount_info in dynamic_mounts:
                     # Build container path: /mounts/{base}/{subpath} (flattened structure)
@@ -831,6 +833,10 @@ class ClaudeAgent:
                         mode=mount_info.mode,
                         optional=True,
                     ))
+
+                    # Track host_path for original-path support (e.g., /var/log)
+                    if mount_info.host_path:
+                        dynamic_host_paths.append((mount_info.host_path, container_path, mount_info.mode))
 
                 logger.info(
                     f"Added {len(dynamic_mounts)} dynamic mounts: "
@@ -869,6 +875,68 @@ class ClaudeAgent:
                         )
                 except Exception as e:
                     logger.warning(f"Failed to load original-path mounts: {e}")
+
+            # Also add external mounts (global and user) to original_path_mounts
+            # This enables agents to use host paths like /var/log directly,
+            # not just internal paths like ./external/ro/global_var_log
+            try:
+                from ..services.mount_service import get_all_mounts_with_host_paths
+                external_mounts_with_host_paths = get_all_mounts_with_host_paths(username)
+                external_original_count = 0
+
+                for mode in ("ro", "rw"):
+                    target_dict = original_path_mounts_ro if mode == "ro" else original_path_mounts_rw
+                    for mount_info in external_mounts_with_host_paths.get(mode, []):
+                        host_path = mount_info["host_path"]
+                        container_path = mount_info["container_path"]
+                        docker_path = Path(container_path)
+
+                        # Skip if already added (from original_paths config)
+                        if host_path in target_dict:
+                            continue
+
+                        target_dict[host_path] = docker_path
+                        external_original_count += 1
+
+                        # Add to sandbox config for Bubblewrap binding
+                        sandbox_config.original_path_mounts.append(SandboxMount(
+                            source=container_path,  # Docker path
+                            target=host_path,  # Original host path (bind target)
+                            mode=mode,
+                            optional=True,
+                        ))
+
+                if external_original_count > 0:
+                    logger.info(
+                        f"Added {external_original_count} external mounts to original-path support "
+                        f"(total: {len(original_path_mounts_ro)} RO, {len(original_path_mounts_rw)} RW)"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to add external mounts to original-path support: {e}")
+
+            # Add dynamic mount host paths to original-path support
+            # This enables agents to use /var/log directly when /var/log is a dynamic mount
+            if dynamic_host_paths:
+                dynamic_original_count = 0
+                for host_path, container_path, mode in dynamic_host_paths:
+                    target_dict = original_path_mounts_ro if mode == "ro" else original_path_mounts_rw
+                    # Skip if already added
+                    if host_path in target_dict:
+                        continue
+                    target_dict[host_path] = Path(container_path)
+                    dynamic_original_count += 1
+                    # Add to sandbox config for Bubblewrap binding
+                    sandbox_config.original_path_mounts.append(SandboxMount(
+                        source=container_path,
+                        target=host_path,
+                        mode=mode,
+                        optional=True,
+                    ))
+                if dynamic_original_count > 0:
+                    logger.info(
+                        f"Added {dynamic_original_count} dynamic mounts to original-path support "
+                        f"(total: {len(original_path_mounts_ro)} RO, {len(original_path_mounts_rw)} RW)"
+                    )
 
             configure_path_validator(
                 session_id=session_context.session_id,
@@ -1453,9 +1521,28 @@ class ClaudeAgent:
         if not system_prompt or not system_prompt.strip():
             raise AgentError("System prompt is empty after loading/rendering")
 
+        # Build path display mapping for transforming internal paths to host paths in output
+        # This makes agent output more user-friendly (e.g., "/var/log" instead of "./external/ro/global_var_log")
+        path_display_mapping: dict[str, str] = {}
+        try:
+            from ..services.mount_service import get_path_display_mapping
+            path_display_mapping = get_path_display_mapping(username)
+
+            # Also add dynamic mount aliases if they have host paths
+            if dynamic_mounts:
+                for mount_info in dynamic_mounts:
+                    if mount_info.host_path and mount_info.alias:
+                        # Dynamic mounts appear at workspace root as {alias}
+                        path_display_mapping[mount_info.alias] = mount_info.host_path
+
+            if path_display_mapping:
+                logger.debug(f"Built path display mapping with {len(path_display_mapping)} entries")
+        except Exception as e:
+            logger.warning(f"Failed to build path display mapping: {e}")
+
         # Create trace processor BEFORE options so it can be passed to
         # permission callback for correct failure status display
-        trace_processor = TraceProcessor(self._tracer)
+        trace_processor = TraceProcessor(self._tracer, path_display_mapping=path_display_mapping)
         trace_processor.set_task(task)
         trace_processor.set_model(self._config.model)
 
