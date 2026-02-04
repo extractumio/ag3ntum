@@ -492,10 +492,9 @@ class DynamicMountRequest(BaseModel):
         examples=["nginx", "myapp/logs"]
     )
 
-    alias: str = Field(
-        ...,
-        description="Name for the mount in workspace root",
-        min_length=1,
+    alias: Optional[str] = Field(
+        default=None,
+        description="Name for the mount in workspace root. Auto-generated from host path if omitted.",
         max_length=64,
         examples=["app-logs", "my-project"]
     )
@@ -505,11 +504,19 @@ class DynamicMountRequest(BaseModel):
         description="Access mode (defaults to 'ro')"
     )
 
-    @field_validator("base", "alias")
+    @field_validator("base")
     @classmethod
-    def validate_name(cls, v: str) -> str:
-        """Validate base/alias names - alphanumeric, hyphen, underscore only."""
+    def validate_base_name(cls, v: str) -> str:
+        """Validate base name - alphanumeric, hyphen, underscore only."""
         if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError("Must contain only alphanumeric, hyphen, underscore")
+        return v
+
+    @field_validator("alias")
+    @classmethod
+    def validate_alias(cls, v: Optional[str]) -> Optional[str]:
+        """Validate alias if provided - alphanumeric, hyphen, underscore only."""
+        if v is not None and not re.match(r'^[a-zA-Z0-9_-]+$', v):
             raise ValueError("Must contain only alphanumeric, hyphen, underscore")
         return v
 
@@ -536,6 +543,7 @@ class DynamicMountInfo(BaseModel):
     mode: str = Field(description="Access mode: ro or rw")
     source_base: str = Field(description="Source base name")
     source_subpath: Optional[str] = Field(default=None, description="Source subpath")
+    host_path: Optional[str] = Field(default=None, description="Original host path (e.g., /var/log)")
 
 
 class DynamicBaseInfo(BaseModel):
@@ -545,6 +553,7 @@ class DynamicBaseInfo(BaseModel):
     description: str = Field(description="Human-readable description")
     max_mode: str = Field(description="Maximum allowed mode (ro or rw)")
     requires_subpath: bool = Field(default=False, description="Whether subpath is required")
+    host_path: str = Field(description="Original host path (e.g., /var/log)")
 
 
 class AvailableDynamicMountsResponse(BaseModel):

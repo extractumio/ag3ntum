@@ -14,7 +14,7 @@ import tempfile
 
 import pytest
 
-from src.api.models import DynamicMountRequest
+from src.api.models import DynamicMountRequest, DynamicMountInfo, DynamicBaseInfo
 from src.services.mount_service import (
     DynamicMountService,
     DynamicMountBase,
@@ -105,6 +105,79 @@ class TestDynamicMountRequestValidation:
                 subpath="logs\\test",
                 alias="bad"
             )
+
+    def test_alias_optional(self) -> None:
+        """Request without alias passes validation (alias is optional)."""
+        request = DynamicMountRequest(
+            base="logs",
+            subpath="nginx",
+            mode="ro"
+        )
+        assert request.base == "logs"
+        assert request.alias is None
+        assert request.mode == "ro"
+
+    def test_alias_none_explicit(self) -> None:
+        """Explicit None alias passes validation."""
+        request = DynamicMountRequest(
+            base="logs",
+            alias=None,
+        )
+        assert request.alias is None
+
+    def test_invalid_alias_still_rejected(self) -> None:
+        """Invalid alias characters still rejected when provided."""
+        with pytest.raises(ValueError):
+            DynamicMountRequest(
+                base="logs",
+                alias="bad/alias"
+            )
+
+
+class TestDynamicMountInfoHostPath:
+    """Tests for host_path field in DynamicMountInfo and DynamicBaseInfo."""
+
+    def test_mount_info_with_host_path(self) -> None:
+        """DynamicMountInfo includes host_path."""
+        info = DynamicMountInfo(
+            alias="var-log",
+            workspace_path="./var-log",
+            mode="ro",
+            source_base="logs",
+            source_subpath="nginx",
+            host_path="/var/log/nginx",
+        )
+        assert info.host_path == "/var/log/nginx"
+
+    def test_mount_info_without_host_path(self) -> None:
+        """DynamicMountInfo works without host_path (backward compat)."""
+        info = DynamicMountInfo(
+            alias="logs",
+            workspace_path="./logs",
+            mode="ro",
+            source_base="logs",
+        )
+        assert info.host_path is None
+
+    def test_base_info_has_host_path(self) -> None:
+        """DynamicBaseInfo requires host_path."""
+        info = DynamicBaseInfo(
+            name="logs",
+            description="System logs",
+            max_mode="ro",
+            host_path="/var/log",
+        )
+        assert info.host_path == "/var/log"
+
+    def test_base_info_host_path_with_username(self) -> None:
+        """DynamicBaseInfo stores raw host_path (resolution happens elsewhere)."""
+        info = DynamicBaseInfo(
+            name="user-home",
+            description="Home directory",
+            max_mode="rw",
+            host_path="/home/alice",
+        )
+        assert info.host_path == "/home/alice"
 
 
 # =============================================================================
@@ -521,6 +594,7 @@ class TestDynamicMountsAPIAvailable:
         assert data["bases"][0]["name"] == "logs"
         assert data["bases"][0]["description"] == "System logs"
         assert data["bases"][0]["max_mode"] == "ro"
+        assert data["bases"][0]["host_path"] == "/var/log"
 
     @pytest.mark.unit
     def test_get_available_mounts_disabled(
@@ -777,6 +851,103 @@ class TestDynamicMountsAPIRun:
         )
 
         assert response.status_code == 422  # Pydantic validation error
+
+    @pytest.mark.unit
+    def test_run_task_with_no_alias_auto_generates(
+        self,
+        client,
+        auth_headers: dict,
+    ) -> None:
+        """Mount without alias gets auto-generated alias from host_path."""
+        service = MagicMock()
+        service.enabled = True
+
+        # Create a mock base with host_path
+        mock_base = MagicMock()
+        mock_base.host_path = "/var/log"
+        service.bases = {"logs": mock_base}
+
+        validation = MagicMock()
+        validation.is_valid = True
+        validation.error = None
+        validation.denial_code = None
+        validation.resolved_mode = "ro"
+        validation.resolved_container_path = "/mounts/logs"
+        service.validate_mount_request.return_value = validation
+
+        with patch(
+            "src.services.mount_service.get_dynamic_mount_service",
+            return_value=service,
+        ):
+            response = client.post(
+                "/api/v1/sessions/run",
+                headers=auth_headers,
+                json={
+                    "task": "Auto-alias test",
+                    "dynamic_mounts": [
+                        {
+                            "base": "logs",
+                            # No alias provided
+                            "mode": "ro",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 201
+        # Verify that validate was called (mount was processed)
+        service.validate_mount_request.assert_called_once()
+
+    @pytest.mark.unit
+    def test_run_task_auto_alias_with_subpath(
+        self,
+        client,
+        auth_headers: dict,
+    ) -> None:
+        """Auto-generated alias includes subpath: /var/log + nginx -> var-log-nginx."""
+        service = MagicMock()
+        service.enabled = True
+
+        mock_base = MagicMock()
+        mock_base.host_path = "/var/log"
+        service.bases = {"logs": mock_base}
+
+        validation = MagicMock()
+        validation.is_valid = True
+        validation.error = None
+        validation.denial_code = None
+        validation.resolved_mode = "ro"
+        validation.resolved_container_path = "/mounts/logs/nginx"
+        service.validate_mount_request.return_value = validation
+
+        with patch(
+            "src.services.mount_service.get_dynamic_mount_service",
+            return_value=service,
+        ):
+            response = client.post(
+                "/api/v1/sessions/run",
+                headers=auth_headers,
+                json={
+                    "task": "Auto-alias with subpath test",
+                    "dynamic_mounts": [
+                        {
+                            "base": "logs",
+                            "subpath": "nginx",
+                            # No alias
+                            "mode": "ro",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 201
+        # Verify the mount request had alias auto-populated before validation
+        call_args = service.validate_mount_request.call_args
+        mount_req = call_args[0][0]
+        assert mount_req.alias is not None
+        assert "var" in mount_req.alias
+        assert "log" in mount_req.alias
+        assert "nginx" in mount_req.alias
 
 
 # =============================================================================

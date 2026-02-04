@@ -15,6 +15,7 @@ SECURITY: Session directories use shared GID access model:
 - ag3ntum_api is in each sandbox user's group (shared GID)
 - PathValidator provides application-level cross-session/cross-user isolation
 """
+import json
 import logging
 import os
 import shutil
@@ -591,13 +592,42 @@ class SessionManager:
                 f"alias={request.alias}, target={target_path}, mode={validation.resolved_mode}"
             )
 
+            # Resolve host_path for display (base host_path + subpath)
+            base_obj = mount_service.bases.get(request.base)
+            host_path = None
+            if base_obj:
+                hp = base_obj.host_path.replace("{username}", username)
+                if request.subpath:
+                    hp = f"{hp}/{request.subpath}"
+                host_path = hp
+
             mounted.append(DynamicMountInfo(
                 alias=request.alias,
                 workspace_path=f"./{request.alias}",
                 mode=validation.resolved_mode,
                 source_base=request.base,
                 source_subpath=request.subpath,
+                host_path=host_path,
             ))
+
+        # Persist dynamic mount metadata for File Explorer
+        session_dir = self.get_session_dir(session_id)
+        meta_file = session_dir / ".dynamic-mounts.json"
+        meta = {
+            m.alias: {
+                "mode": m.mode,
+                "source_base": m.source_base,
+                "source_subpath": m.source_subpath,
+                "host_path": m.host_path,
+            }
+            for m in mounted
+        }
+        try:
+            meta_file.write_text(json.dumps(meta))
+        except OSError as e:
+            logger.warning(
+                f"Failed to write dynamic mount metadata for session {session_id}: {e}"
+            )
 
         logger.info(
             f"Set up {len(mounted)} dynamic mounts for session {session_id}"

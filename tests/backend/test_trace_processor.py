@@ -379,3 +379,221 @@ class TestTraceProcessorToolErrorTracking:
         # Only 2 errors
         assert trace_processor.tool_error_count == 2
         assert trace_processor.had_tool_errors() is True
+
+
+class TestPathDisplayTransformation:
+    """Tests for path display transformation in TraceProcessor.
+
+    The TraceProcessor transforms internal mount paths to host paths
+    for user-friendly display. This converts paths like:
+    - ./external/ro/global_var_log/syslog -> /var/log/syslog
+    - var-log/auth.log -> /var/log/auth.log (dynamic mount)
+    """
+
+    @pytest.fixture
+    def trace_processor(self) -> TraceProcessor:
+        """Create a TraceProcessor with a NullTracer for testing."""
+        return TraceProcessor(NullTracer())
+
+    @pytest.fixture
+    def trace_processor_with_mapping(self) -> TraceProcessor:
+        """Create a TraceProcessor with path display mapping configured."""
+        mapping = {
+            "external/ro/global_var_log": "/var/log",
+            "external/rw/product_docs": "/Users/greg/PRODUCT",
+            "external/user-ro/all_documents": "/Users/greg/Documents",
+            "var-log": "/var/log",  # dynamic mount alias
+        }
+        return TraceProcessor(NullTracer(), path_display_mapping=mapping)
+
+    @pytest.mark.unit
+    def test_no_mapping_text_unchanged(self, trace_processor: TraceProcessor) -> None:
+        """Text passes through unchanged when no mapping is configured."""
+        text = "Reading ./external/ro/global_var_log/syslog"
+        result = trace_processor._transform_paths_for_display(text)
+        assert result == text
+
+    @pytest.mark.unit
+    def test_empty_text_returns_empty(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Empty text returns empty string."""
+        assert trace_processor_with_mapping._transform_paths_for_display("") == ""
+
+    @pytest.mark.unit
+    def test_external_ro_path_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """External RO mount path is transformed to host path."""
+        text = "Reading ./external/ro/global_var_log/syslog"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Reading /var/log/syslog"
+
+    @pytest.mark.unit
+    def test_external_ro_path_without_dot_prefix(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """External path without ./ prefix is also transformed."""
+        text = "Found in external/ro/global_var_log/auth.log"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Found in /var/log/auth.log"
+
+    @pytest.mark.unit
+    def test_external_rw_path_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """External RW mount path is transformed to host path."""
+        text = "Writing to ./external/rw/product_docs/readme.md"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Writing to /Users/greg/PRODUCT/readme.md"
+
+    @pytest.mark.unit
+    def test_user_ro_path_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """User RO mount path is transformed to host path."""
+        text = "Accessing ./external/user-ro/all_documents/notes.txt"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Accessing /Users/greg/Documents/notes.txt"
+
+    @pytest.mark.unit
+    def test_dynamic_mount_alias_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Dynamic mount alias is transformed to host path."""
+        text = "Reading ./var-log/syslog"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Reading /var/log/syslog"
+
+    @pytest.mark.unit
+    def test_mount_path_only_no_subpath(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Mount path without subpath is transformed."""
+        text = "Listing ./external/ro/global_var_log"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Listing /var/log"
+
+    @pytest.mark.unit
+    def test_multiple_paths_in_same_text(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Multiple paths in same text are all transformed."""
+        text = "Comparing ./external/ro/global_var_log/syslog with ./external/rw/product_docs/log.txt"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Comparing /var/log/syslog with /Users/greg/PRODUCT/log.txt"
+
+    @pytest.mark.unit
+    def test_nested_subpath_preserved(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Deeply nested subpaths are preserved after transformation."""
+        text = "Found ./external/ro/global_var_log/nginx/access.log"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Found /var/log/nginx/access.log"
+
+    @pytest.mark.unit
+    def test_path_in_quotes_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Paths in quotes are transformed (boundary at quote)."""
+        text = 'Opening "./external/ro/global_var_log/syslog" for reading'
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == 'Opening "/var/log/syslog" for reading'
+
+    @pytest.mark.unit
+    def test_path_in_backticks_transformed(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Paths in backticks are transformed."""
+        text = "Check `./external/ro/global_var_log/auth.log` for details"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Check `/var/log/auth.log` for details"
+
+    @pytest.mark.unit
+    def test_unmatched_path_unchanged(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Paths not in mapping are unchanged."""
+        text = "Reading ./external/ro/unknown_mount/file.txt"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == text
+
+    @pytest.mark.unit
+    def test_workspace_path_unchanged(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Regular workspace paths are unchanged."""
+        text = "Created ./output/results.json"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == text
+
+    @pytest.mark.unit
+    def test_set_path_display_mapping_updates_processor(self, trace_processor: TraceProcessor) -> None:
+        """set_path_display_mapping updates the processor's mapping."""
+        # Initially no mapping
+        text = "Reading ./external/ro/global_var_log/syslog"
+        assert trace_processor._transform_paths_for_display(text) == text
+
+        # Set mapping
+        trace_processor.set_path_display_mapping({
+            "external/ro/global_var_log": "/var/log"
+        })
+
+        # Now transformation should work
+        result = trace_processor._transform_paths_for_display(text)
+        assert result == "Reading /var/log/syslog"
+
+    @pytest.mark.unit
+    def test_sanitize_text_includes_path_transformation(
+        self, trace_processor_with_mapping: TraceProcessor
+    ) -> None:
+        """_sanitize_text applies both global sanitization and path transformation."""
+        # Text with MCP tool name and path
+        text = "mcp__ag3ntum__Read opened ./external/ro/global_var_log/syslog"
+        result = trace_processor_with_mapping._sanitize_text(text)
+
+        # Tool name should be sanitized
+        assert "mcp__ag3ntum__" not in result
+        assert "Read" in result
+
+        # Path should be transformed
+        assert "/var/log/syslog" in result
+        assert "external/ro/global_var_log" not in result
+
+    @pytest.mark.unit
+    def test_sanitize_text_strips_reminders_and_transforms_paths(
+        self, trace_processor_with_mapping: TraceProcessor
+    ) -> None:
+        """_sanitize_text strips system reminders and transforms paths."""
+        text = """Found file at ./external/ro/global_var_log/syslog
+<system-reminder>Internal note</system-reminder>
+Contents shown below."""
+        result = trace_processor_with_mapping._sanitize_text(text)
+
+        # Path transformed
+        assert "/var/log/syslog" in result
+        # System reminder stripped
+        assert "<system-reminder>" not in result
+        assert "Internal note" not in result
+
+    @pytest.mark.unit
+    def test_longest_prefix_matched_first(self) -> None:
+        """Longer prefixes are matched before shorter ones (avoids partial matches)."""
+        # Mapping with overlapping prefixes
+        mapping = {
+            "external/ro": "/short",
+            "external/ro/global_var_log": "/var/log",
+        }
+        processor = TraceProcessor(NullTracer(), path_display_mapping=mapping)
+
+        text = "./external/ro/global_var_log/syslog"
+        result = processor._transform_paths_for_display(text)
+
+        # Should match the longer, more specific prefix
+        assert result == "/var/log/syslog"
+        assert "/short/global_var_log" not in result
+
+    @pytest.mark.unit
+    def test_path_at_end_of_line(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Path at end of line (no trailing character) is transformed."""
+        text = "File location: ./external/ro/global_var_log/syslog"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "File location: /var/log/syslog"
+
+    @pytest.mark.unit
+    def test_path_followed_by_comma(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Path followed by comma is transformed correctly."""
+        text = "Files: ./external/ro/global_var_log/a.log, ./external/ro/global_var_log/b.log"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Files: /var/log/a.log, /var/log/b.log"
+
+    @pytest.mark.unit
+    def test_path_followed_by_parenthesis(self, trace_processor_with_mapping: TraceProcessor) -> None:
+        """Path followed by closing parenthesis is transformed."""
+        text = "See log (./external/ro/global_var_log/syslog) for details"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "See log (/var/log/syslog) for details"
+
+    @pytest.mark.unit
+    def test_path_with_special_characters_in_filename(
+        self, trace_processor_with_mapping: TraceProcessor
+    ) -> None:
+        """Paths with special characters in filename are handled."""
+        text = "Reading ./external/ro/global_var_log/my-app_2024.log"
+        result = trace_processor_with_mapping._transform_paths_for_display(text)
+        assert result == "Reading /var/log/my-app_2024.log"

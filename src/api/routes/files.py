@@ -13,6 +13,7 @@ Sensitive Data: Text files are scanned for API keys, tokens, passwords in both:
 - File previews: Secrets redacted before displaying in File Explorer
 Detected secrets are redacted with same-length placeholders to preserve formatting.
 """
+import json
 import logging
 import mimetypes
 import re
@@ -100,7 +101,7 @@ class FileInfo(BaseModel):
     is_viewable: bool = False  # True if content can be previewed
     is_readonly: bool = False  # True if file/folder is in read-only area
     is_external: bool = False  # True if file is in external mount
-    mount_type: Optional[Literal["ro", "rw", "persistent", "user-ro", "user-rw"]] = None  # Type of external mount
+    mount_type: Optional[Literal["ro", "rw", "persistent", "user-ro", "user-rw", "dynamic"]] = None
     children: Optional[list["FileInfo"]] = None  # For directories when expanded
 
 
@@ -110,6 +111,21 @@ class DirectoryListing(BaseModel):
     files: list[FileInfo]
     total_count: int  # Total files in directory
     truncated: bool  # True if listing was truncated due to limit
+
+
+class MountEntry(BaseModel):
+    """Information about a mount available in the session workspace."""
+    name: str
+    path: str  # Workspace-relative path for browsing
+    sandbox_path: str  # Agent-visible path
+    mode: Literal["ro", "rw"]
+    mount_type: str  # external_ro, external_rw, user_ro, user_rw, dynamic, persistent
+    host_path: Optional[str] = None  # Original host path (e.g., /var/log)
+
+
+class SessionMountsResponse(BaseModel):
+    """Response for GET /files/{session_id}/mounts."""
+    mounts: list[MountEntry]
 
 
 class FileContentResponse(BaseModel):
@@ -295,6 +311,21 @@ def validate_path_security(
     # Check if path is within the external/ directory (mount points)
     # External mounts are intentional symlinks that point outside workspace
     is_external_path = normalized.startswith("external/") or normalized == "external"
+
+    # Also detect dynamic mount symlinks at workspace root pointing outside workspace.
+    # Dynamic mounts are created by setup_dynamic_mounts() as symlinks at workspace root
+    # (e.g., workspace/zhuzha -> /mounts/logs). These are legitimate mounts.
+    if not is_external_path and path_parts:
+        first_component = path_parts[0]
+        if first_component and first_component not in ('.', '..', 'workspace'):
+            first_component_path = workspace_root / first_component
+            if first_component_path.is_symlink():
+                try:
+                    resolved_target = first_component_path.resolve()
+                    resolved_target.relative_to(workspace_root.resolve())
+                except ValueError:
+                    # Symlink points outside workspace — treat as external mount
+                    is_external_path = True
 
     # For external paths, we need special handling because symlinks may point
     # to Docker container paths (e.g., /mounts/ro/name) that don't exist on host
@@ -499,16 +530,61 @@ def normalize_path_for_mount_check(path: str) -> str:
     return normalized
 
 
-def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
+def _read_dynamic_mount_metadata(workspace_root: Path) -> dict:
+    """
+    Read dynamic mount metadata from the session's .dynamic-mounts.json file.
+
+    Returns a dict mapping alias -> {"mode": "ro"/"rw", ...}, or empty dict on error.
+    """
+    session_dir = workspace_root.parent  # workspace_root is .../workspace, parent is session dir
+    meta_file = session_dir / ".dynamic-mounts.json"
+    try:
+        if meta_file.exists():
+            return json.loads(meta_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _load_mount_host_paths(
+    manifest_path: Optional[Path] = None,
+) -> dict[str, str]:
+    """Load host_path mapping from auto-generated mount manifest.
+
+    Returns dict of mount_name -> host_path (e.g., {"global_var_log": "/var/log"}).
+    """
+    import yaml
+    if manifest_path is None:
+        manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    result: dict[str, str] = {}
+    try:
+        if manifest_path.exists():
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = yaml.safe_load(f) or {}
+            mounts_data = manifest.get("mounts", {})
+            for section in ("ro", "rw", "user-ro", "user-rw"):
+                for mount in mounts_data.get(section, []):
+                    if isinstance(mount, dict) and mount.get("name") and mount.get("host_path"):
+                        result[mount["name"]] = mount["host_path"]
+    except (OSError, Exception):
+        pass
+    return result
+
+
+def get_mount_info(
+    relative_path: str,
+    workspace_root: Optional[Path] = None,
+) -> tuple[bool, bool, Optional[str]]:
     """
     Determine if a path is in an external mount and its type.
 
     Args:
         relative_path: Path relative to workspace root (can include /workspace/ prefix)
+        workspace_root: Workspace root path (needed for dynamic mount detection)
 
     Returns:
         Tuple of (is_external, is_readonly, mount_type)
-        mount_type is one of: "ro", "rw", "persistent", "user-ro", "user-rw", or None
+        mount_type is one of: "ro", "rw", "persistent", "user-ro", "user-rw", "dynamic", or None
     """
     # Normalize path separators and strip workspace prefix
     normalized = normalize_path_for_mount_check(relative_path)
@@ -532,6 +608,21 @@ def get_mount_info(relative_path: str) -> tuple[bool, bool, Optional[str]]:
     elif normalized == "external":
         # The external directory itself
         return True, False, None
+
+    # Check for dynamic mount (symlink at workspace root pointing outside)
+    if workspace_root and normalized:
+        first_component = normalized.split("/")[0]
+        if first_component and first_component not in ("external", "persistent", ".claude"):
+            symlink_path = workspace_root / first_component
+            if symlink_path.is_symlink():
+                try:
+                    symlink_path.resolve().relative_to(workspace_root.resolve())
+                except ValueError:
+                    # Symlink points outside workspace — it's a dynamic mount
+                    meta = _read_dynamic_mount_metadata(workspace_root)
+                    mount_meta = meta.get(first_component, {})
+                    is_ro = mount_meta.get("mode", "ro") == "ro"
+                    return True, is_ro, "dynamic"
 
     return False, False, None
 
@@ -580,7 +671,7 @@ def get_file_info(
         is_dir = file_path.is_dir()
 
         # Determine mount info (is_external, is_readonly, mount_type)
-        is_external, is_readonly, mount_type = get_mount_info(relative_path)
+        is_external, is_readonly, mount_type = get_mount_info(relative_path, workspace_root)
 
         return FileInfo(
             name=name,
@@ -1382,45 +1473,29 @@ async def delete_file(
 
 
 # =============================================================================
-# GET /files/{session_id}/mounts - Get mount configuration
+# GET /files/{session_id}/mounts - Get all mounts for a session
 # =============================================================================
 
-class MountInfo(BaseModel):
-    """Information about an external mount."""
-    name: str
-    path: str  # Relative path from workspace root (e.g., "./external/ro/downloads")
-    description: Optional[str] = None
 
-
-class MountsResponse(BaseModel):
-    """Response for mount configuration endpoint."""
-    ro: list[MountInfo]  # Read-only mounts
-    rw: list[MountInfo]  # Read-write mounts
-    persistent: bool  # Whether persistent storage is available
-
-
-@router.get("/{session_id}/mounts", response_model=MountsResponse)
-async def get_mounts(
+@router.get("/{session_id}/mounts", response_model=SessionMountsResponse)
+async def get_session_mounts(
     session_id: str,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
-) -> MountsResponse:
+) -> SessionMountsResponse:
     """
-    Get external mount configuration for a session.
+    Get all mounts available in a session's workspace.
 
-    Returns information about available external mounts:
-    - ro: Read-only mounts (agent cannot write)
-    - rw: Read-write mounts (agent can modify)
-    - persistent: Whether persistent storage is available
+    Scans the workspace directory structure to discover:
+    - External mounts (global and per-user, read-only and read-write)
+    - Dynamic mounts (user-requested per-session mounts)
+    - Persistent storage
+
+    Returns mount metadata including sandbox paths, access modes, and types.
     """
-    import yaml
-
-    # Validate and get session
     try:
         session = await session_service.get_session(
-            db=db,
-            session_id=session_id,
-            user_id=user_id,
+            db=db, session_id=session_id, user_id=user_id,
         )
     except InvalidSessionIdError:
         raise HTTPException(
@@ -1428,66 +1503,82 @@ async def get_mounts(
             detail="Invalid session ID format",
         )
 
-    if not session:
+    if not session or not session.working_dir:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}",
+            detail="Session not found",
         )
 
-    # Load mounts configuration
-    # TODO: Consider extracting to shared utility (duplicated in agent_core.py)
-    ro_mounts: list[MountInfo] = []
-    rw_mounts: list[MountInfo] = []
-    has_persistent = False
+    workspace = Path(session.working_dir) / "workspace"
+    if not workspace.exists():
+        return SessionMountsResponse(mounts=[])
 
-    # Load from mounts manifest (auto-generated by run.sh)
-    mounts_file = Path("/data/auto-generated/auto-generated-mounts.yaml")
-    if mounts_file.exists():
-        try:
-            with open(mounts_file, "r", encoding="utf-8") as f:
-                manifest = yaml.safe_load(f) or {}
+    mounts: list[MountEntry] = []
 
-            mounts_data = manifest.get("mounts", {})
+    # 1. Scan external/ subdirectories for static mounts
+    external_dir = workspace / "external"
+    host_paths = _load_mount_host_paths()
+    mount_type_map = {
+        "ro": ("external_ro", "ro"),
+        "rw": ("external_rw", "rw"),
+        "user-ro": ("user_ro", "ro"),
+        "user-rw": ("user_rw", "rw"),
+    }
+    if external_dir.is_dir():
+        for subdir_name, (mtype, mode) in mount_type_map.items():
+            subdir = external_dir / subdir_name
+            if subdir.is_dir():
+                try:
+                    for entry in sorted(subdir.iterdir()):
+                        if entry.is_symlink() or entry.is_dir():
+                            rel_path = f"external/{subdir_name}/{entry.name}"
+                            mounts.append(MountEntry(
+                                name=entry.name,
+                                path=rel_path,
+                                sandbox_path=f"./{rel_path}/",
+                                mode=mode,
+                                mount_type=mtype,
+                                host_path=host_paths.get(entry.name),
+                            ))
+                except OSError:
+                    pass
 
-            # Read-only mounts
-            if isinstance(mounts_data.get("ro"), list):
-                for mount in mounts_data["ro"]:
-                    if isinstance(mount, dict) and mount.get("name"):
-                        ro_mounts.append(MountInfo(
-                            name=mount["name"],
-                            path=f"./external/ro/{mount['name']}",
-                            description=mount.get("description"),
-                        ))
+    # 2. Check persistent storage
+    persistent = workspace / "persistent"
+    if persistent.exists() or persistent.is_symlink():
+        mounts.append(MountEntry(
+            name="persistent",
+            path="persistent",
+            sandbox_path="./persistent/",
+            mode="rw",
+            mount_type="persistent",
+        ))
 
-            # Read-write mounts
-            if isinstance(mounts_data.get("rw"), list):
-                for mount in mounts_data["rw"]:
-                    if isinstance(mount, dict) and mount.get("name"):
-                        rw_mounts.append(MountInfo(
-                            name=mount["name"],
-                            path=f"./external/rw/{mount['name']}",
-                            description=mount.get("description"),
-                        ))
-
-        except Exception as e:
-            logger.warning(f"Failed to load mounts config: {e}")
-
-    # Check for persistent storage
-    # Get username from session's user_id
-    from sqlalchemy import select
-    from ...db.models import User
-
+    # 3. Scan dynamic mounts (symlinks at workspace root pointing outside)
+    dynamic_meta = _read_dynamic_mount_metadata(workspace)
+    resolved_workspace = workspace.resolve()
     try:
-        result = await db.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if user:
-            persistent_dir = Path(f"/users/{user.username}/ag3ntum/persistent")
-            has_persistent = persistent_dir.exists()
-    except Exception as e:
-        logger.warning(f"Failed to check persistent storage: {e}")
+        for entry in sorted(workspace.iterdir()):
+            if not entry.is_symlink():
+                continue
+            name = entry.name
+            if name in ("external", "persistent", ".claude", "skills"):
+                continue
+            try:
+                entry.resolve().relative_to(resolved_workspace)
+            except ValueError:
+                # Symlink points outside workspace — it's a dynamic mount
+                meta = dynamic_meta.get(name, {})
+                mode = meta.get("mode", "ro")
+                mounts.append(MountEntry(
+                    name=name,
+                    path=name,
+                    sandbox_path=f"./{name}/",
+                    mode=mode,
+                    mount_type="dynamic",
+                    host_path=meta.get("host_path"),
+                ))
+    except OSError:
+        pass
 
-    return MountsResponse(
-        ro=ro_mounts,
-        rw=rw_mounts,
-        persistent=has_persistent,
-    )
+    return SessionMountsResponse(mounts=mounts)

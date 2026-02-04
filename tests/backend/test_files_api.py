@@ -18,6 +18,7 @@ from src.api.routes.files import (
     normalize_path_for_mount_check,
     validate_path_security,
     get_mount_info,
+    _load_mount_host_paths,
 )
 
 
@@ -122,6 +123,69 @@ class TestGetMountInfo:
         is_external, is_readonly, mount_type = get_mount_info("external/persistent/file.txt")
         assert is_external is True
         assert mount_type == "persistent"
+
+
+class TestGetMountInfoDynamic:
+    """Tests for get_mount_info with dynamic mounts (workspace_root symlinks)."""
+
+    @pytest.fixture
+    def workspace_with_dynamic_mount(self):
+        """Create workspace with a dynamic mount symlink pointing outside."""
+        temp_dir = Path(tempfile.mkdtemp(prefix="test_workspace_"))
+        session_dir = temp_dir / "session"
+        session_dir.mkdir()
+        workspace = session_dir / "workspace"
+        workspace.mkdir()
+
+        # Create a mount target outside workspace
+        mount_target = temp_dir / "mounts" / "logs"
+        mount_target.mkdir(parents=True)
+        (mount_target / "test.log").write_text("log data")
+
+        # Create symlink at workspace root pointing outside
+        (workspace / "var-log").symlink_to(mount_target)
+
+        # Write metadata file
+        import json
+        meta = {"var-log": {"mode": "ro", "source_base": "logs", "source_subpath": None, "host_path": "/var/log"}}
+        (session_dir / ".dynamic-mounts.json").write_text(json.dumps(meta))
+
+        yield workspace
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dynamic_mount_detected(self, workspace_with_dynamic_mount):
+        """Dynamic mount symlink at workspace root detected as external."""
+        is_external, is_readonly, mount_type = get_mount_info(
+            "var-log/test.log",
+            workspace_root=workspace_with_dynamic_mount,
+        )
+        assert is_external is True
+        assert mount_type == "dynamic"
+
+    def test_dynamic_mount_mode_from_metadata(self, workspace_with_dynamic_mount):
+        """Dynamic mount reads mode from .dynamic-mounts.json."""
+        is_external, is_readonly, mount_type = get_mount_info(
+            "var-log",
+            workspace_root=workspace_with_dynamic_mount,
+        )
+        assert is_external is True
+        assert is_readonly is True  # mode=ro in metadata
+
+    def test_regular_dir_not_dynamic(self, workspace_with_dynamic_mount):
+        """Regular directories (non-symlinks) are not detected as dynamic mounts."""
+        (workspace_with_dynamic_mount / "regular-dir").mkdir()
+        is_external, is_readonly, mount_type = get_mount_info(
+            "regular-dir",
+            workspace_root=workspace_with_dynamic_mount,
+        )
+        assert is_external is False
+        assert mount_type is None
+
+    def test_no_workspace_root_skips_dynamic_check(self):
+        """Without workspace_root, dynamic mount detection is skipped."""
+        is_external, is_readonly, mount_type = get_mount_info("var-log/test.log")
+        assert is_external is False
+        assert mount_type is None
 
 
 class TestValidatePathSecurity:
@@ -647,3 +711,104 @@ class TestPathFormatCompatibility:
         assert docker_path == temp_workspace / expected_suffix
         assert is_external is False
         assert mount_type == "workspace"
+
+
+class TestLoadMountHostPaths:
+    """Tests for _load_mount_host_paths helper that reads auto-generated manifest."""
+
+    def _write_manifest(self, tmp_path: Path, content: str) -> Path:
+        """Write a YAML manifest file and return its path."""
+        manifest_path = tmp_path / "auto-generated-mounts.yaml"
+        manifest_path.write_text(content, encoding="utf-8")
+        return manifest_path
+
+    def test_reads_ro_mounts(self, tmp_path):
+        """Reads host_path from ro section."""
+        manifest = self._write_manifest(tmp_path, """
+mounts:
+  ro:
+    - name: global_var_log
+      host_path: /var/log
+""")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {"global_var_log": "/var/log"}
+
+    def test_reads_all_sections(self, tmp_path):
+        """Reads host_path from all mount sections (ro, rw, user-ro, user-rw)."""
+        manifest = self._write_manifest(tmp_path, """
+mounts:
+  ro:
+    - name: global_var_log
+      host_path: /var/log
+  rw:
+    - name: product_docs
+      host_path: /Users/greg/PRODUCT
+  user-ro:
+    - name: all_documents
+      host_path: /Users/{username}/Documents
+  user-rw:
+    - name: user_data
+      host_path: /Users/{username}/Data
+""")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {
+            "global_var_log": "/var/log",
+            "product_docs": "/Users/greg/PRODUCT",
+            "all_documents": "/Users/{username}/Documents",
+            "user_data": "/Users/{username}/Data",
+        }
+
+    def test_missing_manifest_returns_empty(self, tmp_path):
+        """Returns empty dict when manifest file doesn't exist."""
+        nonexistent = tmp_path / "nonexistent" / "auto-generated-mounts.yaml"
+        result = _load_mount_host_paths(manifest_path=nonexistent)
+        assert result == {}
+
+    def test_skips_entries_without_name(self, tmp_path):
+        """Entries missing 'name' field are skipped."""
+        manifest = self._write_manifest(tmp_path, """
+mounts:
+  ro:
+    - host_path: /var/log
+    - name: valid_mount
+      host_path: /opt/data
+""")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {"valid_mount": "/opt/data"}
+
+    def test_skips_entries_without_host_path(self, tmp_path):
+        """Entries missing 'host_path' field are skipped."""
+        manifest = self._write_manifest(tmp_path, """
+mounts:
+  ro:
+    - name: no_path_mount
+    - name: valid_mount
+      host_path: /opt/data
+""")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {"valid_mount": "/opt/data"}
+
+    def test_empty_manifest_returns_empty(self, tmp_path):
+        """Empty manifest file returns empty dict."""
+        manifest = self._write_manifest(tmp_path, "")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {}
+
+    def test_malformed_yaml_returns_empty(self, tmp_path):
+        """Malformed YAML returns empty dict gracefully."""
+        manifest = self._write_manifest(tmp_path, "{{invalid yaml: [")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {}
+
+    def test_skips_non_dict_entries(self, tmp_path):
+        """Non-dict entries in mount lists are skipped."""
+        manifest = self._write_manifest(tmp_path, """
+mounts:
+  ro:
+    - just_a_string
+    - 42
+    - name: valid_mount
+      host_path: /opt/data
+""")
+        result = _load_mount_host_paths(manifest_path=manifest)
+        assert result == {"valid_mount": "/opt/data"}

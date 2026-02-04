@@ -387,10 +387,14 @@ class TraceProcessor:
     def __init__(
         self,
         tracer: TracerBase,
-        include_user_messages: bool = False
+        include_user_messages: bool = False,
+        path_display_mapping: Optional[dict[str, str]] = None,
     ) -> None:
         self.tracer = tracer
         self.include_user_messages = include_user_messages
+        # Path mapping for display: internal_prefix -> host_path
+        # e.g., {"external/ro/global_var_log": "/var/log"}
+        self._path_display_mapping = path_display_mapping or {}
         self._pending_tool_calls: dict[str, dict[str, Any]] = {}
         self._initialized = False
         self._task: Optional[str] = None
@@ -508,6 +512,71 @@ class TraceProcessor:
             )
         self._active_subagents.clear()
 
+    def set_path_display_mapping(self, mapping: dict[str, str]) -> None:
+        """
+        Set the path display mapping for transforming internal paths to host paths.
+
+        Args:
+            mapping: Dict of internal_prefix -> host_path
+                     e.g., {"external/ro/global_var_log": "/var/log"}
+        """
+        self._path_display_mapping = mapping
+
+    def _transform_paths_for_display(self, text: str) -> str:
+        """
+        Replace internal mount paths with host paths for user-friendly display.
+
+        Transforms paths like:
+        - ./external/ro/global_var_log/syslog -> /var/log/syslog
+        - external/user-ro/documents/file.txt -> /Users/greg/Documents/file.txt
+
+        Args:
+            text: Input text that may contain internal mount paths.
+
+        Returns:
+            Text with internal paths transformed to host paths.
+        """
+        if not self._path_display_mapping or not text:
+            return text
+
+        result = text
+        # Sort by length (longest first) to handle nested paths correctly
+        for internal_prefix, host_path in sorted(
+            self._path_display_mapping.items(),
+            key=lambda x: -len(x[0])
+        ):
+            # Match paths with optional ./ prefix and optional subpath
+            # Handles: ./external/ro/name, external/ro/name, ./external/ro/name/sub/path
+            # Word boundary: stop at whitespace, quotes, backticks, commas, etc.
+            pattern = rf'(\./)?{re.escape(internal_prefix)}(/[^\s\'"`\],)}}]*)?'
+            def make_replacer(hp: str):
+                def replacer(m: re.Match) -> str:
+                    subpath = m.group(2) or ''
+                    return hp + subpath
+                return replacer
+            result = re.sub(pattern, make_replacer(host_path), result)
+
+        return result
+
+    def _sanitize_text(self, text: str) -> str:
+        """
+        Apply all text sanitization filters including path transformation.
+
+        This combines the global sanitize_text_for_display with instance-specific
+        path transformations.
+
+        Args:
+            text: Input text from agent output.
+
+        Returns:
+            Sanitized text suitable for display to end users.
+        """
+        # Apply global sanitization (system reminders, tool names, attached files)
+        result = sanitize_text_for_display(text)
+        # Apply path transformation
+        result = self._transform_paths_for_display(result)
+        return result
+
     def process_message(self, message: SDKMessage) -> None:
         """
         Process a single SDK message and dispatch to tracer.
@@ -593,7 +662,7 @@ class TraceProcessor:
     def _process_content_block(self, block: ContentBlock) -> None:
         """Process a single content block."""
         if isinstance(block, TextBlock):
-            self.tracer.on_message(sanitize_text_for_display(block.text))
+            self.tracer.on_message(self._sanitize_text(block.text))
 
         elif isinstance(block, ThinkingBlock):
             self.tracer.on_thinking(block.thinking)
@@ -664,7 +733,7 @@ class TraceProcessor:
     def _process_dict_block(self, block: dict[str, Any]) -> None:
         """Process a dictionary-style content block."""
         if "text" in block:
-            self.tracer.on_message(sanitize_text_for_display(block["text"]))
+            self.tracer.on_message(self._sanitize_text(block["text"]))
         elif "thinking" in block:
             self.tracer.on_thinking(block["thinking"])
         elif "name" in block and "input" in block:
@@ -886,8 +955,8 @@ class TraceProcessor:
                 if block_type == "text":
                     text = content_block.get("text")
                     if isinstance(text, str) and text:
-                        # Sanitize text for display (removes system-reminders, cleans tool names)
-                        filtered_text = sanitize_text_for_display(text)
+                        # Sanitize text for display (removes system-reminders, cleans tool names, transforms paths)
+                        filtered_text = self._sanitize_text(text)
                         if filtered_text:
                             self._stream_has_text = True
                             # Route to subagent handler if in subagent context
@@ -917,8 +986,8 @@ class TraceProcessor:
                 if delta_type == "text_delta":
                     text = delta.get("text")
                     if isinstance(text, str) and text:
-                        # Sanitize text for display (removes system-reminders, cleans tool names)
-                        filtered_text = sanitize_text_for_display(text)
+                        # Sanitize text for display (removes system-reminders, cleans tool names, transforms paths)
+                        filtered_text = self._sanitize_text(text)
                         if filtered_text:
                             self._stream_has_text = True
                             # Route to subagent handler if in subagent context

@@ -163,6 +163,7 @@ vi.mock('../../../src/web_terminal_client/src/api', () => ({
   downloadFile: vi.fn(),
   getFileContent: vi.fn(),
   uploadFiles: vi.fn(),
+  getSessionMounts: vi.fn().mockResolvedValue({ mounts: [] }),
 }));
 
 // Mock FileViewer components
@@ -624,6 +625,257 @@ describe('FileExplorer Component', () => {
         const uploadButton = container.querySelector('.file-explorer-upload-btn, button[title*="Upload"]');
         expect(uploadButton).toBeInTheDocument();
       });
+    });
+  });
+
+  // ==========================================================================
+  // External Mount Flattening
+  // ==========================================================================
+  describe('External Mount Flattening', () => {
+    it('hides external/ directory and shows flattened mounts at root', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+          createMockFileInfo({
+            name: 'persistent',
+            path: 'persistent',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      const mockMounts = {
+        mounts: [
+          {
+            name: 'global_var_log',
+            path: 'external/ro/global_var_log',
+            sandbox_path: './external/ro/global_var_log/',
+            mode: 'ro' as const,
+            mount_type: 'external_ro',
+            host_path: '/var/log',
+          },
+          {
+            name: 'persistent',
+            path: 'persistent',
+            sandbox_path: './persistent/',
+            mode: 'rw' as const,
+            mount_type: 'persistent',
+          },
+        ],
+      };
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue(mockMounts);
+
+      renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        // External mount should appear with host_path as display name
+        expect(screen.getByText('/var/log')).toBeInTheDocument();
+      });
+
+      // The 'external' directory should be hidden
+      expect(screen.queryByText('external')).not.toBeInTheDocument();
+      // Persistent should still appear
+      expect(screen.getByText('persistent')).toBeInTheDocument();
+    });
+
+    it('shows mount badge for flattened external mounts', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      const mockMounts = {
+        mounts: [
+          {
+            name: 'global_var_log',
+            path: 'external/ro/global_var_log',
+            sandbox_path: './external/ro/global_var_log/',
+            mode: 'ro' as const,
+            mount_type: 'external_ro',
+            host_path: '/var/log',
+          },
+        ],
+      };
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue(mockMounts);
+
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('/var/log')).toBeInTheDocument();
+      });
+
+      // Should have a mount badge
+      const badge = container.querySelector('.mount-badge');
+      expect(badge).toBeInTheDocument();
+      expect(badge?.textContent).toBe('R');
+    });
+
+    it('shows RW badge for read-write external mounts', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      const mockMounts = {
+        mounts: [
+          {
+            name: 'product_docs',
+            path: 'external/rw/product_docs',
+            sandbox_path: './external/rw/product_docs/',
+            mode: 'rw' as const,
+            mount_type: 'external_rw',
+            host_path: '/Users/greg/PRODUCT',
+          },
+        ],
+      };
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue(mockMounts);
+
+      const { container } = renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('/Users/greg/PRODUCT')).toBeInTheDocument();
+      });
+
+      const badge = container.querySelector('.mount-badge');
+      expect(badge).toBeInTheDocument();
+      expect(badge?.textContent).toBe('RW');
+    });
+
+    it('does not hide external/ when no external mounts exist', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue({ mounts: [] });
+
+      renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        // With no external mounts, external/ should remain visible
+        expect(screen.getByText('external')).toBeInTheDocument();
+      });
+    });
+
+    it('falls back to mount name when host_path is not available', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      const mockMounts = {
+        mounts: [
+          {
+            name: 'some_mount',
+            path: 'external/ro/some_mount',
+            sandbox_path: './external/ro/some_mount/',
+            mode: 'ro' as const,
+            mount_type: 'external_ro',
+            // no host_path
+          },
+        ],
+      };
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue(mockMounts);
+
+      renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        // Should fall back to mount name
+        expect(screen.getByText('some_mount')).toBeInTheDocument();
+      });
+    });
+
+    it('flattens user-ro and user-rw mounts alongside external mounts', async () => {
+      const mockListing = createMockDirectoryListing({
+        files: [
+          createMockFileInfo({
+            name: 'external',
+            path: 'external',
+            is_directory: true,
+            mime_type: null,
+            is_viewable: false,
+          }),
+        ],
+      });
+
+      const mockMounts = {
+        mounts: [
+          {
+            name: 'global_var_log',
+            path: 'external/ro/global_var_log',
+            sandbox_path: './external/ro/global_var_log/',
+            mode: 'ro' as const,
+            mount_type: 'external_ro',
+            host_path: '/var/log',
+          },
+          {
+            name: 'user_documents',
+            path: 'external/user-ro/user_documents',
+            sandbox_path: './external/user-ro/user_documents/',
+            mode: 'ro' as const,
+            mount_type: 'user_ro',
+            host_path: '/Users/greg/Documents',
+          },
+        ],
+      };
+
+      vi.mocked(api.browseFiles).mockResolvedValue(mockListing);
+      vi.mocked((api as any).getSessionMounts).mockResolvedValue(mockMounts);
+
+      renderWithToast(<FileExplorer {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('/var/log')).toBeInTheDocument();
+        expect(screen.getByText('/Users/greg/Documents')).toBeInTheDocument();
+      });
+
+      // external/ should be hidden
+      expect(screen.queryByText('external')).not.toBeInTheDocument();
     });
   });
 });
