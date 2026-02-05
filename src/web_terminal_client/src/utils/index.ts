@@ -26,6 +26,44 @@ export const blockAltKeyHotkeys = (e: React.KeyboardEvent<HTMLTextAreaElement | 
   return false;
 };
 
+/**
+ * Calculate the text to insert with smart spacing.
+ * Adds space before if the character before cursor is non-whitespace
+ * AND the text to insert doesn't already start with whitespace.
+ * Adds space after if the character after cursor is non-whitespace
+ * AND the text to insert doesn't already end with whitespace.
+ *
+ * @param value - Current textarea value
+ * @param start - Selection start (cursor position)
+ * @param end - Selection end (same as start if no selection)
+ * @param textToInsert - Text to insert at cursor
+ * @returns Object with paddedText, newValue, and newCursorPos
+ */
+export function calculateInsertText(
+  value: string,
+  start: number,
+  end: number,
+  textToInsert: string
+): { paddedText: string; newValue: string; newCursorPos: number } {
+  // If nothing to insert, return unchanged
+  if (!textToInsert) {
+    return { paddedText: '', newValue: value, newCursorPos: start };
+  }
+
+  const charBefore = start > 0 ? value[start - 1] : '';
+  const charAfter = end < value.length ? value[end] : '';
+
+  // Don't add space if text already has leading/trailing whitespace
+  const needsSpaceBefore = charBefore !== '' && !/\s/.test(charBefore) && !/^\s/.test(textToInsert);
+  const needsSpaceAfter = charAfter !== '' && !/\s/.test(charAfter) && !/\s$/.test(textToInsert);
+
+  const paddedText = (needsSpaceBefore ? ' ' : '') + textToInsert + (needsSpaceAfter ? ' ' : '');
+  const newValue = value.slice(0, start) + paddedText + value.slice(end);
+  const newCursorPos = start + paddedText.length;
+
+  return { paddedText, newValue, newCursorPos };
+}
+
 export function isValidSessionId(sessionId: string | undefined | null): sessionId is string {
   if (!sessionId) return false;
   if (sessionId.length > 24) return false;

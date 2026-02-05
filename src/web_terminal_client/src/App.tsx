@@ -84,6 +84,7 @@ const TERMINAL_STATUSES = new Set(['complete', 'completed', 'partial', 'failed',
 import { useElapsedTime, useSpinnerFrame } from './hooks';
 import {
   blockAltKeyHotkeys,
+  calculateInsertText,
   copyAsMarkdown,
   copyAsRichText,
   extractFilePaths,
@@ -1727,6 +1728,7 @@ function InputField({
   token,
   dynamicMounts,
   onMountsChange,
+  registerInsertText,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -1743,6 +1745,7 @@ function InputField({
   token?: string;
   dynamicMounts: DynamicMountRequest[];
   onMountsChange: (mounts: DynamicMountRequest[]) => void;
+  registerInsertText?: (insertFn: (text: string) => void) => void;
 }): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1804,21 +1807,7 @@ function InputField({
     // Check for text/plain first (filename from file explorer drag)
     const textData = e.dataTransfer.getData('text/plain');
     if (textData && !e.dataTransfer.files.length) {
-      // Insert the filename at cursor position or append to value
-      const textarea = textareaRef.current;
-      if (textarea) {
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const newValue = value.slice(0, start) + textData + value.slice(end);
-        onChange(newValue);
-        // Set cursor position after inserted text
-        setTimeout(() => {
-          textarea.selectionStart = textarea.selectionEnd = start + textData.length;
-          textarea.focus();
-        }, 0);
-      } else {
-        onChange(value + (value && !value.endsWith(' ') ? ' ' : '') + textData);
-      }
+      handleInsertText(textData);
       return;
     }
 
@@ -1869,6 +1858,39 @@ function InputField({
       textarea.style.height = `${textarea.scrollHeight}px`;
     }
   }, [value]);
+
+  // Smart text insertion at cursor position with automatic spacing
+  const handleInsertText = useCallback((text: string): void => {
+    if (!text) return;
+
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      // Fallback: append with spacing if textarea not available
+      const needsSpace = value.length > 0 && !/\s$/.test(value);
+      onChange(value + (needsSpace ? ' ' : '') + text);
+      return;
+    }
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+
+    // Use utility function for the calculation
+    const { newValue, newCursorPos } = calculateInsertText(value, start, end, text);
+    onChange(newValue);
+
+    // Position cursor after inserted text
+    setTimeout(() => {
+      textarea.selectionStart = textarea.selectionEnd = newCursorPos;
+      textarea.focus();
+    }, 0);
+  }, [value, onChange]);
+
+  // Register the insert function with parent component
+  useEffect(() => {
+    if (registerInsertText) {
+      registerInsertText(handleInsertText);
+    }
+  }, [registerInsertText, handleInsertText]);
 
   return (
     <div className="input-area">
@@ -2163,6 +2185,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const cleanupRef = useRef<(() => void) | null>(null);
   const activeTurnRef = useRef(0);
   const lastStableRightPanelMessageRef = useRef<ConversationItem | null>(null);
+  const insertTextFnRef = useRef<((text: string) => void) | null>(null);
 
   const isRunning = status === 'running';
   const statusLabel = STATUS_LABELS[status] ?? STATUS_LABELS.idle;
@@ -4721,7 +4744,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                 id={skill.id}
                 name={skill.name}
                 description={skill.description}
-                onClick={() => setInputValue(`/${skill.id} `)}
+                onClick={() => insertTextFnRef.current?.(`/${skill.id}`)}
               />
             ))}
           </div>
@@ -4770,6 +4793,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               token={token}
               dynamicMounts={dynamicMounts}
               onMountsChange={setDynamicMounts}
+              registerInsertText={(fn) => { insertTextFnRef.current = fn; }}
             />
             <div className={`input-message ${error ? (reconnecting || connectionState === 'polling' ? 'warning' : 'error') : ''}`}>
               {error || '\u00A0'}
@@ -4908,10 +4932,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                   onNavigateComplete={handleNavigateComplete}
                   refreshTrigger={fileExplorerRefreshTrigger}
                   onFileNameInsert={(filename) => {
-                    setInputValue((prev) => {
-                      const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-                      return prev + (needsSpace ? ' ' : '') + filename;
-                    });
+                    insertTextFnRef.current?.(filename);
                   }}
                 />
               </>
