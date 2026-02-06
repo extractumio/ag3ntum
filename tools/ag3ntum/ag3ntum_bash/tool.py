@@ -385,7 +385,7 @@ def _error_response(message: str) -> dict[str, Any]:
             "type": "text",
             "text": f"**Error:** {message}"
         }],
-        "isError": True
+        "is_error": True
     }
 
 

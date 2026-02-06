@@ -30,6 +30,7 @@ class ProxyConfig:
     port: int
     log_level: str
     enable_streaming: bool
+    debug: bool  # Save request/response to data/llm_proxy_debug/
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ def load_llm_proxy_config() -> LlmProxyConfig:
         port=int(_require(proxy_raw, "port", context="proxy")),
         log_level=str(_require(proxy_raw, "log_level", context="proxy")),
         enable_streaming=bool(proxy_raw.get("enable_streaming", True)),
+        debug=bool(proxy_raw.get("debug", False)),
     )
 
     providers: dict[str, ProviderConfig] = {}

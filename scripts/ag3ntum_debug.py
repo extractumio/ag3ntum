@@ -141,7 +141,8 @@ class Ag3ntumDebugCLI:
             return None
 
     async def run_request(
-        self, request: str, user: str = "greg", password: str = "test123"
+        self, request: str, user: str = "greg", password: str = "test123",
+        model: str | None = None
     ) -> DebugResult:
         """
         Execute a request and collect all events.
@@ -166,10 +167,16 @@ class Ag3ntumDebugCLI:
 
         # Step 2: Create session and start task
         async with httpx.AsyncClient(timeout=60.0) as client:
+            # Build request body with optional model override
+            request_body: dict[str, Any] = {"task": request}
+            if model:
+                request_body["config"] = {"model": model}
+                console.print(f"[cyan]→[/cyan] Using model: [bold]{model}[/bold]")
+
             resp = await client.post(
                 f"{self.api_url}/sessions/run",
                 headers={"Authorization": f"Bearer {self.token}"},
-                json={"task": request},
+                json=request_body,
             )
             if resp.status_code not in (200, 201):
                 result.error = (
@@ -447,6 +454,12 @@ Examples:
         action="store_true",
         help="Dump session files after",
     )
+    parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help="Model to use (e.g., 'openrouter:openai/gpt-5.2')",
+    )
 
     args = parser.parse_args()
 
@@ -456,7 +469,7 @@ Examples:
     console.print(f"[dim]Target: {cli.base_url}[/dim]\n")
 
     result = await cli.run_request(
-        args.request, user=args.email, password=args.password
+        args.request, user=args.email, password=args.password, model=args.model
     )
 
     if result.error and not result.events:

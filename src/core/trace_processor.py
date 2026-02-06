@@ -16,6 +16,7 @@ Usage:
         async for message in client.receive_response():
             processor.process_message(message)
 """
+import logging
 import re
 import time
 from typing import Any, Optional, Union
@@ -40,6 +41,8 @@ from claude_agent_sdk.types import (
 )
 
 from .tracer import TracerBase
+
+logger = logging.getLogger(__name__)
 
 
 # Pattern to match <system-reminder>...</system-reminder> blocks (including multiline)
@@ -431,6 +434,60 @@ class TraceProcessor:
         self._thinking_emit_interval: float = 1.0  # seconds
         # Track tool errors for session status determination
         self._tool_error_count: int = 0
+        # Circuit breaker: track consecutive identical tool failures
+        # Key: tool_name, Value: (error_signature, consecutive_count)
+        self._tool_failure_tracker: dict[str, tuple[str, int]] = {}
+        self._circuit_breaker_tripped: bool = False
+        self._circuit_breaker_message: str = ""
+        # Max consecutive identical failures before circuit breaker trips
+        self._max_consecutive_failures: int = 5
+
+    def _detect_tool_error(
+        self,
+        is_error_field: Optional[bool],
+        content: Any,
+        raw_block: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Detect if a tool result indicates an error using multiple methods.
+
+        The Claude Agent SDK has a bug where MCP tools returning `isError: True`
+        (camelCase, per MCP protocol) are recorded as `is_error: null` instead
+        of `is_error: true`. This method works around that by checking multiple
+        sources for error indication.
+
+        Args:
+            is_error_field: The is_error field from ToolResultBlock (may be None/null).
+            content: The tool result content (string or list of content blocks).
+            raw_block: Optional raw dict block that may contain isError (camelCase).
+
+        Returns:
+            True if the tool result indicates an error, False otherwise.
+        """
+        # 1. Check is_error field (snake_case) - direct from SDK
+        if is_error_field is True:
+            return True
+
+        # 2. Check isError field (camelCase) - from raw MCP response
+        if raw_block and raw_block.get("isError") is True:
+            return True
+
+        # 3. Check for **Error:** prefix in content text
+        # This is how all ag3ntum tools format error messages
+        text_content = ""
+        if isinstance(content, str):
+            text_content = content
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_content += block.get("text", "")
+                elif isinstance(block, str):
+                    text_content += block
+
+        if text_content.startswith("**Error:**"):
+            return True
+
+        return False
 
     def set_task(self, task: str) -> None:
         """
@@ -490,6 +547,101 @@ class TraceProcessor:
     def had_tool_errors(self) -> bool:
         """Return True if any tool errors occurred during execution."""
         return self._tool_error_count > 0
+
+    @property
+    def circuit_breaker_tripped(self) -> bool:
+        """Return True if the circuit breaker has been tripped due to repeated failures."""
+        return self._circuit_breaker_tripped
+
+    @property
+    def circuit_breaker_message(self) -> str:
+        """Return the circuit breaker error message if tripped."""
+        return self._circuit_breaker_message
+
+    def _extract_error_signature(self, error_content: Any) -> str:
+        """
+        Extract a normalized error signature from tool result content.
+
+        This creates a fingerprint of the error type to detect repeated
+        identical failures (e.g., same validation error, same missing parameter).
+
+        Args:
+            error_content: The tool result content (may be string or list).
+
+        Returns:
+            A normalized error signature string.
+        """
+        if isinstance(error_content, str):
+            text = error_content
+        elif isinstance(error_content, list):
+            # Extract text from content blocks
+            parts = []
+            for block in error_content:
+                if isinstance(block, dict) and "text" in block:
+                    parts.append(block["text"])
+                elif isinstance(block, str):
+                    parts.append(block)
+            text = " ".join(parts)
+        else:
+            text = str(error_content)
+
+        # Normalize: extract key error patterns, remove variable parts
+        # Look for common error patterns
+        import re
+
+        # Extract the error type/message core (first 200 chars, normalized)
+        text = text[:500]
+
+        # Remove UUIDs, timestamps, and other variable parts
+        text = re.sub(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', '<UUID>', text)
+        text = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '<TIMESTAMP>', text)
+        text = re.sub(r'tool_use_[a-zA-Z0-9_]+', '<TOOL_ID>', text)
+
+        # Keep just the first 200 chars after normalization as the signature
+        return text[:200].strip()
+
+    def _track_tool_failure(self, tool_name: str, error_content: Any) -> None:
+        """
+        Track a tool failure and check if circuit breaker should trip.
+
+        Args:
+            tool_name: Name of the failed tool.
+            error_content: The error content from the tool result.
+        """
+        error_sig = self._extract_error_signature(error_content)
+
+        # Check if this is the same error as before for this tool
+        if tool_name in self._tool_failure_tracker:
+            prev_sig, prev_count = self._tool_failure_tracker[tool_name]
+            if prev_sig == error_sig:
+                # Same error repeated
+                new_count = prev_count + 1
+                self._tool_failure_tracker[tool_name] = (error_sig, new_count)
+
+                if new_count >= self._max_consecutive_failures:
+                    self._circuit_breaker_tripped = True
+                    self._circuit_breaker_message = (
+                        f"Circuit breaker tripped: Tool '{tool_name}' failed "
+                        f"{new_count} consecutive times with the same error. "
+                        f"Error pattern: {error_sig[:100]}..."
+                    )
+                    logger.warning(self._circuit_breaker_message)
+            else:
+                # Different error - reset counter
+                self._tool_failure_tracker[tool_name] = (error_sig, 1)
+        else:
+            # First failure for this tool
+            self._tool_failure_tracker[tool_name] = (error_sig, 1)
+
+    def _reset_tool_failure_tracker(self, tool_name: str) -> None:
+        """
+        Reset the failure tracker for a tool after a successful execution.
+
+        Args:
+            tool_name: Name of the tool that succeeded.
+        """
+        if tool_name in self._tool_failure_tracker:
+            del self._tool_failure_tracker[tool_name]
 
     def finalize_orphaned_subagents(self) -> None:
         """
@@ -701,11 +853,18 @@ class TraceProcessor:
             tool_id = block.tool_use_id
             tool_info = self._pending_tool_calls.pop(tool_id, {})
             tool_name = tool_info.get("name", "unknown")
-            is_error = block.is_error or False
+            # Use enhanced error detection to work around SDK bug
+            # where isError (camelCase) becomes is_error: null
+            is_error = self._detect_tool_error(block.is_error, block.content)
 
             # Track tool errors for session status determination
             if is_error:
                 self._tool_error_count += 1
+                # Track for circuit breaker
+                self._track_tool_failure(tool_name, block.content)
+            else:
+                # Reset failure tracker on success
+                self._reset_tool_failure_tracker(tool_name)
 
             self.tracer.on_tool_complete(
                 tool_name=tool_name,
@@ -723,7 +882,7 @@ class TraceProcessor:
                     task_id=tool_id,
                     result=block.content,
                     duration_ms=duration_ms,
-                    is_error=block.is_error or False
+                    is_error=is_error
                 )
 
         elif isinstance(block, dict):
@@ -785,16 +944,27 @@ class TraceProcessor:
             # Tool result
             tool_id = block["tool_use_id"]
             tool_info = self._pending_tool_calls.pop(tool_id, {})
-            is_error = block.get("is_error", False)
+            tool_name = tool_info.get("name", "unknown")
+            content = block.get("content", "")
+            # Use enhanced error detection to work around SDK bug
+            # where isError (camelCase) becomes is_error: null
+            is_error = self._detect_tool_error(
+                block.get("is_error"), content, raw_block=block
+            )
 
             # Track tool errors for session status determination
             if is_error:
                 self._tool_error_count += 1
+                # Track for circuit breaker
+                self._track_tool_failure(tool_name, content)
+            else:
+                # Reset failure tracker on success
+                self._reset_tool_failure_tracker(tool_name)
 
             self.tracer.on_tool_complete(
-                tool_name=tool_info.get("name", "unknown"),
+                tool_name=tool_name,
                 tool_id=tool_id,
-                result=block.get("content", ""),
+                result=content,
                 duration_ms=0,
                 is_error=is_error
             )
@@ -805,9 +975,9 @@ class TraceProcessor:
                 duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
                 self.tracer.on_subagent_stop(
                     task_id=tool_id,
-                    result=block.get("content", ""),
+                    result=content,
                     duration_ms=duration_ms,
-                    is_error=block.get("is_error", False)
+                    is_error=is_error
                 )
 
     def _handle_user_message(self, msg: UserMessage) -> None:
@@ -826,11 +996,18 @@ class TraceProcessor:
                     tool_id = block.tool_use_id
                     tool_info = self._pending_tool_calls.pop(tool_id, {})
                     tool_name = tool_info.get("name", "unknown")
-                    is_error = block.is_error or False
+                    # Use enhanced error detection to work around SDK bug
+                    # where isError (camelCase) becomes is_error: null
+                    is_error = self._detect_tool_error(block.is_error, block.content)
 
                     # Track tool errors for session status determination
                     if is_error:
                         self._tool_error_count += 1
+                        # Track for circuit breaker
+                        self._track_tool_failure(tool_name, block.content)
+                    else:
+                        # Reset failure tracker on success
+                        self._reset_tool_failure_tracker(tool_name)
 
                     self.tracer.on_tool_complete(
                         tool_name=tool_name,
@@ -839,7 +1016,7 @@ class TraceProcessor:
                         duration_ms=0,
                         is_error=is_error
                     )
-                    
+
                     # Handle Task tool completion for subagent tracing
                     if tool_id in self._active_subagents:
                         subagent_info = self._active_subagents.pop(tool_id)
@@ -848,35 +1025,45 @@ class TraceProcessor:
                             task_id=tool_id,
                             result=block.content,
                             duration_ms=duration_ms,
-                            is_error=block.is_error or False
+                            is_error=is_error
                         )
-                
+
                 # Handle dict-style tool results (from JSON parsing)
                 elif isinstance(block, dict) and "tool_use_id" in block:
                     tool_id = block["tool_use_id"]
                     tool_info = self._pending_tool_calls.pop(tool_id, {})
                     tool_name = tool_info.get("name", "unknown")
-                    is_error = block.get("is_error", False) or False
+                    block_content = block.get("content", "")
+                    # Use enhanced error detection to work around SDK bug
+                    # where isError (camelCase) becomes is_error: null
+                    is_error = self._detect_tool_error(
+                        block.get("is_error"), block_content, raw_block=block
+                    )
 
                     # Track tool errors for session status determination
                     if is_error:
                         self._tool_error_count += 1
+                        # Track for circuit breaker
+                        self._track_tool_failure(tool_name, block_content)
+                    else:
+                        # Reset failure tracker on success
+                        self._reset_tool_failure_tracker(tool_name)
 
                     self.tracer.on_tool_complete(
                         tool_name=tool_name,
                         tool_id=tool_id,
-                        result=block.get("content", ""),
+                        result=block_content,
                         duration_ms=0,
                         is_error=is_error
                     )
-                    
-                    # Handle Task tool completion for subagent tracing  
+
+                    # Handle Task tool completion for subagent tracing
                     if tool_id in self._active_subagents:
                         subagent_info = self._active_subagents.pop(tool_id)
                         duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
                         self.tracer.on_subagent_stop(
                             task_id=tool_id,
-                            result=block.get("content", ""),
+                            result=block_content,
                             duration_ms=duration_ms,
                             is_error=is_error
                         )

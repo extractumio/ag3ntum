@@ -272,7 +272,7 @@ def _result(text: str) -> dict[str, Any]:
 
 def _error(message: str) -> dict[str, Any]:
     """Create an error response."""
-    return {"content": [{"type": "text", "text": f"**Error:** {message}"}], "isError": True}
+    return {"content": [{"type": "text", "text": f"**Error:** {message}"}], "is_error": True}
 
 
 def create_ag3ntum_read_document_mcp_server(
