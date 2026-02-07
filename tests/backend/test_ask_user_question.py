@@ -197,7 +197,7 @@ class TestAskUserQuestionToolValidation:
 
         result = _error("Test error message")
 
-        assert result.get("isError") is True
+        assert result.get("is_error") is True
         assert "Test error message" in result["content"][0]["text"]
 
     @pytest.mark.asyncio
