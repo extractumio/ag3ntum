@@ -168,15 +168,14 @@ sandbox:
       source: "/bin"
       target: "/bin"
       mode: ro
-    # DNS resolution (required for network requests)
-    etc_resolv:
-      source: "/etc/resolv.conf"
-      target: "/etc/resolv.conf"
-      mode: ro
-    # SSL certificates (required for HTTPS)
-    etc_ssl:
-      source: "/etc/ssl"
-      target: "/etc/ssl"
+    # /etc directory (read-only)
+    # Includes: resolv.conf (DNS), nsswitch.conf (NSS), hosts, ssl certs, passwd, group
+    # IMPORTANT: Must mount entire /etc directory, not individual files.
+    # Bind-mounting individual files causes them to become inaccessible after
+    # privilege dropping via setpriv in the bwrap sandbox.
+    system_etc:
+      source: "/etc"
+      target: "/etc"
       mode: ro
   session_mounts:
     # Session workspace (read-write)

@@ -25,6 +25,21 @@ Design plans in `docs/plans/`: PostgreSQL migration, host command bridge, prompt
 
 ---
 
+## Environment Constraints
+
+- **No sudo access**: Do not suggest solutions requiring sudo (package installs, service restarts, group membership changes). If sudo is truly required, inform the user immediately and let them handle it.
+- **Container UID is 45045**: When fixing file permissions or ownership in the container environment, do not set ownership to the host username (`greg`). Use the container UID.
+- **Use absolute paths**: Always use absolute paths in shell scripts, not relative paths.
+- **Test user UIDs**: Avoid UIDs in the 50000-50100 range as they conflict with real database users. Use UIDs 59990+ for test users.
+
+---
+
+## Code Editing
+
+When editing files, prefer the Write or Edit tool over bash sed commands. sed-based edits have repeatedly corrupted files (especially App.tsx and shell scripts), requiring git restore.
+
+---
+
 ## Commands
 
 ```bash
@@ -45,6 +60,8 @@ Design plans in `docs/plans/`: PostgreSQL migration, host command bridge, prompt
 ./run.sh test --ui                     # Frontend vitest (alias: --frontend)
 ./run.sh test --subset "session*,auth*" # Pattern-match test files
 ```
+
+**Always use `./run.sh`** for building, testing, and running containers. Do not use raw docker/docker-compose commands unless explicitly asked.
 
 URLs after build: **Web UI** http://localhost:50080 | **API** http://localhost:40080
 
@@ -232,6 +249,8 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 
 ## Testing
 
+**Always write tests alongside new feature implementations** — do not wait to be asked. If modifying existing functionality, update related tests in the same pass.
+
 All tests run **inside Docker** via `docker-compose.test.yml` (root → drops to ag3ntum_api via `setpriv --init-groups`, `AG3NTUM_TEST_MODE=true`).
 
 **Test entrypoint** (`entrypoint-test.sh`): Installs test sudoers, syncs Linux users from DB, creates fully-equipped test users (`ag3ntum_tester_a` UID 59990, `ag3ntum_tester_b` UID 59991) with DB entries, venvs, persistent storage, and shared GID memberships, then drops privileges. Test users are at the high end of the isolated range to avoid conflicts with real users. Credentials: email `ag3ntum_tester_a@test.local`, password `TestPassword123!`.
@@ -409,6 +428,12 @@ The script makes 3 API calls: text-only, single tool call, multiple tool calls. 
 - `cache_creation`: nested object with `ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`
 - `service_tier`, `inference_geo`: in usage object
 - `input_json_delta`: first delta can be empty string
+
+---
+
+## Documentation
+
+**Always update relevant documentation alongside new feature implementations, fixes or refactoring** — do not wait to be asked. If modifying existing functionality, update related documentation in the same pass. Scan @DOCUMENTS/TECHNICAL or @doc folders for the document to update.
 
 ---
 

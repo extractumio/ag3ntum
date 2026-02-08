@@ -341,7 +341,22 @@ Example:
             # Build result
             relative_path = f"{bound_output_dir}/{filename}"
 
-            result_text = f"""**Command executed successfully**
+            # Check for network errors and provide recovery guidance
+            if exit_code != 0:
+                network_error_msg = _enhance_network_error(output_text, exit_code)
+                if network_error_msg:
+                    logger.warning(
+                        f"Ag3ntumBash: Network error detected - exit={exit_code}"
+                    )
+                    return {
+                        "content": [{
+                            "type": "text",
+                            "text": network_error_msg
+                        }],
+                        "is_error": True
+                    }
+
+            result_text = f"""**Command executed {"successfully" if exit_code == 0 else f"with exit code {exit_code}"}**
 
 **Output file:** `{relative_path}`
 **Exit code:** {exit_code}
@@ -368,7 +383,9 @@ Example:
                 "content": [{
                     "type": "text",
                     "text": result_text
-                }]
+                }],
+                # Mark as error if exit code is non-zero
+                **({"is_error": True} if exit_code != 0 else {})
             }
 
         except Exception as e:
@@ -387,6 +404,62 @@ def _error_response(message: str) -> dict[str, Any]:
         }],
         "is_error": True
     }
+
+
+# Network error patterns and recovery guidance
+NETWORK_ERROR_PATTERNS = [
+    ("name resolution", "DNS resolution failed"),
+    ("temporary failure in name resolution", "DNS resolution failed"),
+    ("connection refused", "Connection refused by remote host"),
+    ("connection timed out", "Connection timed out"),
+    ("network is unreachable", "Network is unreachable"),
+    ("no route to host", "No route to host"),
+    ("connection reset", "Connection reset by peer"),
+    ("ssl", "SSL/TLS error"),
+    ("certificate", "Certificate verification error"),
+]
+
+
+def _enhance_network_error(output: str, exit_code: int) -> str | None:
+    """
+    Check if output contains network-related errors and return enhanced message.
+
+    Args:
+        output: Command output text.
+        exit_code: Command exit code.
+
+    Returns:
+        Enhanced error message with recovery guidance, or None if not a network error.
+    """
+    if exit_code == 0:
+        return None
+
+    output_lower = output.lower()
+
+    for pattern, description in NETWORK_ERROR_PATTERNS:
+        if pattern in output_lower:
+            return f"""**Network Error Detected:** {description}
+
+**Original error:** {output.strip()[:500]}
+
+**Suggested Recovery Actions:**
+1. **Ask the user** - Use `mcp__ag3ntum__AskUserQuestion` to ask if they want to:
+   - Retry the operation later
+   - Provide an alternative approach
+   - Skip this step and continue with other tasks
+
+2. **Try alternatives** - If the command calls an external API:
+   - Check if a different vendor/endpoint is available
+   - Consider if the task can be completed offline
+
+3. **Provide manual instructions** - Give the user the exact command to run manually:
+   ```
+   {output.strip()[:200]}
+   ```
+
+**Do NOT** repeatedly retry the same network operation - ask for user guidance instead."""
+
+    return None
 
 
 def create_ag3ntum_bash_mcp_server(

@@ -113,6 +113,16 @@ export function AgentMessageBlock({
   // Desktop: always show unless collapsed; Mobile: only show when expanded AND has content
   const showRightPanel = isMobile ? (hasOtherRightContent && mobileExpanded) : !rightPanelCollapsed;
 
+  // Group tool calls by tool name for compact display
+  const toolCounts = otherToolCalls.reduce<Record<string, number>>((acc, tool) => {
+    // Strip mcp__ag3ntum__ prefix for cleaner display
+    const toolName = tool.tool.replace(/^mcp__ag3ntum__/, '');
+    acc[toolName] = (acc[toolName] || 0) + 1;
+    return acc;
+  }, {});
+  const uniqueToolTypes = Object.keys(toolCounts);
+  const showDetailedTools = uniqueToolTypes.length > 0 && uniqueToolTypes.length < 3;
+
   // Determine icon status class based on message status (computed from tool outcomes)
   const getIconStatusClass = (): string => {
     if (messageStatus === 'complete') return 'icon-status-complete';
@@ -133,8 +143,23 @@ export function AgentMessageBlock({
             {otherToolCalls.length > 0 && (
               <span className="message-stat-badge stat-tools">
                 <span className="stat-icon">◉</span>
-                <span className="stat-label">Tools</span>
-                <span className="stat-count">×{otherToolCalls.length}</span>
+                {showDetailedTools ? (
+                  <>
+                    <span className="stat-label">Tools:</span>
+                    {uniqueToolTypes.map((toolName, idx) => (
+                      <span key={toolName} className="stat-tool-item">
+                        {toolName}
+                        <span className="stat-count">×{toolCounts[toolName]}</span>
+                        {idx < uniqueToolTypes.length - 1 && <span className="stat-separator">,</span>}
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    <span className="stat-label">Tools</span>
+                    <span className="stat-count">×{otherToolCalls.length}</span>
+                  </>
+                )}
               </span>
             )}
             {subagents.length > 0 && (

@@ -442,6 +442,20 @@ class TraceProcessor:
         # Max consecutive identical failures before circuit breaker trips
         self._max_consecutive_failures: int = 5
 
+        # Track tool call sequence to detect repetitive patterns
+        self._tool_call_sequence: list[tuple[str, str]] = []
+        self._max_repetitive_calls: int = 5
+
+        # Track turns without meaningful text output to the user
+        self._turns_without_meaningful_output: int = 0
+        self._max_silent_turns: int = 5
+        self._current_turn_has_output: bool = False
+        self._current_turn_has_tool_call: bool = False  # Tool calls count as productive work
+
+        # Track consecutive TodoWrite-only turns for warning
+        self._consecutive_todowrite_only_turns: int = 0
+        self._max_todowrite_only_turns: int = 3
+
     def _detect_tool_error(
         self,
         is_error_field: Optional[bool],
@@ -643,6 +657,150 @@ class TraceProcessor:
         if tool_name in self._tool_failure_tracker:
             del self._tool_failure_tracker[tool_name]
 
+    def _track_tool_call(self, tool_name: str, tool_input: Any) -> None:
+        """
+        Track a tool call for unproductive loop detection.
+
+        Detects when the same tool is called repeatedly, which often
+        indicates the model is stuck in a loop (e.g., calling TodoWrite
+        repeatedly without making progress).
+
+        Args:
+            tool_name: Name of the tool being called.
+            tool_input: The input arguments to the tool.
+        """
+        import hashlib
+        import json
+
+        # Create a signature from the tool input
+        try:
+            input_str = json.dumps(tool_input, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            input_str = str(tool_input)
+
+        input_hash = hashlib.md5(input_str.encode()).hexdigest()[:8]
+        self._tool_call_sequence.append((tool_name, input_hash))
+
+        # Keep sequence bounded to prevent memory growth
+        if len(self._tool_call_sequence) > 50:
+            self._tool_call_sequence = self._tool_call_sequence[-50:]
+
+        # Check for repetitive pattern: same tool called N times consecutively
+        if len(self._tool_call_sequence) >= self._max_repetitive_calls:
+            recent = self._tool_call_sequence[-self._max_repetitive_calls:]
+            recent_tools = [t[0] for t in recent]
+
+            if len(set(recent_tools)) == 1:  # All same tool
+                # Don't trip for subagent tools (Task) as they may legitimately be called multiple times
+                if tool_name not in ("Task",):
+                    self._circuit_breaker_tripped = True
+                    self._circuit_breaker_message = (
+                        f"Unproductive loop detected: '{tool_name}' called "
+                        f"{self._max_repetitive_calls} times consecutively without "
+                        f"other actions. This suggests the agent is stuck. "
+                        f"Consider using mcp__ag3ntum__AskUserQuestion to get user guidance."
+                    )
+                    logger.warning(self._circuit_breaker_message)
+
+    def _check_todowrite_only_pattern(self, tool_name: str) -> None:
+        """
+        Check for TodoWrite-only turns.
+
+        Detects when the agent is only calling TodoWrite without taking
+        real actions, which indicates it's stuck updating task lists
+        instead of actually working.
+
+        Args:
+            tool_name: Name of the tool that was just called.
+        """
+        if tool_name == "TodoWrite":
+            # Check if recent sequence is TodoWrite-only
+            if len(self._tool_call_sequence) >= 2:
+                recent = self._tool_call_sequence[-3:]  # Look at last 3 calls
+                if all(t[0] == "TodoWrite" for t in recent):
+                    self._consecutive_todowrite_only_turns += 1
+
+                    if self._consecutive_todowrite_only_turns >= self._max_todowrite_only_turns:
+                        # Emit warning via tracer (not circuit breaker - just a warning)
+                        warning_msg = (
+                            "Warning: Agent has called TodoWrite "
+                            f"{self._consecutive_todowrite_only_turns} times "
+                            "without taking other actions. If blocked, consider "
+                            "asking the user for guidance with mcp__ag3ntum__AskUserQuestion."
+                        )
+                        logger.warning(warning_msg)
+                        # Emit as a system event for visibility
+                        if hasattr(self.tracer, 'on_system_event'):
+                            self.tracer.on_system_event("warning", {"message": warning_msg})
+        else:
+            # Non-TodoWrite tool resets the counter
+            self._consecutive_todowrite_only_turns = 0
+
+    def _on_turn_start(self) -> None:
+        """Called at the start of each turn to reset per-turn tracking."""
+        self._current_turn_has_output = False
+        self._current_turn_has_tool_call = False
+
+    def _on_meaningful_output(self) -> None:
+        """Called when the agent produces meaningful text output."""
+        self._current_turn_has_output = True
+        self._turns_without_meaningful_output = 0
+
+    def _on_turn_end(self) -> None:
+        """Called at the end of each turn to check for no-output pattern."""
+        # Only count as "silent" if there's neither text output NOR tool calls.
+        # An agent making tool calls is making progress, even without chat messages.
+        if self._current_turn_has_output or self._current_turn_has_tool_call:
+            # Productive turn - reset counter
+            self._turns_without_meaningful_output = 0
+        else:
+            # Truly silent turn - no output and no tool calls
+            self._turns_without_meaningful_output += 1
+
+            if self._turns_without_meaningful_output >= self._max_silent_turns:
+                self._circuit_breaker_tripped = True
+                self._circuit_breaker_message = (
+                    f"No activity detected: Agent has produced no text output and made "
+                    f"no tool calls for {self._turns_without_meaningful_output} consecutive "
+                    f"turns. This suggests the agent is stuck."
+                )
+                logger.warning(self._circuit_breaker_message)
+
+    def configure_guardrails(
+        self,
+        max_consecutive_failures: Optional[int] = None,
+        max_repetitive_calls: Optional[int] = None,
+        max_silent_turns: Optional[int] = None,
+        max_todowrite_only_turns: Optional[int] = None,
+    ) -> None:
+        """
+        Configure circuit breaker and guardrail thresholds.
+
+        This allows model-specific profiles to adjust sensitivity.
+        Lower values = stricter guardrails (good for non-Claude models).
+
+        Args:
+            max_consecutive_failures: Max identical tool errors before circuit breaker.
+            max_repetitive_calls: Max consecutive calls to same tool.
+            max_silent_turns: Max turns without user-facing output.
+            max_todowrite_only_turns: Max TodoWrite-only turns before warning.
+        """
+        if max_consecutive_failures is not None:
+            self._max_consecutive_failures = max_consecutive_failures
+        if max_repetitive_calls is not None:
+            self._max_repetitive_calls = max_repetitive_calls
+        if max_silent_turns is not None:
+            self._max_silent_turns = max_silent_turns
+        if max_todowrite_only_turns is not None:
+            self._max_todowrite_only_turns = max_todowrite_only_turns
+
+        logger.info(
+            f"Guardrails configured: max_failures={self._max_consecutive_failures}, "
+            f"max_repetitive={self._max_repetitive_calls}, "
+            f"max_silent={self._max_silent_turns}, "
+            f"max_todowrite={self._max_todowrite_only_turns}"
+        )
+
     def finalize_orphaned_subagents(self) -> None:
         """
         Emit subagent_stop for any subagents that haven't completed.
@@ -832,6 +990,11 @@ class TraceProcessor:
             )
             self._metrics_turns += 1
             self._emit_metrics_update()
+            self._current_turn_has_tool_call = True
+
+            # Track for loop detection and TodoWrite pattern
+            self._track_tool_call(block.name, block.input)
+            self._check_todowrite_only_pattern(block.name)
 
             # Track Task tool invocations for subagent tracing
             if block.name == "Task":
@@ -913,6 +1076,7 @@ class TraceProcessor:
                     )
                 # Update the stored input
                 self._pending_tool_calls[tool_id]["input"] = tool_input
+                self._current_turn_has_tool_call = True
             else:
                 # New tool - emit tool_start
                 self._pending_tool_calls[tool_id] = {
@@ -924,6 +1088,7 @@ class TraceProcessor:
                     tool_input=tool_input,
                     tool_id=tool_id
                 )
+                self._current_turn_has_tool_call = True
 
                 # Track Task tool invocations for subagent tracing
                 if tool_name == "Task":
@@ -1107,6 +1272,7 @@ class TraceProcessor:
 
         if event_type == "message_start":
             self._stream_has_text = False
+            self._on_turn_start()
             message = raw_event.get("message", {})
             if isinstance(message, dict):
                 usage = message.get("usage")
@@ -1130,6 +1296,7 @@ class TraceProcessor:
                 else:
                     self.tracer.on_message("", is_partial=False)
                 self._stream_has_text = False
+            self._on_turn_end()
             # Clear parent context on message stop
             self._current_parent_tool_use_id = None
         else:
@@ -1146,6 +1313,7 @@ class TraceProcessor:
                         filtered_text = self._sanitize_text(text)
                         if filtered_text:
                             self._stream_has_text = True
+                            self._on_meaningful_output()
                             # Route to subagent handler if in subagent context
                             if self._current_parent_tool_use_id and \
                                self._current_parent_tool_use_id in self._active_subagents:

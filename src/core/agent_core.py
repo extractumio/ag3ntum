@@ -1602,6 +1602,16 @@ class ClaudeAgent:
         trace_processor.set_task(task)
         trace_processor.set_model(self._config.model)
 
+        # Apply model-specific guardrail profile
+        from src.config import get_model_profile
+        model_profile = get_model_profile(self._config.model)
+        trace_processor.configure_guardrails(
+            max_consecutive_failures=model_profile.get("max_consecutive_failures"),
+            max_repetitive_calls=model_profile.get("max_repetitive_calls"),
+            max_silent_turns=model_profile.get("max_silent_turns"),
+            max_todowrite_only_turns=model_profile.get("max_todowrite_only_turns"),
+        )
+
         # Set cumulative stats if resuming a session (for display during execution)
         if session_context.cumulative_turns > 0 or session_context.cumulative_cost_usd > 0:
             trace_processor.set_cumulative_stats(

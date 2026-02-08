@@ -21,7 +21,8 @@ export type SSEEventType =
   | 'infrastructure_error'
   | 'security_alert'
   | 'queue_started'
-  | 'queue_position_update';
+  | 'queue_position_update'
+  | 'status_update';
 
 export interface SSEEvent {
   type: SSEEventType;

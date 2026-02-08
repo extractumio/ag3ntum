@@ -229,23 +229,14 @@ class SandboxExecutor:
         # In Docker, we need to be careful about namespace operations
         # Use --unshare-pid for basic isolation but avoid --unshare-all which requires pivot_root
         #
-        # IMPORTANT: Do NOT use --unshare-user when running via sudo bwrap!
-        # --unshare-user creates a new user namespace where:
-        # 1. Even root inside the namespace can't access host files owned by other UIDs
-        # 2. The UID mapping isn't set up, so host UIDs appear as 65534 (nobody)
-        # 3. This causes "Permission denied" when trying to bind-mount the workspace
+        # NOTE: Do NOT use --unshare-user when running via sudo bwrap!
+        # --unshare-user creates a user namespace where the process can't access
+        # host files owned by other UIDs (needed for session workspace mounts).
         #
-        # When using "sudo bwrap", the sudo provides root privileges to access any file,
-        # and --uid/--gid flags work directly without needing a user namespace.
+        # Instead, we use setpriv inside the sandbox to drop privileges AFTER
+        # the mounts are set up. This requires mounting the entire /etc directory
+        # (not individual files) to avoid permission issues after privilege drop.
         if nested_container:
-            # Check if we're using sudo - don't use --unshare-user with sudo
-            is_using_sudo = config.bwrap_path.startswith("sudo")
-
-            # Only use --unshare-user if NOT using sudo and NOT setting custom UID/GID
-            # When using sudo with --uid/--gid, the privilege drop happens via bwrap flags
-            if not is_using_sudo and self._linux_uid is None and self._linux_gid is None:
-                cmd.append("--unshare-user")
-
             cmd.extend([
                 "--unshare-pid",
                 "--unshare-uts",
@@ -380,23 +371,23 @@ class SandboxExecutor:
                     f"from sandboxed_envs"
                 )
 
-        # Privilege dropping strategy depends on whether we're using sudo bwrap
-        # bwrap's --uid/--gid flags REQUIRE --unshare-user to create a user namespace.
-        # But with --unshare-user, root inside the namespace can't access host files
-        # because there's no UID mapping (host UIDs appear as nobody=65534).
+        # Privilege dropping: use setpriv inside the sandbox
         #
-        # Solution: When using sudo bwrap:
-        # - Don't use --unshare-user (so mounts can access host files as root)
-        # - Don't use bwrap's --uid/--gid (they require --unshare-user)
-        # - Instead, wrap the command with setpriv to drop privileges AFTER mounts
+        # We use setpriv (not bwrap's --uid/--gid) because:
+        # 1. bwrap's --uid/--gid require --unshare-user (user namespace)
+        # 2. With --unshare-user, bwrap can't access session workspace directories
+        #    owned by different UIDs (needed for per-user isolation)
         #
-        # When NOT using sudo (development mode):
-        # - Use --unshare-user for user namespace isolation
-        # - bwrap's --uid/--gid work within the user namespace
+        # setpriv drops privileges AFTER the mounts are established, which works
+        # as long as we mount directories (not individual files). Individual file
+        # bind mounts become inaccessible after privilege drop due to mount
+        # namespace semantics.
         is_using_sudo = config.bwrap_path.startswith("sudo")
 
         if not is_using_sudo:
-            # Not using sudo - can use bwrap's native --uid/--gid
+            # Not using sudo - can use bwrap's native --uid/--gid with --unshare-user
+            if self._linux_uid is not None or self._linux_gid is not None:
+                cmd.append("--unshare-user")
             if self._linux_uid is not None:
                 cmd.extend(["--uid", str(self._linux_uid)])
             if self._linux_gid is not None:
