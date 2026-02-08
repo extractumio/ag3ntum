@@ -357,13 +357,13 @@ class TestSandboxExecutor:
         assert "--uid" not in cmd
         assert "--gid" not in cmd
 
-    def test_nested_container_adds_unshare_user_without_sudo(
+    def test_nested_container_no_unshare_user_without_sudo_no_uid(
         self, basic_config: SandboxConfig
     ) -> None:
-        """Nested container without sudo but with no UID can optionally use --unshare-user.
+        """Nested container without sudo and without UID omits --unshare-user.
 
-        When NOT using sudo and NOT setting UID, --unshare-user may be used for
-        additional isolation. This is a less common scenario (development only).
+        --unshare-user is only added when UID/GID is set (to enable bwrap's
+        --uid/--gid flags). Without UID/GID, there's no need for a user namespace.
         """
         # basic_config uses default bwrap_path="bwrap" (no sudo)
         executor = SandboxExecutor(basic_config)  # No UID
@@ -372,9 +372,7 @@ class TestSandboxExecutor:
             allow_network=False,
             nested_container=True
         )
-        # Without UID set and without sudo, --unshare-user is optionally used
-        # Current implementation: --unshare-user only when NOT using sudo AND no UID
-        assert "--unshare-user" in cmd
+        assert "--unshare-user" not in cmd
 
     def test_non_nested_uses_unshare_all(
         self, basic_config: SandboxConfig

@@ -211,10 +211,7 @@ class AgentConfigLoader:
         if self._config is None:
             raise ConfigValidationError("Configuration not loaded")
 
-        missing = []
-        for field in self.REQUIRED_FIELDS:
-            if field not in self._config:
-                missing.append(field)
+        missing = [f for f in self.REQUIRED_FIELDS if f not in self._config]
 
         if missing:
             raise ConfigValidationError(

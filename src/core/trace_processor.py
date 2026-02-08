@@ -16,6 +16,8 @@ Usage:
         async for message in client.receive_response():
             processor.process_message(message)
 """
+import hashlib
+import json
 import logging
 import re
 import time
@@ -244,8 +246,6 @@ def transform_attached_files(text: str) -> str:
     Returns:
         Text with attached-files blocks transformed to ag3ntum-attached-file tags.
     """
-    import json
-
     if '<attached-files>' not in text:
         return text
 
@@ -600,9 +600,6 @@ class TraceProcessor:
             text = str(error_content)
 
         # Normalize: extract key error patterns, remove variable parts
-        # Look for common error patterns
-        import re
-
         # Extract the error type/message core (first 200 chars, normalized)
         text = text[:500]
 
@@ -657,6 +654,53 @@ class TraceProcessor:
         if tool_name in self._tool_failure_tracker:
             del self._tool_failure_tracker[tool_name]
 
+    def _handle_tool_result(
+        self,
+        tool_id: str,
+        content: Any,
+        is_error_field: Optional[bool] = None,
+        raw_block: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """
+        Process a tool result: detect errors, update trackers, emit events.
+
+        Consolidates tool result handling that was previously duplicated across
+        _process_content_block, _process_dict_block, and _handle_user_message.
+
+        Args:
+            tool_id: The tool use ID from the tool result.
+            content: The tool result content.
+            is_error_field: The is_error field (may be None due to SDK bug).
+            raw_block: Optional raw dict for camelCase isError detection.
+        """
+        tool_info = self._pending_tool_calls.pop(tool_id, {})
+        tool_name = tool_info.get("name", "unknown")
+        is_error = self._detect_tool_error(is_error_field, content, raw_block=raw_block)
+
+        if is_error:
+            self._tool_error_count += 1
+            self._track_tool_failure(tool_name, content)
+        else:
+            self._reset_tool_failure_tracker(tool_name)
+
+        self.tracer.on_tool_complete(
+            tool_name=tool_name,
+            tool_id=tool_id,
+            result=content,
+            duration_ms=0,
+            is_error=is_error
+        )
+
+        if tool_id in self._active_subagents:
+            subagent_info = self._active_subagents.pop(tool_id)
+            duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
+            self.tracer.on_subagent_stop(
+                task_id=tool_id,
+                result=content,
+                duration_ms=duration_ms,
+                is_error=is_error
+            )
+
     def _track_tool_call(self, tool_name: str, tool_input: Any) -> None:
         """
         Track a tool call for unproductive loop detection.
@@ -669,9 +713,6 @@ class TraceProcessor:
             tool_name: Name of the tool being called.
             tool_input: The input arguments to the tool.
         """
-        import hashlib
-        import json
-
         # Create a signature from the tool input
         try:
             input_str = json.dumps(tool_input, sort_keys=True, default=str)
@@ -1013,40 +1054,9 @@ class TraceProcessor:
                 )
 
         elif isinstance(block, ToolResultBlock):
-            tool_id = block.tool_use_id
-            tool_info = self._pending_tool_calls.pop(tool_id, {})
-            tool_name = tool_info.get("name", "unknown")
-            # Use enhanced error detection to work around SDK bug
-            # where isError (camelCase) becomes is_error: null
-            is_error = self._detect_tool_error(block.is_error, block.content)
-
-            # Track tool errors for session status determination
-            if is_error:
-                self._tool_error_count += 1
-                # Track for circuit breaker
-                self._track_tool_failure(tool_name, block.content)
-            else:
-                # Reset failure tracker on success
-                self._reset_tool_failure_tracker(tool_name)
-
-            self.tracer.on_tool_complete(
-                tool_name=tool_name,
-                tool_id=tool_id,
-                result=block.content,
-                duration_ms=0,  # Will be calculated by tracer
-                is_error=is_error
+            self._handle_tool_result(
+                block.tool_use_id, block.content, is_error_field=block.is_error
             )
-
-            # Handle Task tool completion for subagent tracing
-            if tool_id in self._active_subagents:
-                subagent_info = self._active_subagents.pop(tool_id)
-                duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
-                self.tracer.on_subagent_stop(
-                    task_id=tool_id,
-                    result=block.content,
-                    duration_ms=duration_ms,
-                    is_error=is_error
-                )
 
         elif isinstance(block, dict):
             # Handle dict-style blocks (from JSON parsing)
@@ -1106,44 +1116,12 @@ class TraceProcessor:
                         prompt=prompt
                     )
         elif "tool_use_id" in block:
-            # Tool result
-            tool_id = block["tool_use_id"]
-            tool_info = self._pending_tool_calls.pop(tool_id, {})
-            tool_name = tool_info.get("name", "unknown")
-            content = block.get("content", "")
-            # Use enhanced error detection to work around SDK bug
-            # where isError (camelCase) becomes is_error: null
-            is_error = self._detect_tool_error(
-                block.get("is_error"), content, raw_block=block
+            self._handle_tool_result(
+                block["tool_use_id"],
+                block.get("content", ""),
+                is_error_field=block.get("is_error"),
+                raw_block=block,
             )
-
-            # Track tool errors for session status determination
-            if is_error:
-                self._tool_error_count += 1
-                # Track for circuit breaker
-                self._track_tool_failure(tool_name, content)
-            else:
-                # Reset failure tracker on success
-                self._reset_tool_failure_tracker(tool_name)
-
-            self.tracer.on_tool_complete(
-                tool_name=tool_name,
-                tool_id=tool_id,
-                result=content,
-                duration_ms=0,
-                is_error=is_error
-            )
-
-            # Handle Task tool completion for subagent tracing
-            if tool_id in self._active_subagents:
-                subagent_info = self._active_subagents.pop(tool_id)
-                duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
-                self.tracer.on_subagent_stop(
-                    task_id=tool_id,
-                    result=content,
-                    duration_ms=duration_ms,
-                    is_error=is_error
-                )
 
     def _handle_user_message(self, msg: UserMessage) -> None:
         """Handle user input messages, including tool results."""
@@ -1158,81 +1136,19 @@ class TraceProcessor:
             for block in content:
                 # Handle tool result blocks (they come in UserMessage!)
                 if isinstance(block, ToolResultBlock):
-                    tool_id = block.tool_use_id
-                    tool_info = self._pending_tool_calls.pop(tool_id, {})
-                    tool_name = tool_info.get("name", "unknown")
-                    # Use enhanced error detection to work around SDK bug
-                    # where isError (camelCase) becomes is_error: null
-                    is_error = self._detect_tool_error(block.is_error, block.content)
-
-                    # Track tool errors for session status determination
-                    if is_error:
-                        self._tool_error_count += 1
-                        # Track for circuit breaker
-                        self._track_tool_failure(tool_name, block.content)
-                    else:
-                        # Reset failure tracker on success
-                        self._reset_tool_failure_tracker(tool_name)
-
-                    self.tracer.on_tool_complete(
-                        tool_name=tool_name,
-                        tool_id=tool_id,
-                        result=block.content,
-                        duration_ms=0,
-                        is_error=is_error
+                    self._handle_tool_result(
+                        block.tool_use_id, block.content, is_error_field=block.is_error
                     )
-
-                    # Handle Task tool completion for subagent tracing
-                    if tool_id in self._active_subagents:
-                        subagent_info = self._active_subagents.pop(tool_id)
-                        duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
-                        self.tracer.on_subagent_stop(
-                            task_id=tool_id,
-                            result=block.content,
-                            duration_ms=duration_ms,
-                            is_error=is_error
-                        )
 
                 # Handle dict-style tool results (from JSON parsing)
                 elif isinstance(block, dict) and "tool_use_id" in block:
-                    tool_id = block["tool_use_id"]
-                    tool_info = self._pending_tool_calls.pop(tool_id, {})
-                    tool_name = tool_info.get("name", "unknown")
-                    block_content = block.get("content", "")
-                    # Use enhanced error detection to work around SDK bug
-                    # where isError (camelCase) becomes is_error: null
-                    is_error = self._detect_tool_error(
-                        block.get("is_error"), block_content, raw_block=block
+                    self._handle_tool_result(
+                        block["tool_use_id"],
+                        block.get("content", ""),
+                        is_error_field=block.get("is_error"),
+                        raw_block=block,
                     )
 
-                    # Track tool errors for session status determination
-                    if is_error:
-                        self._tool_error_count += 1
-                        # Track for circuit breaker
-                        self._track_tool_failure(tool_name, block_content)
-                    else:
-                        # Reset failure tracker on success
-                        self._reset_tool_failure_tracker(tool_name)
-
-                    self.tracer.on_tool_complete(
-                        tool_name=tool_name,
-                        tool_id=tool_id,
-                        result=block_content,
-                        duration_ms=0,
-                        is_error=is_error
-                    )
-
-                    # Handle Task tool completion for subagent tracing
-                    if tool_id in self._active_subagents:
-                        subagent_info = self._active_subagents.pop(tool_id)
-                        duration_ms = int((time.time() - subagent_info["start_time"]) * 1000)
-                        self.tracer.on_subagent_stop(
-                            task_id=tool_id,
-                            result=block_content,
-                            duration_ms=duration_ms,
-                            is_error=is_error
-                        )
-                
                 elif isinstance(block, TextBlock):
                     if self.include_user_messages:
                         self.tracer.on_message(f"[USER] {block.text}")
@@ -1565,9 +1481,6 @@ class TraceProcessor:
 
     def _handle_unknown_message(self, message: Any) -> None:
         """Handle unknown message types including SDK summary messages."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         # Check if this is an SDK summary message with complete tool content
         # These have 'content' list but are not AssistantMessage instances
         if hasattr(message, 'content') and isinstance(message.content, list):

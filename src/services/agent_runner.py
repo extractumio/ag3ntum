@@ -169,10 +169,7 @@ class AgentRunner:
 
         Also updates cumulative stats when completion metrics are provided.
         """
-        from ..db.models import Session
-
         async with AsyncSessionLocal() as db:
-            from sqlalchemy import select
             result = await db.execute(
                 select(Session).where(Session.id == session_id)
             )
