@@ -168,7 +168,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert "Created file" in result["content"][0]["text"]
             assert "5 bytes" in result["content"][0]["text"]
 
@@ -190,7 +190,7 @@ class TestWriteTool:
                 content="new content"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "already exists" in result["content"][0]["text"]
             assert "overwrite_existing=true" in result["content"][0]["text"]
 
@@ -213,7 +213,7 @@ class TestWriteTool:
                 overwrite_existing=True
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert "Overwrote file" in result["content"][0]["text"]
             assert existing_file.read_text() == "new content"
 
@@ -240,7 +240,7 @@ class TestWriteTool:
                     overwrite_existing=value
                 )
 
-                assert result.get("isError") is True, f"Value {value!r} should be treated as False"
+                assert result.get("is_error") is True, f"Value {value!r} should be treated as False"
 
         # Test values that should be treated as True
         true_values = [True, 1, "1", "true", "True", "yes", "YES"]
@@ -259,7 +259,7 @@ class TestWriteTool:
                     overwrite_existing=value
                 )
 
-                assert "isError" not in result or not result["isError"], \
+                assert "is_error" not in result or not result["is_error"], \
                     f"Value {value!r} should be treated as True"
 
     @pytest.mark.asyncio
@@ -282,7 +282,7 @@ class TestWriteTool:
                     overwrite_existing=True
                 )
 
-                assert result.get("isError") is True
+                assert result.get("is_error") is True
                 error_text = result["content"][0]["text"].lower()
                 assert "cannot write" in error_text or "read-only" in error_text or "permission" in error_text
         finally:
@@ -297,7 +297,7 @@ class TestWriteTool:
             content="Hello"
         )
 
-        assert result.get("isError") is True
+        assert result.get("is_error") is True
         assert "file_path is required" in result["content"][0]["text"]
 
     @pytest.mark.asyncio
@@ -318,7 +318,7 @@ class TestWriteTool:
                 content="hack"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "validation failed" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
@@ -337,7 +337,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert nested_file.exists()
             assert nested_file.read_text() == "Hello"
 
@@ -385,7 +385,7 @@ class TestWriteTool:
                 content="API_KEY=sk-1234567890abcdef"
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert "Security Notice" in result["content"][0]["text"]
             assert "redacted" in result["content"][0]["text"].lower()
             # Verify redacted content was written
@@ -408,7 +408,7 @@ class TestWriteTool:
                 content=""
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
             assert test_file.read_text() == ""
             assert "0 bytes" in result["content"][0]["text"]
@@ -430,7 +430,7 @@ class TestWriteTool:
                 content=""  # This is what args.get("content", "") returns when missing
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
 
     @pytest.mark.asyncio
@@ -450,7 +450,7 @@ class TestWriteTool:
                 content=content
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.read_text(encoding="utf-8") == content
 
     @pytest.mark.asyncio
@@ -470,7 +470,7 @@ class TestWriteTool:
                 content=content
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             # Verify line count in result
             assert "5" in result["content"][0]["text"]  # 5 lines
 
@@ -486,7 +486,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "not properly configured" in result["content"][0]["text"]
 
     @pytest.mark.asyncio
@@ -506,7 +506,7 @@ class TestWriteTool:
             )
 
             # Should still succeed, just use real path as display path
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
 
     @pytest.mark.asyncio
@@ -529,7 +529,7 @@ class TestWriteTool:
             )
 
             # Should still succeed with fallback display path
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
 
     @pytest.mark.asyncio
@@ -549,7 +549,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "failed to write" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
@@ -569,7 +569,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "permission denied" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
@@ -594,7 +594,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "permission denied" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
@@ -616,7 +616,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert result.get("isError") is True
+            assert result.get("is_error") is True
             assert "verification failed" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
@@ -638,7 +638,7 @@ class TestWriteTool:
             )
 
             # Should still succeed - scanner failure is logged but not fatal
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
             # Original content should be written when scanner fails
             assert test_file.read_text() == "API_KEY=secret"
@@ -665,7 +665,7 @@ class TestWriteTool:
                 content="Normal content without secrets"
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             # No security notice when no secrets found
             assert "Security Notice" not in result["content"][0]["text"]
 
@@ -724,7 +724,7 @@ class TestWriteTool:
                 content="Hello"
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
             assert test_file.read_text() == "Hello"
 
@@ -746,7 +746,7 @@ class TestWriteTool:
                 content=content
             )
 
-            assert "isError" not in result or not result["isError"]
+            assert "is_error" not in result or not result["is_error"]
             assert test_file.exists()
             assert test_file.stat().st_size == 1024 * 1024
             assert "1048576 bytes" in result["content"][0]["text"]

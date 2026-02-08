@@ -227,7 +227,7 @@ Example:
 
 def _error(message: str) -> dict[str, Any]:
     """Create an error response."""
-    return {"content": [{"type": "text", "text": f"**Error:** {message}"}], "isError": True}
+    return {"content": [{"type": "text", "text": f"**Error:** {message}"}], "is_error": True}
 
 
 # API functions for use by the sessions endpoint

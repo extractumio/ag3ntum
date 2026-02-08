@@ -80,7 +80,54 @@ from .path_validator import (
     set_session_linux_uid,
 )
 
+# Import LLM proxy config for non-Anthropic model routing
+from ..api.llm_proxy.config import load_llm_proxy_config, ProxyConfigError
+
 logger = logging.getLogger(__name__)
+
+
+def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional[str]:
+    """
+    Check if a model requires routing through the LLM proxy.
+
+    Models defined in config/llm-api-proxy.yaml are routed through the proxy
+    endpoint, which handles format translation for non-Anthropic providers.
+
+    Args:
+        model: The model name (e.g., 'openrouter:openai/gpt-5.2').
+        api_port: The API server port (default 40080).
+
+    Returns:
+        The proxy base URL if the model needs proxy routing, None otherwise.
+    """
+    try:
+        config = load_llm_proxy_config()
+    except ProxyConfigError as e:
+        logger.debug(f"LLM proxy config not available: {e}")
+        return None
+
+    # Check if model is defined in proxy config
+    if model not in config.models:
+        logger.debug(f"Model '{model}' not in proxy config, using direct Anthropic API")
+        return None
+
+    # Model is defined in proxy config - route through proxy
+    mapping = config.models[model]
+    provider = config.providers.get(mapping.provider)
+
+    if provider is None:
+        logger.warning(f"Model '{model}' references undefined provider '{mapping.provider}'")
+        return None
+
+    # All proxy-defined models go through the proxy, regardless of provider type
+    # The proxy handles routing to the appropriate endpoint
+    # NOTE: SDK appends "/v1/messages" to base_url, so we use /api/llm-proxy (not /api/llm-proxy/v1)
+    proxy_url = f"http://127.0.0.1:{api_port}/api/llm-proxy"
+    logger.info(
+        f"LLM_PROXY: Model '{model}' → provider '{mapping.provider}' "
+        f"(type={provider.type}) → {proxy_url}"
+    )
+    return proxy_url
 
 
 class CheckpointTracker:
@@ -1083,6 +1130,13 @@ class ClaudeAgent:
                 f"THINKING: Extended thinking enabled with {thinking_tokens} token budget"
             )
 
+        # Check if model needs LLM proxy routing (non-Anthropic models)
+        # This sets ANTHROPIC_BASE_URL to route requests through our proxy
+        proxy_base_url = _get_proxy_base_url_for_model(self._config.base_model)
+        if proxy_base_url:
+            env_vars["ANTHROPIC_BASE_URL"] = proxy_base_url
+            logger.info(f"LLM_PROXY: Routing model '{self._config.base_model}' via {proxy_base_url}")
+
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
             f"tools={all_tools}, allowed_tools={allowed_tools}, "
@@ -1284,7 +1338,9 @@ class ClaudeAgent:
         if response is None:
             raise SessionIncompleteError("Session did not complete")
         if response.is_error:
-            raise ServerError(f"API error: {response.subtype}")
+            # Use result field for actual error message, fall back to subtype
+            error_msg = response.result or response.subtype or "Unknown error"
+            raise ServerError(f"API error: {error_msg}")
         if response.subtype == "error_max_turns":
             raise MaxTurnsExceededError(
                 f"Exceeded {self._config.max_turns} turns"
@@ -1546,6 +1602,16 @@ class ClaudeAgent:
         trace_processor.set_task(task)
         trace_processor.set_model(self._config.model)
 
+        # Apply model-specific guardrail profile
+        from src.config import get_model_profile
+        model_profile = get_model_profile(self._config.model)
+        trace_processor.configure_guardrails(
+            max_consecutive_failures=model_profile.get("max_consecutive_failures"),
+            max_repetitive_calls=model_profile.get("max_repetitive_calls"),
+            max_silent_turns=model_profile.get("max_silent_turns"),
+            max_todowrite_only_turns=model_profile.get("max_todowrite_only_turns"),
+        )
+
         # Set cumulative stats if resuming a session (for display during execution)
         if session_context.cumulative_turns > 0 or session_context.cumulative_cost_usd > 0:
             trace_processor.set_cumulative_stats(
@@ -1586,11 +1652,69 @@ class ClaudeAgent:
                         # Process for console tracing
                         trace_processor.process_message(message)
 
+                        # Check circuit breaker for repeated tool failures
+                        if trace_processor.circuit_breaker_tripped:
+                            logger.error(
+                                "Circuit breaker tripped for session %s: %s",
+                                session_context.session_id,
+                                trace_processor.circuit_breaker_message,
+                            )
+                            self._tracer.on_error(
+                                trace_processor.circuit_breaker_message,
+                                error_type="circuit_breaker"
+                            )
+                            # Force a result if we have a partial one
+                            if isinstance(message, ResultMessage):
+                                result = message
+                            break
+
                         # Track checkpoints for file-modifying tools
                         checkpoint_tracker.process_message(message)
 
                         if isinstance(message, ResultMessage):
                             result = message
+
+            # Check if circuit breaker was tripped
+            if trace_processor.circuit_breaker_tripped:
+                error_msg = trace_processor.circuit_breaker_message
+                self._cleanup_session(session_context.session_id)
+
+                # Extract metrics even for failed runs
+                usage = None
+                if result:
+                    usage = TokenUsage.from_sdk_usage(result.usage)
+
+                # Finalize any orphaned subagents before emitting completion
+                trace_processor.finalize_orphaned_subagents()
+
+                # Emit completion so the UI can close the stream deterministically
+                self._tracer.on_agent_complete(
+                    status="FAILED",
+                    num_turns=result.num_turns if result else 0,
+                    duration_ms=result.duration_ms if result else 0,
+                    total_cost_usd=result.total_cost_usd if result else None,
+                    result=error_msg,
+                    session_id=getattr(result, "session_id", None) if result else None,
+                    usage=getattr(result, "usage", None) if result else None,
+                    model=self._config.model,
+                    cumulative_cost_usd=session_context.cumulative_cost_usd,
+                    cumulative_turns=session_context.cumulative_turns,
+                    cumulative_tokens=session_context.cumulative_total_tokens,
+                )
+
+                return AgentResult(
+                    status=TaskStatus.FAILED,
+                    error=error_msg,
+                    metrics=LLMMetrics(
+                        model=self._config.model,
+                        duration_ms=result.duration_ms if result else 0,
+                        num_turns=result.num_turns if result else 0,
+                        session_id=result.session_id if result else None,
+                        total_cost_usd=result.total_cost_usd if result else None,
+                        usage=usage,
+                    ) if result else None,
+                    session_id=session_context.session_id,
+                )
 
             self._validate_response(result)
 

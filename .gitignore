@@ -62,3 +62,5 @@ users/
 !skills/.claude/
 TODO
 tmp_*.py
+
+llm_proxy_debug/

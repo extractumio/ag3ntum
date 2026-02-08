@@ -211,10 +211,7 @@ class AgentConfigLoader:
         if self._config is None:
             raise ConfigValidationError("Configuration not loaded")
 
-        missing = []
-        for field in self.REQUIRED_FIELDS:
-            if field not in self._config:
-                missing.append(field)
+        missing = [f for f in self.REQUIRED_FIELDS if f not in self._config]
 
         if missing:
             raise ConfigValidationError(
@@ -391,6 +388,78 @@ def ensure_dirs() -> None:
     """Ensure all required directories exist."""
     for dir_path in [LOGS_DIR, CONFIG_DIR, SKILLS_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
+
+
+def get_model_profile(
+    model: str,
+    config_loader: Optional[AgentConfigLoader] = None,
+) -> dict[str, int]:
+    """
+    Get guardrail profile settings for a specific model.
+
+    Model profiles allow different guardrail thresholds for different models.
+    Non-Claude models (via LLM proxy) often need stricter guardrails to
+    prevent unproductive loops.
+
+    Matching order:
+    1. Exact model name match
+    2. Prefix match (e.g., "openrouter:" matches "openrouter:openai/gpt-5.2")
+    3. Default profile
+
+    Args:
+        model: The model identifier (e.g., "claude-sonnet-4-5", "openrouter:openai/gpt-5.2").
+        config_loader: Optional AgentConfigLoader instance. If None, uses global loader.
+
+    Returns:
+        Dictionary with guardrail settings:
+        - max_consecutive_failures: int
+        - max_repetitive_calls: int
+        - max_silent_turns: int
+        - max_todowrite_only_turns: int
+    """
+    # Default values (same as trace_processor defaults)
+    default_profile = {
+        "max_consecutive_failures": 5,
+        "max_repetitive_calls": 5,
+        "max_silent_turns": 5,
+        "max_todowrite_only_turns": 3,
+    }
+
+    loader = config_loader or get_config_loader()
+
+    try:
+        profiles = loader.get_section("model_profiles", {})
+        if not profiles:
+            logger.debug(f"No model_profiles section found, using defaults for {model}")
+            return default_profile
+
+        # Try exact match first
+        if model in profiles:
+            profile = {**default_profile, **profiles[model]}
+            logger.info(f"Using exact model profile for '{model}': {profile}")
+            return profile
+
+        # Try prefix match (e.g., "openrouter:" matches "openrouter:openai/gpt-5.2")
+        for profile_name in sorted(profiles.keys(), key=len, reverse=True):
+            if profile_name != "default" and model.startswith(profile_name):
+                profile = {**default_profile, **profiles[profile_name]}
+                logger.info(
+                    f"Using prefix-matched profile '{profile_name}' for '{model}': {profile}"
+                )
+                return profile
+
+        # Fall back to default profile
+        if "default" in profiles:
+            profile = {**default_profile, **profiles["default"]}
+            logger.debug(f"Using default model profile for '{model}': {profile}")
+            return profile
+
+        logger.debug(f"No matching profile found, using built-in defaults for {model}")
+        return default_profile
+
+    except Exception as e:
+        logger.warning(f"Failed to load model profile for {model}: {e}, using defaults")
+        return default_profile
 
 
 def load_sandboxed_envs(

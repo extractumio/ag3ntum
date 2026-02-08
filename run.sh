@@ -1412,6 +1412,10 @@ if [[ "${ACTION}" == "test" ]]; then
     for name in "${NAMES[@]}"; do
       # Trim whitespace
       name="${name// /}"
+      # Strip "test_" prefix if user included it (e.g., "test_llm_proxy" -> "llm_proxy")
+      name="${name#test_}"
+      # Also strip ".py" suffix if present
+      name="${name%.py}"
       # Find matching test files in container
       MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
       if [[ -n "${MATCHES}" ]]; then

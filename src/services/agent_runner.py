@@ -169,10 +169,7 @@ class AgentRunner:
 
         Also updates cumulative stats when completion metrics are provided.
         """
-        from ..db.models import Session
-
         async with AsyncSessionLocal() as db:
-            from sqlalchemy import select
             result = await db.execute(
                 select(Session).where(Session.id == session_id)
             )
@@ -474,6 +471,14 @@ class AgentRunner:
                         f"Session {session_id} waiting for user input "
                         f"(question_id: {pending_question.get('question_id')})"
                     )
+                    # Emit status_update event so frontend updates immediately
+                    # This corrects the status from agent_complete which was emitted
+                    # before we knew about the pending question
+                    emit_event("status_update", {
+                        "session_id": session_id,
+                        "status": "waiting_for_input",
+                        "question_id": pending_question.get("question_id"),
+                    })
             except Exception as e:
                 logger.warning(f"Failed to check pending questions for {session_id}: {e}")
 

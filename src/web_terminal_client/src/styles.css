@@ -1442,6 +1442,25 @@ body,
   color: var(--color-success);
 }
 
+/* Detailed tool names in stats badge */
+.message-stat-badge .stat-tool-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2xs);
+  margin-left: var(--spacing-2xs);
+  color: var(--color-text-secondary);
+}
+
+.message-stat-badge .stat-tool-item .stat-count {
+  font-size: var(--font-xs);
+  opacity: 0.8;
+}
+
+.message-stat-badge .stat-separator {
+  color: var(--color-text-muted);
+  margin-right: var(--spacing-2xs);
+}
+
 /* Copy buttons in message header */
 .copy-buttons {
   display: flex;

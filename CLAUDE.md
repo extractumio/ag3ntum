@@ -25,6 +25,21 @@ Design plans in `docs/plans/`: PostgreSQL migration, host command bridge, prompt
 
 ---
 
+## Environment Constraints
+
+- **No sudo access**: Do not suggest solutions requiring sudo (package installs, service restarts, group membership changes). If sudo is truly required, inform the user immediately and let them handle it.
+- **Container UID is 45045**: When fixing file permissions or ownership in the container environment, do not set ownership to the host username (`greg`). Use the container UID.
+- **Use absolute paths**: Always use absolute paths in shell scripts, not relative paths.
+- **Test user UIDs**: Avoid UIDs in the 50000-50100 range as they conflict with real database users. Use UIDs 59990+ for test users.
+
+---
+
+## Code Editing
+
+When editing files, prefer the Write or Edit tool over bash sed commands. sed-based edits have repeatedly corrupted files (especially App.tsx and shell scripts), requiring git restore.
+
+---
+
 ## Commands
 
 ```bash
@@ -45,6 +60,8 @@ Design plans in `docs/plans/`: PostgreSQL migration, host command bridge, prompt
 ./run.sh test --ui                     # Frontend vitest (alias: --frontend)
 ./run.sh test --subset "session*,auth*" # Pattern-match test files
 ```
+
+**Always use `./run.sh`** for building, testing, and running containers. Do not use raw docker/docker-compose commands unless explicitly asked.
 
 URLs after build: **Web UI** http://localhost:50080 | **API** http://localhost:40080
 
@@ -86,7 +103,7 @@ Project/
 ├── tools/ag3ntum/                 # 11 MCP tools
 ├── prompts/                       # Jinja2 templates
 ├── tests/
-│   ├── backend/ (28 files)        # API, services, routes
+│   ├── backend/ (29 files)        # API, services, routes
 │   │   └── redis/ (3 files)       # EventHub, streaming
 │   ├── core-tests/                # Agent core
 │   ├── security/ (5 files)        # Cmd filter, UID, isolation
@@ -146,7 +163,7 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 
 | File | Class | Purpose |
 |------|-------|---------|
-| `agent_core.py` | `ClaudeAgent` | Agent orchestrator, SDK integration |
+| `agent_core.py` | `ClaudeAgent` | Agent orchestrator, SDK integration, LLM proxy routing |
 | `task_runner.py` | `execute_agent_task()` | **Unified entry** for CLI + API |
 | `schemas.py` | `TaskExecutionParams` | Execution params dataclass |
 | `permission_profiles.py` | `PermissionManager` | Tool access, session context |
@@ -156,7 +173,7 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 | `path_validator.py` | `Ag3ntumPathValidator` | File path validation, session UID registry |
 | `command_security.py` | `CommandSecurityFilter` | Regex command blocking |
 | `tracer.py` | `TracerBase` | Output tracing (CLI/API/SSE/Null) |
-| `trace_processor.py` | `TraceProcessor` | SDK message → events |
+| `trace_processor.py` | `TraceProcessor` | SDK message → events, circuit breaker |
 
 ### API (`src/api/`)
 
@@ -231,6 +248,8 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 ---
 
 ## Testing
+
+**Always write tests alongside new feature implementations** — do not wait to be asked. If modifying existing functionality, update related tests in the same pass.
 
 All tests run **inside Docker** via `docker-compose.test.yml` (root → drops to ag3ntum_api via `setpriv --init-groups`, `AG3NTUM_TEST_MODE=true`).
 
@@ -335,6 +354,87 @@ Setup: `setup.ts` (MSW, jest-dom, window mocks). Mocks: `mocks/handlers.ts`.
 grep -A 10 "FAILED\|ERROR" logs/latest-test-results.log
 ```
 
+### SSE Schema Validation
+
+Anthropic's SSE streaming format is used in two contexts:
+1. **Direct API calls** — `TraceProcessor` parses events from Claude Agent SDK
+2. **LLM Proxy** — Translator produces Anthropic-format events from OpenAI responses
+
+When Anthropic changes the SSE format (new event types, new fields, changed structure), both contexts break. Schema validation tests detect these changes early.
+
+**Files**:
+- `src/api/llm_proxy/schemas.py` — Pydantic models for all SSE event types (shared by both contexts)
+- `tests/backend/test_sse_schemas.py` — 59 tests validating schemas
+- `tests/backend/fixtures/anthropic_sse_samples.json` — Recorded real API events
+- `scripts/record_sse_samples.py` — Re-records fixtures from live API
+
+**What breaks when Anthropic changes format**:
+| Component | Location | Impact |
+|-----------|----------|--------|
+| TraceProcessor | `src/core/trace_processor.py` | Fails to parse new event types, misses usage stats, wrong status |
+| LLM Proxy Translator | `src/api/llm_proxy/translator.py` | Produces invalid events, SDK rejects responses |
+| Event Persistence | `src/services/event_service.py` | New fields not stored, lost in polling fallback |
+
+**Test categories and what failures indicate**:
+
+| Test Class | Failure Indicates |
+|------------|-------------------|
+| `TestEnums` | New/renamed stop reasons, content types, or delta types |
+| `TestContentBlocks` | Changed structure of text/tool_use/thinking blocks |
+| `TestDeltas` | Changed structure of text_delta/input_json_delta/thinking_delta |
+| `TestUsage` | New usage fields (tokens, caching, service tier) |
+| `TestSSEEvents` | Changed event payload structure |
+| `TestSSEParsing` | Changed SSE wire format (event:/data: lines) |
+| `TestSSEStreamValidation` | Changed event ordering requirements |
+| `TestToolUseStreamOrder` | Changed tool input streaming protocol |
+| `TestTranslatorOutput` | Our translator produces invalid events |
+| `TestRecordedAPIEvents` | Real API format differs from schemas |
+| `TestTraceProcessorEventCoverage` | TraceProcessor missing handler for new event/delta type |
+
+**Workflow when Claude Code updates and tests fail**:
+
+```bash
+# 1. Run tests to see what broke
+./run.sh test --subset "sse_schemas"
+
+# 2. Re-record fixtures from live API
+python3 scripts/record_sse_samples.py
+
+# 3. Run tests again — new failures show schema drift
+./run.sh test --subset "sse_schemas"
+
+# 4. Update schemas.py to match new API format
+# 5. Update translator.py if LLM proxy output format changed
+# 6. Update trace_processor.py if new event types need handling
+# 7. Run tests until green
+```
+
+**Recording script usage**:
+```bash
+# Record from API (uses ANTHROPIC_API_KEY from env or secrets.yaml)
+python3 scripts/record_sse_samples.py
+
+# Preview only (no API calls)
+python3 scripts/record_sse_samples.py --dry-run
+
+# Use specific model
+python3 scripts/record_sse_samples.py --model claude-sonnet-4-20250514
+```
+
+The script makes 3 API calls: text-only, single tool call, multiple tool calls. Output saved to `tests/backend/fixtures/anthropic_sse_samples.json`.
+
+**Known API fields** (discovered via recording):
+- `ping` event: keepalive during long streams
+- `cache_creation`: nested object with `ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`
+- `service_tier`, `inference_geo`: in usage object
+- `input_json_delta`: first delta can be empty string
+
+---
+
+## Documentation
+
+**Always update relevant documentation alongside new feature implementations, fixes or refactoring** — do not wait to be asked. If modifying existing functionality, update related documentation in the same pass. Scan @DOCUMENTS/TECHNICAL or @doc folders for the document to update.
+
 ---
 
 ## Configuration
@@ -351,7 +451,7 @@ role: default                     # from prompts/roles/
 - `user_requirements.txt` — pip packages for sandbox
 - `user_secrets.yaml` — per-user encrypted credentials
 - `subagents.yaml` — subagent models, tools, prompts
-- `llm-api-proxy.yaml` — custom LLM routing (@`how-to-connect-custom-llm.md`)
+- `llm-api-proxy.yaml` — custom LLM routing, **auto-routes** models via proxy (@`how-to-connect-custom-llm.md`)
 
 ### Users
 `./run.sh create-user` / `delete-user` / `cleanup-test-users`
@@ -389,6 +489,8 @@ sandboxed_envs:               # Per-user, sandbox-only
 **Prompts**: Jinja2 templates in `prompts/`. `{{ var }}`, `{% for %}`, `{% include %}`. Injected by `ClaudeAgent`.
 
 **MCP server**: Single `ag3ntum` server → `mcp__ag3ntum__ToolName`. Registered in `tools/ag3ntum/__init__.py`.
+
+**Circuit breaker**: `TraceProcessor` tracks consecutive identical tool failures. After 5 failures with same error signature, trips and stops agent with FAILED status. Prevents infinite retry loops (e.g., proxy models calling tools with invalid args).
 
 ---
 
@@ -434,6 +536,7 @@ SELECT event_type FROM events WHERE session_id = 'SESSION_ID'
 # -v  verbose (all events)
 # -s  security only (blocked ops)
 # -d  dump session files
+# -m/--model  override model (e.g., "openrouter:openai/gpt-5.2")
 ```
 Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesystem uses username.
 
@@ -490,5 +593,6 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 13. **Always use `./run.sh test <flags>`** — Never run tests via raw `docker exec` or manual `docker compose exec`. The `run.sh` CLI handles: (a) starting the container with `docker-compose.test.yml` overlay (test entrypoint, test volumes), (b) running as `ag3ntum_api` user (not root), (c) restoring production mode after tests. Running `docker exec` directly runs as root, which causes false test results (e.g., security tests that check UID dropping will fail).
 14. **Container recreation for entrypoint changes** — `docker compose up -d` reuses existing containers if the image hasn't changed. After modifying `entrypoint-test.sh`, use `docker compose up -d --force-recreate ag3ntum-api` or `./run.sh rebuild` to ensure the new entrypoint runs.
 15. **Test user UIDs at high end of range** — Pre-built test users use UIDs 59990/59991 (top of 50000–60000 isolated range). Dynamic users allocated sequentially from 50000. Always check `getent passwd` or `SELECT linux_uid FROM users` before assigning UIDs to avoid collisions with existing users.
+16. **LLM proxy auto-routing** — Models in `llm-api-proxy.yaml` are automatically routed via the internal proxy (`/api/llm-proxy`). The SDK's `ANTHROPIC_BASE_URL` is set dynamically. API keys can be in env vars OR `secrets.yaml` → `sandboxed_envs`.
 
 **Study `requirements.txt` before new features** — use existing packages.

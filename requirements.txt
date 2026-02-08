@@ -1,6 +1,6 @@
 # Install with: pip install -r requirements.txt
 
-claude-agent-sdk==0.1.23
+claude-agent-sdk==0.1.31
 jinja2==3.1.6
 pydantic==2.12.5
 pyyaml==6.0.3
@@ -32,5 +32,7 @@ py7zr==0.22.0
 pandas>=2.2.3
 pyarrow>=17.0.0
 openpyxl==3.1.2
+
+
 
 
