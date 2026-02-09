@@ -5,12 +5,13 @@ Tests cover:
 - Text content truncation
 - File size validation
 - Request body size validation
+- Body-level size enforcement (actual bytes, not just Content-Length)
 - Request data filtering (nested dicts, lists)
 - Pydantic model filtering
 - Size info utilities
 - Size formatting
 """
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -22,6 +23,7 @@ from src.api.waf_filter import (
     truncate_text_content,
     validate_file_size,
     validate_request_body_size,
+    validate_request_size,
     filter_request_data,
     filter_pydantic_model,
     get_text_size_info,
@@ -376,3 +378,149 @@ class TestConstants:
     def test_request_larger_than_file_limit(self) -> None:
         """Request limit is larger than file limit (for base64)."""
         assert MAX_REQUEST_BODY_SIZE > MAX_FILE_UPLOAD_SIZE
+
+
+class TestValidateRequestSizeBodyEnforcement:
+    """Test body-level size enforcement in validate_request_size.
+
+    The middleware must measure actual bytes, not just trust Content-Length.
+    """
+
+    def _make_request(self, content_length: str | None = None) -> MagicMock:
+        """Create a mock Request with a controllable _receive callable."""
+        request = MagicMock()
+        request.headers = {}
+        if content_length is not None:
+            request.headers["content-length"] = content_length
+        # _receive will be replaced by validate_request_size
+        request._receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": b"",
+            "more_body": False,
+        })
+        return request
+
+    @pytest.mark.asyncio
+    async def test_spoofed_content_length_caught(self) -> None:
+        """Body exceeding limit is caught even with small Content-Length header."""
+        request = self._make_request(content_length="100")
+
+        await validate_request_size(request)
+
+        # Now simulate the wrapped receive returning a huge body
+        oversized_body = b"x" * (MAX_REQUEST_BODY_SIZE + 1)
+        original_receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": oversized_body,
+        })
+        # Replace the original receive that was captured by the wrapper
+        # We need to call the wrapper which was installed on request._receive
+        wrapped_receive = request._receive
+
+        # Patch the closure's captured original_receive
+        # The easiest way is to build a new request and manually test
+        request2 = self._make_request(content_length="100")
+        request2._receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": oversized_body,
+        })
+        await validate_request_size(request2)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await request2._receive()
+
+        assert exc_info.value.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_normal_body_passes(self) -> None:
+        """Normal-sized body passes through the wrapper."""
+        request = self._make_request(content_length="1024")
+        small_body = b"x" * 1024
+        request._receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": small_body,
+        })
+
+        await validate_request_size(request)
+
+        # The wrapped receive should return the message
+        result = await request._receive()
+        assert result["body"] == small_body
+
+    @pytest.mark.asyncio
+    async def test_content_length_header_precheck(self) -> None:
+        """Oversized Content-Length is caught in pre-check (before body read)."""
+        oversized = str(MAX_REQUEST_BODY_SIZE + 1)
+        request = self._make_request(content_length=oversized)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_request_size(request)
+
+        assert exc_info.value.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_missing_content_length_still_enforced(self) -> None:
+        """Missing Content-Length header still gets body-level enforcement."""
+        request = self._make_request(content_length=None)
+        oversized_body = b"x" * (MAX_REQUEST_BODY_SIZE + 1)
+        request._receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": oversized_body,
+        })
+
+        await validate_request_size(request)
+
+        # Body wrapper should catch it on read
+        with pytest.raises(HTTPException) as exc_info:
+            await request._receive()
+
+        assert exc_info.value.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_chunked_body_accumulated(self) -> None:
+        """Body sent in multiple chunks is accumulated for size checking."""
+        request = self._make_request(content_length=None)
+        chunk_size = MAX_REQUEST_BODY_SIZE // 2
+
+        # First chunk - under limit
+        request._receive = AsyncMock(return_value={
+            "type": "http.request",
+            "body": b"x" * chunk_size,
+            "more_body": True,
+        })
+        await validate_request_size(request)
+
+        wrapped_receive = request._receive
+
+        # First call succeeds (under limit)
+        result = await wrapped_receive()
+        assert result["type"] == "http.request"
+
+        # Now set up a second chunk that pushes over the limit
+        # We need to modify the original receive mock to return a second chunk
+        # Since the wrapper captured the original, we need a different approach
+        # Let's create a counter-based mock
+        call_count = 0
+        async def chunked_receive():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"type": "http.request", "body": b"x" * chunk_size, "more_body": True}
+            else:
+                return {"type": "http.request", "body": b"x" * (chunk_size + 2), "more_body": False}
+
+        # Re-build with a fresh request
+        request2 = MagicMock()
+        request2.headers = {}
+        request2._receive = chunked_receive
+
+        await validate_request_size(request2)
+        wrapped = request2._receive
+
+        # First chunk OK
+        await wrapped()
+        # Second chunk pushes over - should raise
+        with pytest.raises(HTTPException) as exc_info:
+            await wrapped()
+
+        assert exc_info.value.status_code == 413

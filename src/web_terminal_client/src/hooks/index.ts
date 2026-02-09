@@ -11,6 +11,7 @@ import { SPINNER_FRAMES } from '../constants';
 export { useSessionManager, type UseSessionManagerResult, type SessionStats } from './useSessionManager';
 export { useSSEConnection, type UseSSEConnectionResult, type ConnectionState } from './useSSEConnection';
 export { useFileOperations, type UseFileOperationsResult, type AttachedFile } from './useFileOperations';
+export { useConversation } from './useConversation';
 
 /**
  * Hook for spinner animation frames

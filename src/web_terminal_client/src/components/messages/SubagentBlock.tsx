@@ -42,7 +42,7 @@ export function SubagentBlock({
 
   return (
     <div className={`subagent-call ${statusClass}`}>
-      <div className="subagent-call-header" onClick={hasContent ? onToggle : undefined} role="button">
+      <div className="subagent-call-header" onClick={hasContent ? onToggle : undefined} role="button" aria-expanded={hasContent ? expanded : undefined} aria-label={`Subagent ${subagent.name}, status: ${subagent.status}`}>
         <span className="tool-tree">{treeChar}</span>
         {isRunning && (
           <span className={`subagent-status-icon ${statusClass}`}><PulsingCircleSpinner /></span>
@@ -70,7 +70,7 @@ export function SubagentBlock({
         </div>
       )}
       {expanded && hasContent && (
-        <div className="subagent-call-body">
+        <div className="subagent-call-body" role="region" aria-label={`${subagent.name} details`}>
           {subagent.promptPreview && (
             <div className="tool-section">
               <div className="tool-section-title">┌─ prompt ───────────</div>

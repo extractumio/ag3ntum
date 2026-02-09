@@ -8,7 +8,6 @@ Provides fixtures for:
 - Mock services (agent runner)
 - Centralized test user management with automatic cleanup
 """
-import asyncio
 import shutil
 import sys
 import tempfile
@@ -91,50 +90,34 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Clean up after all tests complete to prevent hanging."""
+    import asyncio
     import os
     import threading
-    import gc
-    
-    # Force garbage collection to clean up any pending resources
-    gc.collect()
-    
-    # Give a small window for cleanup
-    import time
-    time.sleep(0.1)
-    
-    # Check for non-daemon threads that might be blocking (e.g., aiosqlite worker)
-    main_thread = threading.main_thread()
-    hanging_threads = []
-    for thread in threading.enumerate():
-        if thread is not main_thread and thread.is_alive() and not thread.daemon:
-            # Try to join with a short timeout
-            thread.join(timeout=0.5)
-            if thread.is_alive():
-                hanging_threads.append(thread.name)
-    
-    # If there are still hanging threads, force exit to prevent indefinite hang
-    if hanging_threads:
-        print(f"\nWARNING: Threads did not exit: {hanging_threads}. Forcing exit.")
-        os._exit(exitstatus)
+
+    # Close module-level Redis clients that may have been initialized
+    # These spawn non-daemon _connection_worker_thread that block exit
+    try:
+        loop = asyncio.new_event_loop()
+        from src.services.connection_token import close_redis_client as close_ct
+        from src.services.rate_limiter import close_redis_client as close_rl
+        loop.run_until_complete(close_ct())
+        loop.run_until_complete(close_rl())
+        loop.close()
+    except Exception:
+        pass
+
+    # Force exit after a brief delay to let pytest print its summary
+    def _force_exit():
+        import time
+        time.sleep(0.5)
+        os._exit(exitstatus if exitstatus else 0)
+
+    t = threading.Thread(target=_force_exit, daemon=True)
+    t.start()
 
 
 # In-memory SQLite for testing
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    """Create event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    # Cancel all pending tasks before closing
-    pending = asyncio.all_tasks(loop)
-    for task in pending:
-        task.cancel()
-    # Give tasks a chance to handle cancellation
-    if pending:
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-    loop.close()
 
 
 @pytest.fixture(scope="function")
@@ -290,16 +273,20 @@ def test_app(test_db_override, mock_agent_runner, temp_sessions_dir):
             with patch("src.api.routes.sessions.USERS_DIR", temp_sessions_dir):
                 # Patch validate_user_environment to skip filesystem checks in tests
                 with patch("src.services.auth_service.AuthService.validate_user_environment"):
-                    app = create_app()
+                    # Disable rate limiter in tests to prevent IP-based rate limit
+                    # accumulation across test functions (all use IP "testclient")
+                    with patch("src.api.routes.auth.check_rate_limit", return_value=True):
+                        with patch("src.api.routes.auth.reset_rate_limit"):
+                            app = create_app()
 
-                    # Override database dependency
-                    app.dependency_overrides[get_db] = test_db_override
+                            # Override database dependency
+                            app.dependency_overrides[get_db] = test_db_override
 
-                    # Patch agent runner for session routes
-                    with patch("src.api.routes.sessions.agent_runner", mock_agent_runner):
-                        yield app
+                            # Patch agent runner for session routes
+                            with patch("src.api.routes.sessions.agent_runner", mock_agent_runner):
+                                yield app
 
-                    app.dependency_overrides.clear()
+                            app.dependency_overrides.clear()
 
 
 @pytest.fixture

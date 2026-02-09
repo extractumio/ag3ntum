@@ -28,6 +28,107 @@ logger = logging.getLogger(__name__)
 AG3NTUM_READ_TOOL: str = "mcp__ag3ntum__Read"
 
 
+async def _read_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    """Core read implementation - testable without MCP tool wrapper."""
+    file_path = args.get("file_path", "")
+    offset = args.get("offset", 1)
+    limit = args.get("limit")
+
+    if not file_path:
+        return _error("file_path is required")
+
+    # Get validator for this session
+    try:
+        validator = get_path_validator(session_id)
+    except RuntimeError as e:
+        logger.error(f"Ag3ntumRead: PathValidator not configured - {e}")
+        return _error(f"Internal error: {e}")
+
+    # Validate path
+    try:
+        validated = validator.validate_path(file_path, operation="read")
+    except PathValidationError as e:
+        logger.warning(f"Ag3ntumRead: Path validation failed - {e.reason}")
+        return _error(f"Path validation failed: {e.reason}")
+
+    path = validated.normalized
+
+    # Check existence
+    if not path.exists():
+        return _error(f"File not found: {file_path}")
+
+    if path.is_dir():
+        return _error(f"Cannot read directory: {file_path}. Use LS tool instead.")
+
+    # Check if binary
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(8192)
+            if b"\x00" in chunk:
+                size = path.stat().st_size
+                return _result(
+                    f"Binary file detected ({size} bytes). Cannot display contents."
+                )
+    except Exception as e:
+        return _error(f"Failed to read file: {e}")
+
+    # Read content
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+
+        # Scan content for sensitive data
+        secrets_redacted = 0
+        secret_types: list[str] = []
+
+        if is_scanner_enabled():
+            try:
+                scan_result = scan_and_redact(content)
+                if scan_result.has_secrets:
+                    content = scan_result.redacted_text
+                    secrets_redacted = scan_result.secret_count
+                    secret_types = list(scan_result.secret_types)
+                    logger.warning(
+                        f"Ag3ntumRead: Redacted {secrets_redacted} secrets "
+                        f"({', '.join(secret_types)}) when reading {file_path}"
+                    )
+            except Exception as e:
+                logger.warning(f"Ag3ntumRead: Failed to scan content - {e}")
+
+        lines = content.splitlines()
+        total_lines = len(lines)
+
+        # Apply offset/limit
+        start_idx = max(0, offset - 1)
+        end_idx = start_idx + limit if limit else len(lines)
+        selected_lines = lines[start_idx:end_idx]
+
+        # Format with line numbers
+        numbered_lines = []
+        for i, line in enumerate(selected_lines, start=start_idx + 1):
+            numbered_lines.append(f"{i:6}|{line}")
+
+        output = "\n".join(numbered_lines)
+
+        # Add truncation notice
+        if limit and end_idx < total_lines:
+            output += f"\n\n... ({total_lines - end_idx} more lines)"
+
+        # Add security notice if secrets were redacted
+        if secrets_redacted > 0:
+            output += (
+                f"\n\n**Security Notice:** {secrets_redacted} sensitive value(s) "
+                f"({', '.join(secret_types)}) were redacted from display."
+            )
+
+        logger.info(
+            f"Ag3ntumRead: Read {len(selected_lines)} lines from {file_path}"
+        )
+        return _result(output)
+
+    except Exception as e:
+        return _error(f"Failed to read file: {e}")
+
+
 def create_read_tool(session_id: str):
     """
     Create Ag3ntumRead tool bound to a specific session's workspace.
@@ -61,103 +162,7 @@ Examples:
     )
     async def read(args: dict[str, Any]) -> dict[str, Any]:
         """Read file contents with line numbers."""
-        file_path = args.get("file_path", "")
-        offset = args.get("offset", 1)
-        limit = args.get("limit")
-
-        if not file_path:
-            return _error("file_path is required")
-
-        # Get validator for this session
-        try:
-            validator = get_path_validator(bound_session_id)
-        except RuntimeError as e:
-            logger.error(f"Ag3ntumRead: PathValidator not configured - {e}")
-            return _error(f"Internal error: {e}")
-
-        # Validate path
-        try:
-            validated = validator.validate_path(file_path, operation="read")
-        except PathValidationError as e:
-            logger.warning(f"Ag3ntumRead: Path validation failed - {e.reason}")
-            return _error(f"Path validation failed: {e.reason}")
-
-        path = validated.normalized
-
-        # Check existence
-        if not path.exists():
-            return _error(f"File not found: {file_path}")
-
-        if path.is_dir():
-            return _error(f"Cannot read directory: {file_path}. Use LS tool instead.")
-
-        # Check if binary
-        try:
-            with open(path, "rb") as f:
-                chunk = f.read(8192)
-                if b"\x00" in chunk:
-                    size = path.stat().st_size
-                    return _result(
-                        f"Binary file detected ({size} bytes). Cannot display contents."
-                    )
-        except Exception as e:
-            return _error(f"Failed to read file: {e}")
-
-        # Read content
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-
-            # Scan content for sensitive data
-            secrets_redacted = 0
-            secret_types: list[str] = []
-
-            if is_scanner_enabled():
-                try:
-                    scan_result = scan_and_redact(content)
-                    if scan_result.has_secrets:
-                        content = scan_result.redacted_text
-                        secrets_redacted = scan_result.secret_count
-                        secret_types = list(scan_result.secret_types)
-                        logger.warning(
-                            f"Ag3ntumRead: Redacted {secrets_redacted} secrets "
-                            f"({', '.join(secret_types)}) when reading {file_path}"
-                        )
-                except Exception as e:
-                    logger.warning(f"Ag3ntumRead: Failed to scan content - {e}")
-
-            lines = content.splitlines()
-            total_lines = len(lines)
-
-            # Apply offset/limit
-            start_idx = max(0, offset - 1)
-            end_idx = start_idx + limit if limit else len(lines)
-            selected_lines = lines[start_idx:end_idx]
-
-            # Format with line numbers
-            numbered_lines = []
-            for i, line in enumerate(selected_lines, start=start_idx + 1):
-                numbered_lines.append(f"{i:6}|{line}")
-
-            output = "\n".join(numbered_lines)
-
-            # Add truncation notice
-            if limit and end_idx < total_lines:
-                output += f"\n\n... ({total_lines - end_idx} more lines)"
-
-            # Add security notice if secrets were redacted
-            if secrets_redacted > 0:
-                output += (
-                    f"\n\n**Security Notice:** {secrets_redacted} sensitive value(s) "
-                    f"({', '.join(secret_types)}) were redacted from display."
-                )
-
-            logger.info(
-                f"Ag3ntumRead: Read {len(selected_lines)} lines from {file_path}"
-            )
-            return _result(output)
-
-        except Exception as e:
-            return _error(f"Failed to read file: {e}")
+        return await _read_impl(args, session_id=bound_session_id)
 
     return read
 

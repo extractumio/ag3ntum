@@ -52,7 +52,7 @@ describe('LoginPage', () => {
       renderLoginPage();
 
       const emailInput = screen.getByLabelText(/email/i);
-      expect(emailInput).toHaveAttribute('type', 'text');
+      expect(emailInput).toHaveAttribute('type', 'email');
       expect(emailInput).toHaveAttribute('required');
     });
 

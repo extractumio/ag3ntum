@@ -1,0 +1,326 @@
+/* =============================================================================
+ * REUSABLE COMPONENT CLASSES
+ * Base styles that can be extended or composed
+ * ============================================================================= */
+
+/* -------------------------------------------------------------------------
+ * Button Base Classes
+ * ------------------------------------------------------------------------- */
+
+/* Ghost button - transparent with border */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  font-weight: bold;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.btn-ghost:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.btn-ghost.active {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+  background: var(--color-btn-hover-bg);
+}
+
+.btn-ghost.btn-danger:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+  background: var(--color-btn-hover-bg-error);
+}
+
+.btn-ghost.btn-success {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.btn-ghost:disabled,
+.btn-ghost.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Primary button - filled accent color */
+.btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-accent-primary);
+  color: var(--color-bg-base);
+  border: 1px solid var(--color-accent-primary);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  font-size: var(--font-base);
+  font-weight: bold;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #9dd9e3;
+  border-color: #9dd9e3;
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.btn-primary.btn-danger {
+  background: var(--color-error);
+  border-color: var(--color-error);
+  color: #fff;
+}
+
+.btn-primary.btn-danger:hover {
+  background: #f0a5a3;
+  border-color: #f0a5a3;
+}
+
+/* Icon button - square button for icons */
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-highest);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-2xl);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  padding: 0;
+}
+
+.btn-icon:hover:not(:disabled) {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+/* -------------------------------------------------------------------------
+ * Badge/Tag Classes
+ * ------------------------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-sm);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--color-badge-bg);
+}
+
+.badge-success {
+  color: var(--color-success);
+  background: rgba(125, 211, 163, 0.15);
+}
+
+.badge-warning {
+  color: var(--color-warning);
+  background: rgba(232, 211, 116, 0.15);
+}
+
+.badge-error {
+  color: var(--color-error);
+  background: rgba(232, 145, 142, 0.15);
+}
+
+.badge-info {
+  color: var(--color-info);
+  background: rgba(232, 168, 122, 0.15);
+}
+
+.badge-primary {
+  color: var(--color-accent-primary);
+  background: rgba(126, 200, 212, 0.15);
+}
+
+.badge-secondary {
+  color: var(--color-accent-secondary);
+  background: rgba(143, 184, 232, 0.15);
+}
+
+.badge-tertiary {
+  color: var(--color-accent-tertiary);
+  background: rgba(201, 160, 232, 0.15);
+}
+
+/* -------------------------------------------------------------------------
+ * Status Border Classes
+ * Used for message blocks, tool calls, etc.
+ * ------------------------------------------------------------------------- */
+
+.status-border {
+  border-left: 2px solid var(--color-border);
+}
+
+.status-border-success { border-left-color: var(--color-success); }
+.status-border-warning { border-left-color: var(--color-warning); }
+.status-border-error { border-left-color: var(--color-error); }
+.status-border-info { border-left-color: var(--color-info); }
+.status-border-primary { border-left-color: var(--color-accent-primary); }
+.status-border-secondary { border-left-color: var(--color-accent-secondary); }
+
+/* -------------------------------------------------------------------------
+ * Status Text Classes
+ * ------------------------------------------------------------------------- */
+
+.status-text { color: var(--color-text-muted); }
+.status-text-success { color: var(--color-success); }
+.status-text-warning { color: var(--color-warning); }
+.status-text-error { color: var(--color-error); }
+.status-text-info { color: var(--color-info); }
+.status-text-primary { color: var(--color-accent-primary); }
+.status-text-running { color: var(--color-accent-primary); }
+
+/* -------------------------------------------------------------------------
+ * Modal Overlay Base
+ * ------------------------------------------------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+  padding: var(--spacing-3xl);
+}
+
+.modal-content {
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  max-width: 95vw;
+  max-height: 95vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-xl) var(--spacing-2xl);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+  gap: var(--spacing-xl);
+}
+
+.modal-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-2xl);
+  background: var(--color-bg-base);
+  overflow: auto;
+  flex: 1;
+}
+
+/* -------------------------------------------------------------------------
+ * Card/Panel Classes
+ * ------------------------------------------------------------------------- */
+
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.card-body {
+  padding: var(--spacing-2xl);
+}
+
+/* -------------------------------------------------------------------------
+ * Tree/Nested Content Classes
+ * ------------------------------------------------------------------------- */
+
+.tree-body {
+  padding-left: 44px;
+  padding-top: var(--spacing-md);
+  padding-bottom: var(--spacing-sm);
+  border-left: 1px dashed var(--color-border);
+  margin-left: var(--spacing-sm);
+}
+
+.tree-toggle {
+  color: var(--color-text-muted);
+  width: 12px;
+  text-align: center;
+}
+
+.tree-connector {
+  color: var(--color-text-muted);
+}
+
+/* -------------------------------------------------------------------------
+ * Form Control Classes
+ * ------------------------------------------------------------------------- */
+
+.form-control {
+  width: 100%;
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  font-family: inherit;
+  transition: border-color var(--transition-normal);
+}
+
+.form-control:focus {
+  outline: none;
+  border-color: var(--color-accent-secondary);
+}
+
+.form-control::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* =============================================================================
+ * GLOBAL STYLES
+ * ============================================================================= */
+
+* {
+  box-sizing: border-box;
+}
+
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+}
+

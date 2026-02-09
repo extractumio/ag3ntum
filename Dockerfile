@@ -52,7 +52,8 @@ RUN mkdir -p /mounts/ro /mounts/rw \
 # SECURITY: Test-only sudoers rules are NOT included here.
 # They are injected at runtime via docker-compose.test.yml for test runs only.
 # See config/test/sudoers-test for test-specific rules.
-RUN echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /bin/bash -u * *' > /etc/sudoers.d/ag3ntum && \
+RUN echo '# User management - create/modify/delete sandbox users' > /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /bin/bash -u * *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -L *' >> /etc/sudoers.d/ag3ntum && \
@@ -62,15 +63,25 @@ RUN echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /
     echo '# Restricted userdel - only session users (user_ prefix) can be deleted' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel user_*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r user_*' >> /etc/sudoers.d/ag3ntum && \
+    echo '# File ownership - restricted to /users/ tree only' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp -R ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo '# chown for web container node_modules (Docker named volume ownership fix)' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /src/web_terminal_client/*' >> /etc/sudoers.d/ag3ntum && \
-    echo '# bwrap is required for sandbox execution' >> /etc/sudoers.d/ag3ntum && \
-    echo 'ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/bwrap *' >> /etc/sudoers.d/ag3ntum && \
-    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod * /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo '# bwrap - required for sandbox execution, run as root only' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/bwrap *' >> /etc/sudoers.d/ag3ntum && \
+    echo '# chmod - restricted to safe modes only (no 777/world-writable)' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 660 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 700 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 711 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 750 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 755 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 770 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 660 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 755 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 770 /users/*' >> /etc/sudoers.d/ag3ntum && \
     chmod 440 /etc/sudoers.d/ag3ntum
 
 ENV VIRTUAL_ENV=/opt/venv

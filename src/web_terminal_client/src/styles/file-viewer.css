@@ -1,0 +1,781 @@
+/* =============================================================================
+ * INLINE FILE VIEWER
+ * ============================================================================= */
+
+.inline-file-viewer {
+  margin: var(--spacing-xl) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.inline-file-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.inline-file-viewer-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.inline-file-viewer-icon {
+  flex-shrink: 0;
+  font-size: var(--font-lg);
+}
+
+.inline-file-viewer-name {
+  color: var(--color-text-bright);
+  font-weight: 500;
+  font-size: var(--font-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-file-viewer-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  flex-shrink: 0;
+}
+
+.inline-file-viewer-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-shrink: 0;
+}
+
+/* Shared action button style for viewers */
+.viewer-action-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.viewer-action-btn:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.viewer-action-btn.copied {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.inline-file-viewer-action-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.inline-file-viewer-action-btn:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.inline-file-viewer-content {
+  display: flex;
+  background: var(--color-bg-code);
+  overflow: hidden;
+  max-height: 400px;
+}
+
+.inline-file-viewer-content.expanded {
+  max-height: none;
+}
+
+/* Wrapper for code with line numbers */
+.inline-file-viewer-wrapper {
+  display: flex;
+  min-height: 100%;
+}
+
+.inline-file-viewer-line-numbers {
+  flex-shrink: 0;
+  padding: var(--spacing-xl) var(--spacing-md) var(--spacing-xl) var(--spacing-xl);
+  background: var(--color-bg-code);
+  border-right: 1px solid var(--color-border);
+  text-align: right;
+  user-select: none;
+}
+
+.inline-file-viewer-line-numbers .line-number {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  opacity: 0.6;
+}
+
+.inline-file-viewer-code {
+  flex: 1;
+  padding: var(--spacing-xl);
+  overflow-x: auto;
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--color-text-primary);
+}
+
+.inline-file-viewer-empty {
+  padding: var(--spacing-3xl);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.inline-file-viewer-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: var(--color-bg-highest);
+  border: none;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.inline-file-viewer-expand-btn:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-accent-primary);
+}
+
+.inline-file-viewer-expand-btn .chevron-icon {
+  display: inline-flex;
+  transition: transform var(--transition-slow);
+}
+
+.inline-file-viewer-expand-btn .chevron-icon.expanded svg {
+  transform: rotate(180deg);
+}
+
+/* Syntax highlighting colors for inline file viewer */
+.inline-file-viewer-code .hljs {
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+.inline-file-viewer-code .hljs-keyword,
+.inline-file-viewer-code .hljs-selector-tag,
+.inline-file-viewer-code .hljs-built_in,
+.inline-file-viewer-code .hljs-literal {
+  color: var(--color-accent-tertiary);
+}
+
+.inline-file-viewer-code .hljs-string,
+.inline-file-viewer-code .hljs-doctag,
+.inline-file-viewer-code .hljs-addition {
+  color: var(--color-success);
+}
+
+.inline-file-viewer-code .hljs-number {
+  color: var(--color-info);
+}
+
+.inline-file-viewer-code .hljs-comment,
+.inline-file-viewer-code .hljs-quote {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.inline-file-viewer-code .hljs-variable,
+.inline-file-viewer-code .hljs-attr,
+.inline-file-viewer-code .hljs-tag,
+.inline-file-viewer-code .hljs-name {
+  color: var(--color-error);
+}
+
+.inline-file-viewer-code .hljs-type,
+.inline-file-viewer-code .hljs-class .hljs-title {
+  color: var(--color-warning);
+}
+
+.inline-file-viewer-code .hljs-function,
+.inline-file-viewer-code .hljs-title.function_ {
+  color: var(--color-accent-secondary);
+}
+
+.inline-file-viewer-code .hljs-property {
+  color: var(--color-accent-primary);
+}
+
+/* =============================================================================
+ * UNIFIED IMAGE VIEWER
+ * Consolidated styles for inline-image-viewer, file-viewer-image, and image-viewer-modal
+ * ============================================================================= */
+
+/* Shared image viewer card */
+.inline-image-viewer {
+  margin: var(--spacing-xl) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.inline-image-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.inline-image-viewer-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.inline-image-viewer-name {
+  color: var(--color-text-bright);
+  font-weight: 500;
+  font-size: var(--font-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-image-viewer-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  flex-shrink: 0;
+}
+
+.inline-image-viewer-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-shrink: 0;
+}
+
+.inline-image-viewer-action-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.inline-image-viewer-action-btn:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.inline-image-viewer-content,
+.inline-image-viewer-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-2xl);
+  background: var(--color-bg-base);
+  min-height: 60px;
+  position: relative;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.inline-image-viewer-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+}
+
+.inline-image-viewer-error {
+  color: var(--color-error);
+  font-size: var(--font-base);
+  padding: var(--spacing-2xl);
+  text-align: center;
+}
+
+.inline-image-viewer-img {
+  max-width: 100%;
+  max-height: 400px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  transition: opacity var(--transition-slow);
+}
+
+.inline-image-viewer-img.loading {
+  opacity: 0;
+}
+
+.inline-image-viewer-img.loaded {
+  opacity: 1;
+}
+
+/* Simple fullscreen modal (used by inline viewer click) */
+.inline-image-viewer-modal {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+  padding: var(--spacing-3xl);
+  cursor: pointer;
+}
+
+.inline-image-viewer-modal-content {
+  position: relative;
+  max-width: 95vw;
+  max-height: 95vh;
+  cursor: default;
+}
+
+.inline-image-viewer-modal-close {
+  position: absolute;
+  top: -40px;
+  right: 0;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md) var(--spacing-xl);
+  color: var(--color-text-primary);
+  font-size: var(--font-2xl);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.inline-image-viewer-modal-close:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.inline-image-viewer-modal-img {
+  max-width: 95vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+/* Clickable wrapper for inline images */
+.inline-image-viewer-clickable {
+  cursor: pointer;
+  transition: opacity var(--transition-normal);
+}
+
+.inline-image-viewer-clickable:hover {
+  opacity: 0.9;
+}
+
+/* =============================================================================
+ * IMAGE VIEWER MODAL - Unified modal with header (used by file explorer)
+ * ============================================================================= */
+
+.image-viewer-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+  padding: var(--spacing-3xl);
+}
+
+.image-viewer-modal {
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  max-width: 95vw;
+  max-height: 95vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.image-viewer-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-xl) var(--spacing-2xl);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+  gap: var(--spacing-xl);
+}
+
+.image-viewer-modal-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.image-viewer-modal-name {
+  color: var(--color-text-bright);
+  font-weight: 500;
+  font-size: var(--font-lg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-viewer-modal-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  flex-shrink: 0;
+}
+
+.image-viewer-modal-actions {
+  display: flex;
+  gap: var(--spacing-md);
+  flex-shrink: 0;
+}
+
+.image-viewer-modal-action-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-base);
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-viewer-modal-action-btn:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.image-viewer-modal-action-btn.copied {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.image-viewer-modal-close-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: var(--font-lg);
+  transition: all var(--transition-normal);
+}
+
+.image-viewer-modal-close-btn:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.image-viewer-modal-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-2xl);
+  background: var(--color-bg-base);
+  overflow: auto;
+  flex: 1;
+}
+
+.image-viewer-modal-img {
+  max-width: 100%;
+  max-height: calc(95vh - 80px);
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+/* =============================================================================
+ * FILE VIEWER IMAGE - For images in FileViewer modal (uses shared patterns)
+ * ============================================================================= */
+
+.file-viewer-image-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-2xl);
+  background: var(--color-bg-base);
+  min-height: 100px;
+  position: relative;
+}
+
+.file-viewer-image-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--color-text-muted);
+  font-size: var(--font-lg);
+}
+
+.file-viewer-image-error {
+  color: var(--color-error);
+  font-size: var(--font-lg);
+  text-align: center;
+}
+
+.file-viewer-image-img {
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  transition: opacity var(--transition-slow);
+}
+
+.file-viewer-image-img.loading {
+  opacity: 0;
+}
+
+.file-viewer-image-img.loaded {
+  opacity: 1;
+}
+
+/* Image modal for full-size view in FileViewer */
+.file-viewer-image-modal {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal-high);
+  padding: var(--spacing-3xl);
+  cursor: pointer;
+}
+
+.file-viewer-image-modal-content {
+  position: relative;
+  max-width: 95vw;
+  max-height: 95vh;
+  cursor: default;
+}
+
+.file-viewer-image-modal-close {
+  position: absolute;
+  top: -40px;
+  right: 0;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md) var(--spacing-xl);
+  color: var(--color-text-primary);
+  font-size: var(--font-2xl);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.file-viewer-image-modal-close:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.file-viewer-image-modal-img {
+  max-width: 95vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+/* =============================================================================
+ * AG3NTUM TAG PLACEHOLDERS
+ * ============================================================================= */
+
+.ag3ntum-file-placeholder,
+.ag3ntum-image-placeholder {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  margin: var(--spacing-xl) 0;
+  padding: var(--spacing-xl) var(--spacing-2xl);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+}
+
+.ag3ntum-placeholder-icon {
+  font-size: var(--font-2xl);
+}
+
+.ag3ntum-placeholder-path {
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  color: var(--color-text-primary);
+}
+
+/* =============================================================================
+ * AG3NTUM ATTACHED FILES WIDGET
+ * ============================================================================= */
+
+.ag3ntum-attached-files {
+  margin: var(--spacing-md) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.ag3ntum-attached-files-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  width: 100%;
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  font-family: inherit;
+  text-align: left;
+  transition: background var(--transition-normal);
+}
+
+.ag3ntum-attached-files-header:hover {
+  background: var(--color-bg-highest);
+}
+
+.ag3ntum-attached-files-icon {
+  font-size: var(--font-lg);
+  flex-shrink: 0;
+}
+
+.ag3ntum-attached-files-label {
+  flex: 1;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.ag3ntum-attached-files-total-size {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  opacity: 0.8;
+}
+
+.ag3ntum-attached-files-chevron {
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+  transition: transform var(--transition-slow);
+}
+
+.ag3ntum-attached-files-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.ag3ntum-attached-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2xs);
+  padding: var(--spacing-xs) var(--spacing-md) var(--spacing-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.ag3ntum-attached-file-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-base);
+  font-size: var(--font-base);
+}
+
+.ag3ntum-attached-file-icon {
+  font-size: var(--font-lg);
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.ag3ntum-attached-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3xs);
+}
+
+.ag3ntum-attached-file-name {
+  color: var(--color-text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: var(--font-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.ag3ntum-attached-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  align-items: center;
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+
+.ag3ntum-attached-file-size {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.ag3ntum-attached-file-mime {
+  color: var(--color-text-muted);
+  background: var(--color-bg-elevated);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: var(--font-2xs);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag3ntum-attached-file-date {
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
+

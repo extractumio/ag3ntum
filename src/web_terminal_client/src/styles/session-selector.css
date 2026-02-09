@@ -1,0 +1,207 @@
+/* =============================================================================
+ * SESSION SELECTOR
+ * ============================================================================= */
+
+.session-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);
+}
+
+.session-current-id {
+  color: var(--color-text-bright);
+  font-size: var(--font-base);
+  display: inline-block;
+  min-width: 190px;
+  text-align: left;
+}
+
+.session-new-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-accent-primary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  font-weight: bold;
+  padding: 5px 9px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.session-new-button:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+/* =============================================================================
+ * DROPDOWN SYSTEM
+ * ============================================================================= */
+
+.dropdown {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs) var(--spacing-xl);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  font-size: var(--font-base);
+  color: var(--color-text-muted);
+}
+
+.dropdown:hover {
+  border-color: var(--color-text-muted);
+}
+
+.dropdown:hover .dropdown-list {
+  display: flex;
+}
+
+.dropdown-value {
+  color: var(--color-text-muted);
+}
+
+.dropdown-icon {
+  font-size: var(--font-xs);
+  opacity: 0.7;
+  transition: transform var(--transition-normal);
+  margin-left: auto;
+}
+
+.dropdown:hover .dropdown-icon {
+  transform: rotate(180deg);
+}
+
+.dropdown-list {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  display: none;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+  z-index: var(--z-dropdown);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* Bridge gap between trigger and dropdown for smooth hover */
+.dropdown::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 8px;
+  background: transparent;
+}
+
+.dropdown-item {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-base);
+  white-space: nowrap;
+}
+
+.dropdown-item:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.dropdown-item.active {
+  border-color: var(--color-accent-primary);
+  background: var(--color-btn-hover-bg);
+}
+
+/* Session dropdown specific */
+.session-dropdown {
+  min-width: 250px;
+  justify-content: flex-end;
+}
+
+.session-dropdown .dropdown-list {
+  min-width: 260px;
+}
+
+.session-current {
+  color: var(--color-text-muted);
+}
+
+.session-item {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-base);
+}
+
+.session-item:hover {
+  border-color: var(--color-accent-primary);
+}
+
+/* Model dropdown specific */
+.model-dropdown {
+  min-width: 160px;
+}
+
+.model-dropdown .dropdown-list {
+  min-width: 180px;
+}
+
+.session-item-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--font-base);
+  margin-bottom: var(--spacing-xs);
+}
+
+.session-status {
+  text-transform: capitalize;
+  color: var(--color-text-muted);
+}
+
+.session-status.completed,
+.session-status.complete {
+  color: var(--color-success);
+}
+
+.session-status.failed,
+.session-status.cancelled {
+  color: var(--color-error);
+}
+
+.session-status.running {
+  color: var(--color-warning);
+}
+
+.session-status.partial {
+  color: var(--color-warning);
+}
+
+.session-task {
+  font-size: var(--font-base);
+  color: var(--color-text-muted);
+}
+
+.session-new {
+  text-align: center;
+  color: var(--color-accent-primary);
+  font-weight: 600;
+}
+

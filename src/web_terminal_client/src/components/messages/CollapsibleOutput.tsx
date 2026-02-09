@@ -44,6 +44,7 @@ export function CollapsibleOutput({
           className="output-expand-toggle"
           onClick={() => setIsExpanded(!isExpanded)}
           type="button"
+          aria-expanded={isExpanded}
         >
           {isExpanded
             ? `▲ Collapse${formatBadge}`

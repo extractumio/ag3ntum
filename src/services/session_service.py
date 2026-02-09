@@ -17,17 +17,16 @@ import logging
 import re
 import shutil
 from datetime import datetime, timezone
-from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import SESSIONS_DIR
 from ..core.sessions import SessionManager, generate_session_id, sudo_chown_recursive
 from ..db.models import Session, User
+from ..db.retry import with_db_retry
 
 logger = logging.getLogger(__name__)
 
@@ -87,48 +86,6 @@ def validate_session_id(session_id: str) -> None:
         raise InvalidSessionIdError(
             f"Invalid characters in session ID: {session_id}"
         )
-
-
-def with_db_retry(
-    max_retries: int = MAX_RETRIES,
-    retry_delay: float = RETRY_DELAY_SECONDS,
-    backoff_multiplier: float = RETRY_BACKOFF_MULTIPLIER,
-) -> Callable:
-    """
-    Decorator for retrying database operations on transient failures.
-
-    Retries on OperationalError (connection issues, locks, etc.)
-    but not on IntegrityError (constraint violations).
-    """
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> T:
-            last_error: Optional[Exception] = None
-            delay = retry_delay
-
-            for attempt in range(max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except OperationalError as e:
-                    last_error = e
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Database operation failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                            f"Retrying in {delay:.2f}s..."
-                        )
-                        await asyncio.sleep(delay)
-                        delay *= backoff_multiplier
-                    else:
-                        logger.error(
-                            f"Database operation failed after {max_retries + 1} attempts: {e}"
-                        )
-                except IntegrityError:
-                    # Don't retry integrity errors - they won't succeed
-                    raise
-
-            raise last_error  # type: ignore
-        return wrapper
-    return decorator
 
 
 class SessionService:

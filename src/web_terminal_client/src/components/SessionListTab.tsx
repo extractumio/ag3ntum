@@ -236,10 +236,10 @@ function DeleteConfirmModal({
   isDeleting,
 }: DeleteConfirmModalProps): JSX.Element {
   return (
-    <div className="session-delete-overlay" onClick={onCancel}>
-      <div className="session-delete-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="session-delete-overlay" onClick={onCancel} role="presentation">
+      <div className="session-delete-modal" onClick={(e) => e.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="session-delete-title">
         <div className="session-delete-header">
-          <span>Delete Session</span>
+          <span id="session-delete-title">Delete Session</span>
         </div>
         <div className="session-delete-content">
           <p>Are you sure you want to delete this session?</p>
@@ -344,9 +344,9 @@ export function SessionListTab({
 
   return (
     <>
-      <div className="session-list-tab">
+      <div className="session-list-tab" role="list" aria-label="Sessions">
         {/* Column headers */}
-        <div className="session-list-header">
+        <div className="session-list-header" role="presentation">
           <span className="session-col-status">Status</span>
           <span className="session-col-id">Session ID</span>
           <span className="session-col-task">Task</span>
@@ -376,11 +376,14 @@ export function SessionListTab({
             <div
               key={session.id}
               className={`session-list-row ${isCurrent ? 'current' : ''} ${hasBadge ? 'has-badge' : ''}`}
+              role="listitem"
+              aria-current={isCurrent ? 'true' : undefined}
             >
               <button
                 className="session-list-row-main"
                 onClick={() => handleSelectSession(session.id)}
                 type="button"
+                aria-label={`Session ${session.id.slice(0, 8)}, status ${session.status}, task: ${session.task || 'No task'}`}
               >
                 {/* Status column */}
                 <span className={`session-col-status session-status-icon ${className}`}>

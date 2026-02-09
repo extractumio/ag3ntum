@@ -26,6 +26,7 @@ from src.core.command_security import (
     SecurityCheckResult,
     get_command_security_filter,
     check_command_security,
+    _is_trusted_skill_command,
 )
 
 
@@ -516,6 +517,58 @@ class TestFailClosed:
         )
         result = filter.check_command("ls -la")
         assert result.allowed, "Should allow when rules not loaded (fail-open)"
+
+
+# =============================================================================
+# Test: Trusted Skill Bypass Prevention
+# =============================================================================
+
+class TestTrustedSkillBypass:
+    """Test that the trusted skill path check cannot be bypassed."""
+
+    def test_legitimate_skill_path_allowed(self) -> None:
+        """A script in a legitimate skill path should be trusted."""
+        assert _is_trusted_skill_command("python3 /skills/my_skill/run.py")
+
+    def test_legitimate_user_skill_allowed(self) -> None:
+        """A script in user-skills path should be trusted."""
+        assert _is_trusted_skill_command("bash /user-skills/custom/task.sh")
+
+    def test_legitimate_venv_script_allowed(self) -> None:
+        """A script in user venv should be trusted."""
+        assert _is_trusted_skill_command("python3 /venv/bin/some_tool.py")
+
+    def test_substring_bypass_blocked(self) -> None:
+        """A path containing '/skills/' as substring but not starting with it should NOT be trusted."""
+        assert not _is_trusted_skill_command("python3 /tmp/evil/skills/malicious.py")
+
+    def test_substring_bypass_user_skills_blocked(self) -> None:
+        """A path containing '/user-skills/' as substring should NOT be trusted."""
+        assert not _is_trusted_skill_command("python3 /tmp/hacked/user-skills/exploit.py")
+
+    def test_substring_bypass_venv_blocked(self) -> None:
+        """A path containing '/venv/' as substring should NOT be trusted."""
+        assert not _is_trusted_skill_command("python3 /tmp/fake/venv/evil.py")
+
+    def test_dot_dot_traversal_blocked(self) -> None:
+        """Path traversal with .. should NOT bypass the check."""
+        assert not _is_trusted_skill_command("python3 /skills/../tmp/evil.py")
+
+    def test_dot_dot_traversal_user_skills_blocked(self) -> None:
+        """Path traversal with .. from user-skills should NOT bypass."""
+        assert not _is_trusted_skill_command("python3 /user-skills/../../etc/passwd.py")
+
+    def test_non_script_extension_blocked(self) -> None:
+        """Files without script extensions should not be trusted."""
+        assert not _is_trusted_skill_command("python3 /skills/data.txt")
+
+    def test_untrusted_interpreter_blocked(self) -> None:
+        """Non-trusted interpreters should not be trusted."""
+        assert not _is_trusted_skill_command("perl /skills/my_skill/run.py")
+
+    def test_no_arguments_blocked(self) -> None:
+        """A bare interpreter should not be trusted."""
+        assert not _is_trusted_skill_command("python3")
 
 
 if __name__ == "__main__":

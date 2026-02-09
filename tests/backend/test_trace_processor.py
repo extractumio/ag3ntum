@@ -21,6 +21,7 @@ from src.core.trace_processor import (
     sanitize_tool_names_in_text,
     TraceProcessor,
 )
+from src.core.circuit_breaker import CircuitBreaker
 from src.core.tracer import NullTracer
 
 
@@ -620,62 +621,62 @@ class TestCircuitBreaker:
         assert trace_processor.circuit_breaker_message == ""
 
     @pytest.mark.unit
-    def test_extract_error_signature_normalizes_uuids(self, trace_processor: TraceProcessor) -> None:
+    def test_extract_error_signature_normalizes_uuids(self) -> None:
         """Error signature extraction normalizes UUIDs."""
         error = "Tool failed with id a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-        sig = trace_processor._extract_error_signature(error)
+        sig = CircuitBreaker.extract_error_signature(error)
         assert "a1b2c3d4-e5f6-7890-abcd-ef1234567890" not in sig
         assert "<UUID>" in sig
 
     @pytest.mark.unit
-    def test_extract_error_signature_normalizes_timestamps(self, trace_processor: TraceProcessor) -> None:
+    def test_extract_error_signature_normalizes_timestamps(self) -> None:
         """Error signature extraction normalizes timestamps."""
         error = "Error at 2024-01-15T10:30:45 in process"
-        sig = trace_processor._extract_error_signature(error)
+        sig = CircuitBreaker.extract_error_signature(error)
         assert "2024-01-15T10:30:45" not in sig
         assert "<TIMESTAMP>" in sig
 
     @pytest.mark.unit
-    def test_extract_error_signature_normalizes_tool_ids(self, trace_processor: TraceProcessor) -> None:
+    def test_extract_error_signature_normalizes_tool_ids(self) -> None:
         """Error signature extraction normalizes tool_use IDs."""
         error = "Failed for tool_use_abc123_xyz"
-        sig = trace_processor._extract_error_signature(error)
+        sig = CircuitBreaker.extract_error_signature(error)
         assert "tool_use_abc123_xyz" not in sig
         assert "<TOOL_ID>" in sig
 
     @pytest.mark.unit
-    def test_extract_error_signature_truncates_long_errors(self, trace_processor: TraceProcessor) -> None:
+    def test_extract_error_signature_truncates_long_errors(self) -> None:
         """Error signature is truncated to prevent memory issues."""
         error = "x" * 1000
-        sig = trace_processor._extract_error_signature(error)
+        sig = CircuitBreaker.extract_error_signature(error)
         assert len(sig) <= 200
 
     @pytest.mark.unit
-    def test_extract_error_signature_handles_list_content(self, trace_processor: TraceProcessor) -> None:
+    def test_extract_error_signature_handles_list_content(self) -> None:
         """Error signature extraction handles list content blocks."""
         error = [
             {"text": "Error message part 1"},
             {"text": "Error message part 2"},
         ]
-        sig = trace_processor._extract_error_signature(error)
+        sig = CircuitBreaker.extract_error_signature(error)
         assert "Error message part 1" in sig
         assert "Error message part 2" in sig
 
     @pytest.mark.unit
     def test_single_failure_does_not_trip_breaker(self, trace_processor: TraceProcessor) -> None:
         """A single tool failure does not trip the circuit breaker."""
-        trace_processor._track_tool_failure("TestTool", "Error: validation failed")
+        trace_processor._circuit_breaker.track_failure("TestTool", "Error: validation failed")
         assert trace_processor.circuit_breaker_tripped is False
 
     @pytest.mark.unit
     def test_different_errors_reset_counter(self, trace_processor: TraceProcessor) -> None:
         """Different error types reset the consecutive counter."""
         for i in range(3):
-            trace_processor._track_tool_failure("TestTool", f"Error type {i}: failed")
+            trace_processor._circuit_breaker.track_failure("TestTool", f"Error type {i}: failed")
 
         assert trace_processor.circuit_breaker_tripped is False
         # Check tracker state
-        _, count = trace_processor._tool_failure_tracker.get("TestTool", (None, 0))
+        _, count = trace_processor._circuit_breaker._tool_failure_tracker.get("TestTool", (None, 0))
         assert count == 1  # Reset on each different error
 
     @pytest.mark.unit
@@ -685,7 +686,7 @@ class TestCircuitBreaker:
 
         # Make 5 consecutive identical failures (default threshold)
         for _ in range(5):
-            trace_processor._track_tool_failure("TodoWrite", error_msg)
+            trace_processor._circuit_breaker.track_failure("TodoWrite", error_msg)
 
         assert trace_processor.circuit_breaker_tripped is True
         assert "TodoWrite" in trace_processor.circuit_breaker_message
@@ -695,11 +696,11 @@ class TestCircuitBreaker:
     def test_breaker_trips_after_configured_threshold(self, trace_processor: TraceProcessor) -> None:
         """Circuit breaker trips after the configured threshold."""
         # Set a lower threshold for testing
-        trace_processor._max_consecutive_failures = 3
+        trace_processor._circuit_breaker._max_consecutive_failures = 3
 
         error_msg = "Test error"
         for i in range(3):
-            trace_processor._track_tool_failure("TestTool", error_msg)
+            trace_processor._circuit_breaker.track_failure("TestTool", error_msg)
             if i < 2:
                 assert trace_processor.circuit_breaker_tripped is False
 
@@ -711,40 +712,40 @@ class TestCircuitBreaker:
         # Fail a few times
         error_msg = "Error message"
         for _ in range(3):
-            trace_processor._track_tool_failure("TestTool", error_msg)
+            trace_processor._circuit_breaker.track_failure("TestTool", error_msg)
 
         # Reset on success
-        trace_processor._reset_tool_failure_tracker("TestTool")
+        trace_processor._circuit_breaker.reset_tool("TestTool")
 
         # Tracker should be cleared
-        assert "TestTool" not in trace_processor._tool_failure_tracker
+        assert "TestTool" not in trace_processor._circuit_breaker._tool_failure_tracker
 
     @pytest.mark.unit
     def test_different_tools_tracked_independently(self, trace_processor: TraceProcessor) -> None:
         """Failures for different tools are tracked independently."""
-        trace_processor._max_consecutive_failures = 3
+        trace_processor._circuit_breaker._max_consecutive_failures = 3
 
         # Fail ToolA twice
         for _ in range(2):
-            trace_processor._track_tool_failure("ToolA", "Error A")
+            trace_processor._circuit_breaker.track_failure("ToolA", "Error A")
 
         # Fail ToolB twice
         for _ in range(2):
-            trace_processor._track_tool_failure("ToolB", "Error B")
+            trace_processor._circuit_breaker.track_failure("ToolB", "Error B")
 
         # Neither should have tripped the breaker
         assert trace_processor.circuit_breaker_tripped is False
 
         # But both should be tracked
-        assert "ToolA" in trace_processor._tool_failure_tracker
-        assert "ToolB" in trace_processor._tool_failure_tracker
+        assert "ToolA" in trace_processor._circuit_breaker._tool_failure_tracker
+        assert "ToolB" in trace_processor._circuit_breaker._tool_failure_tracker
 
     @pytest.mark.unit
     def test_tool_result_block_tracks_failures(self, trace_processor: TraceProcessor) -> None:
         """ToolResultBlock with is_error=True is tracked by circuit breaker."""
         from claude_agent_sdk.types import ToolResultBlock
 
-        trace_processor._max_consecutive_failures = 2
+        trace_processor._circuit_breaker._max_consecutive_failures = 2
         error_content = "InputValidationError: missing param"
 
         # Register pending tool calls and process error results
@@ -786,7 +787,7 @@ class TestCircuitBreaker:
         trace_processor._process_content_block(success_block)
 
         # Tracker should be reset
-        assert "TestTool" not in trace_processor._tool_failure_tracker
+        assert "TestTool" not in trace_processor._circuit_breaker._tool_failure_tracker
         assert trace_processor.circuit_breaker_tripped is False
 
 
@@ -883,7 +884,7 @@ class TestErrorDetection:
         """Circuit breaker trips when error detected via **Error:** prefix."""
         from claude_agent_sdk.types import ToolResultBlock
 
-        trace_processor._max_consecutive_failures = 2
+        trace_processor._circuit_breaker._max_consecutive_failures = 2
         # Simulate SDK bug: is_error is None but content has **Error:** prefix
         error_content = [{"type": "text", "text": "**Error:** Path validation failed: Path is read-only"}]
 

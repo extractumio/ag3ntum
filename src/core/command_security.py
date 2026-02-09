@@ -76,14 +76,17 @@ def _is_trusted_skill_command(command: str) -> bool:
             if arg.startswith("-"):
                 continue
 
+            # Resolve the path to eliminate .. traversal attempts
+            resolved_arg = str(Path(arg).resolve())
+
             # Check if this argument is a path to a skill script
             for skill_path in TRUSTED_SKILL_PATHS:
-                if skill_path in arg:
+                if resolved_arg.startswith(skill_path):
                     # Verify it looks like a script file
-                    if arg.endswith((".py", ".sh", ".bash")):
+                    if resolved_arg.endswith((".py", ".sh", ".bash")):
                         logger.info(
                             f"CommandSecurityFilter: TRUSTED SKILL - "
-                            f"Allowing execution of skill script: {arg}"
+                            f"Allowing execution of skill script: {resolved_arg}"
                         )
                         return True
 

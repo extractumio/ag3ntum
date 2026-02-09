@@ -698,7 +698,7 @@ class TestAgentConfigLoaderSandboxedEnvs:
         config_file = tmp_path / "agent.yaml"
         config_file.write_text(yaml.dump({
             "agent": {
-                "model": "claude-sonnet-4-5-20250929",
+                "default_model": "claude-sonnet-4-5-20250929",
                 "max_turns": 50,
                 "timeout_seconds": 300,
                 "enable_skills": True,
@@ -734,7 +734,7 @@ class TestAgentConfigLoaderSandboxedEnvs:
         config_file = tmp_path / "agent.yaml"
         config_file.write_text(yaml.dump({
             "agent": {
-                "model": "claude-sonnet-4-5-20250929",
+                "default_model": "claude-sonnet-4-5-20250929",
                 "max_turns": 50,
                 "timeout_seconds": 300,
                 "enable_skills": True,
@@ -765,7 +765,7 @@ class TestAgentConfigLoaderSandboxedEnvs:
         config_file = tmp_path / "agent.yaml"
         config_file.write_text(yaml.dump({
             "agent": {
-                "model": "claude-sonnet-4-5-20250929",
+                "default_model": "claude-sonnet-4-5-20250929",
                 "max_turns": 50,
                 "timeout_seconds": 300,
                 "enable_skills": True,

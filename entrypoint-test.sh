@@ -52,41 +52,7 @@ fi
 # Same logic as entrypoint-api.sh — recreates ephemeral Linux accounts
 # from the persistent database so real users work in test mode too.
 
-python3 -c "
-import sqlite3, subprocess, sys, os
-
-db_path = '/data/ag3ntum.db'
-if not os.path.exists(db_path):
-    sys.exit(0)
-
-conn = sqlite3.connect(db_path)
-users = conn.execute(
-    'SELECT username, linux_uid FROM users WHERE is_active = 1 AND linux_uid IS NOT NULL'
-).fetchall()
-conn.close()
-
-created = 0
-for username, uid in users:
-    r = subprocess.run(
-        ['useradd', '-M', '-d', f'/users/{username}',
-         '-s', '/bin/bash', '-u', str(uid), username],
-        capture_output=True
-    )
-    if r.returncode not in (0, 9):
-        print(f'WARNING: useradd {username} failed: {r.stderr.decode().strip()}', file=sys.stderr)
-        continue
-
-    if r.returncode == 0:
-        created += 1
-
-    subprocess.run(['usermod', '-a', '-G', 'ag3ntum', username],
-                   capture_output=True)
-    subprocess.run(['usermod', '-a', '-G', username, 'ag3ntum_api'],
-                   capture_output=True)
-
-if users:
-    print(f'[TEST MODE] Linux user sync: {len(users)} users ({created} created, {len(users) - created} existing)')
-"
+python3 /scripts/sync_linux_users.py --prefix "[TEST MODE] "
 
 # ---- Step 3: Create fully-equipped test users ----
 # These users are complete test accounts with Linux users, DB entries,

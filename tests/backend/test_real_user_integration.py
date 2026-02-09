@@ -344,7 +344,7 @@ def test_db_path() -> Generator[Path, None, None]:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def real_test_engine(test_db_path: Path):
     """Create a real database engine for user tests."""
     engine = create_async_engine(
@@ -361,7 +361,7 @@ async def real_test_engine(test_db_path: Path):
     await engine.dispose()
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def real_session_factory(real_test_engine):
     """Create session factory for real user tests."""
     return async_sessionmaker(

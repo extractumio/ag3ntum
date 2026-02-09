@@ -1286,6 +1286,7 @@ if [[ "${ACTION}" == "test" ]]; then
   SECURITY_ONLY=""
   E2E_ONLY=""
   SANDBOXING_ONLY=""
+  ALL_MODE=""
 
   ARGS_ARRAY=(${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
   i=0
@@ -1303,6 +1304,12 @@ if [[ "${ACTION}" == "test" ]]; then
         ;;
       --security)
         SECURITY_ONLY="1"
+        ;;
+      --all)
+        ALL_MODE="1"
+        ;;
+      --only-e2e)
+        E2E_ONLY="1"
         ;;
       --e2e)
         E2E_ONLY="1"
@@ -1327,10 +1334,12 @@ if [[ "${ACTION}" == "test" ]]; then
         echo ""
         echo "Usage: ./run.sh test [OPTIONS]"
         echo ""
-        echo "Options (default: run ALL tests):"
-        echo "  --backend     Run only backend tests (includes e2e)"
+        echo "Options (default: run tests excluding E2E):"
+        echo "  --all         Run ALL tests including end-to-end"
+        echo "  --backend     Run only backend tests (no e2e)"
         echo "  --security    Run only security tests"
-        echo "  --e2e         Run only e2e tests"
+        echo "  --only-e2e    Run only e2e tests"
+        echo "  --e2e         Alias for --only-e2e"
         echo "  --sandboxing  Run only sandboxing tests"
         echo "  --ui          Run only UI/frontend tests"
         echo "  --quick       Run fast tests only (no e2e/slow)"
@@ -1392,8 +1401,8 @@ if [[ "${ACTION}" == "test" ]]; then
   fi
 
   if [[ -n "${BACKEND_ONLY}" ]]; then
-    echo "=== Running backend tests only (with e2e) ===" | tee -a "$TEST_LOG_FILE"
-    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short
+    echo "=== Running backend tests only (E2E skipped — use --all for E2E) ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
     echo "Restoring container to production mode..."
@@ -1502,14 +1511,26 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
       exit 0
     else
-      # Full mode: run backend tests with --run-e2e, then other tests without it
-      echo "Running ALL tests (backend with E2E + security + other tests)..." | tee -a "$TEST_LOG_FILE"
+      # Full mode: run all tests. E2E only included with --all flag.
+      if [[ -n "${ALL_MODE}" ]]; then
+        echo "Running ALL tests (backend with E2E + security + other tests)..." | tee -a "$TEST_LOG_FILE"
+      else
+        echo "Running tests (E2E skipped — use --all or --only-e2e for E2E)..." | tee -a "$TEST_LOG_FILE"
+      fi
       echo "" | tee -a "$TEST_LOG_FILE"
 
-      # First run: backend tests with --run-e2e flag
-      echo "=== Running backend tests (with E2E) ===" | tee -a "$TEST_LOG_FILE"
+      # First run: backend tests (with --run-e2e only if --all)
+      if [[ -n "${ALL_MODE}" ]]; then
+        echo "=== Running backend tests (with E2E) ===" | tee -a "$TEST_LOG_FILE"
+      else
+        echo "=== Running backend tests ===" | tee -a "$TEST_LOG_FILE"
+      fi
       BACKEND_RESULT=0
-      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
+      if [[ -n "${ALL_MODE}" ]]; then
+        run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short || BACKEND_RESULT=$?
+      else
+        run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short || BACKEND_RESULT=$?
+      fi
 
       # Second run: security tests (no --run-e2e flag)
       echo "" | tee -a "$TEST_LOG_FILE"
@@ -1580,6 +1601,10 @@ if [[ "${ACTION}" == "test" ]]; then
           fi
         fi
         echo "========================================"
+        if [[ -z "${ALL_MODE}" ]]; then
+          echo ""
+          echo "  NOTE: E2E tests were skipped. Use '--all' or '--only-e2e' to run them."
+        fi
         echo ""
         echo "Test results saved to: ${TEST_LOG_FILE}"
       } | tee -a "$TEST_LOG_FILE"

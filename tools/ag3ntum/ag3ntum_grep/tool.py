@@ -29,6 +29,104 @@ MAX_RESULTS: int = 1000
 DEFAULT_CONTEXT_LINES: int = 3
 
 
+async def _grep_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    """Core grep implementation - testable without MCP tool wrapper."""
+    pattern = args.get("pattern", "")
+    base_path = args.get("path", ".")
+    include = args.get("include", "**/*")
+    ignore_case = args.get("ignore_case", False)
+    context = args.get("context", DEFAULT_CONTEXT_LINES)
+
+    if not pattern:
+        return _error("pattern is required")
+
+    # Compile regex
+    try:
+        flags = re.IGNORECASE if ignore_case else 0
+        regex = re.compile(pattern, flags)
+    except re.error as e:
+        return _error(f"Invalid regex pattern: {e}")
+
+    # Get validator for this session
+    try:
+        validator = get_path_validator(session_id)
+    except RuntimeError as e:
+        logger.error(f"Ag3ntumGrep: PathValidator not configured - {e}")
+        return _error(f"Internal error: {e}")
+
+    # Validate base path
+    try:
+        validated = validator.validate_path(base_path, operation="grep", allow_directory=True)
+    except PathValidationError as e:
+        logger.warning(f"Ag3ntumGrep: Path validation failed - {e.reason}")
+        return _error(f"Path validation failed: {e.reason}")
+
+    search_path = validated.normalized
+
+    # Check if path exists
+    if not search_path.exists():
+        return _error(f"Path not found: {base_path}")
+
+    # Collect files to search
+    if search_path.is_file():
+        files_to_search = [search_path]
+    else:
+        files_to_search = [f for f in search_path.glob(include) if f.is_file()]
+
+    # Search files
+    results: list[str] = []
+    total_matches = 0
+    workspace = validator.workspace
+
+    for file_path in files_to_search:
+        if total_matches >= MAX_RESULTS:
+            break
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines()
+        except Exception:
+            continue  # Skip unreadable files
+
+        # Get relative path for display
+        try:
+            rel_path = file_path.relative_to(workspace)
+        except ValueError:
+            rel_path = file_path
+
+        file_matches: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if regex.search(line):
+                file_matches.append((i, line))
+                total_matches += 1
+                if total_matches >= MAX_RESULTS:
+                    break
+
+        if file_matches:
+            results.append(f"\n**{rel_path}**")
+            for line_num, line in file_matches:
+                # Add context
+                start = max(0, line_num - context)
+                end = min(len(lines), line_num + context + 1)
+
+                for ctx_num in range(start, end):
+                    prefix = ">" if ctx_num == line_num else " "
+                    results.append(f"{prefix} {ctx_num + 1}: {lines[ctx_num]}")
+                results.append("")  # Blank line between matches
+
+    logger.info(f"Ag3ntumGrep: Found {total_matches} matches for '{pattern}'")
+
+    if not results:
+        return _result(f"No matches found for pattern: `{pattern}`")
+
+    truncated = total_matches >= MAX_RESULTS
+    header = f"**Found {total_matches} matches**"
+    if truncated:
+        header += f" (showing first {MAX_RESULTS})"
+
+    return _result(header + "\n" + "\n".join(results))
+
+
 def create_grep_tool(session_id: str):
     """
     Create Ag3ntumGrep tool bound to a specific session's workspace.
@@ -64,100 +162,7 @@ Examples:
     )
     async def grep(args: dict[str, Any]) -> dict[str, Any]:
         """Search for a pattern in files."""
-        pattern = args.get("pattern", "")
-        base_path = args.get("path", ".")
-        include = args.get("include", "**/*")
-        ignore_case = args.get("ignore_case", False)
-        context = args.get("context", DEFAULT_CONTEXT_LINES)
-
-        if not pattern:
-            return _error("pattern is required")
-
-        # Compile regex
-        try:
-            flags = re.IGNORECASE if ignore_case else 0
-            regex = re.compile(pattern, flags)
-        except re.error as e:
-            return _error(f"Invalid regex pattern: {e}")
-
-        # Get validator for this session
-        try:
-            validator = get_path_validator(bound_session_id)
-        except RuntimeError as e:
-            logger.error(f"Ag3ntumGrep: PathValidator not configured - {e}")
-            return _error(f"Internal error: {e}")
-
-        # Validate base path
-        try:
-            validated = validator.validate_path(base_path, operation="grep", allow_directory=True)
-        except PathValidationError as e:
-            logger.warning(f"Ag3ntumGrep: Path validation failed - {e.reason}")
-            return _error(f"Path validation failed: {e.reason}")
-
-        search_path = validated.normalized
-
-        # Check if path exists
-        if not search_path.exists():
-            return _error(f"Path not found: {base_path}")
-
-        # Collect files to search
-        if search_path.is_file():
-            files_to_search = [search_path]
-        else:
-            files_to_search = [f for f in search_path.glob(include) if f.is_file()]
-
-        # Search files
-        results: list[str] = []
-        total_matches = 0
-        workspace = validator.workspace
-
-        for file_path in files_to_search:
-            if total_matches >= MAX_RESULTS:
-                break
-
-            try:
-                content = file_path.read_text(encoding="utf-8", errors="replace")
-                lines = content.splitlines()
-            except Exception:
-                continue  # Skip unreadable files
-
-            # Get relative path for display
-            try:
-                rel_path = file_path.relative_to(workspace)
-            except ValueError:
-                rel_path = file_path
-
-            file_matches: list[tuple[int, str]] = []
-            for i, line in enumerate(lines):
-                if regex.search(line):
-                    file_matches.append((i, line))
-                    total_matches += 1
-                    if total_matches >= MAX_RESULTS:
-                        break
-
-            if file_matches:
-                results.append(f"\n**{rel_path}**")
-                for line_num, line in file_matches:
-                    # Add context
-                    start = max(0, line_num - context)
-                    end = min(len(lines), line_num + context + 1)
-
-                    for ctx_num in range(start, end):
-                        prefix = ">" if ctx_num == line_num else " "
-                        results.append(f"{prefix} {ctx_num + 1}: {lines[ctx_num]}")
-                    results.append("")  # Blank line between matches
-
-        logger.info(f"Ag3ntumGrep: Found {total_matches} matches for '{pattern}'")
-
-        if not results:
-            return _result(f"No matches found for pattern: `{pattern}`")
-
-        truncated = total_matches >= MAX_RESULTS
-        header = f"**Found {total_matches} matches**"
-        if truncated:
-            header += f" (showing first {MAX_RESULTS})"
-
-        return _result(header + "\n" + "\n".join(results))
+        return await _grep_impl(args, session_id=bound_session_id)
 
     return grep
 

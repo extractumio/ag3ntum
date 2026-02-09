@@ -230,18 +230,17 @@ sandbox:
     # MODE ENFORCEMENT: Read-only vs read-write is enforced by PathValidator,
     # not by path prefix. All mounts share the same /mounts/{name} namespace.
 
-    # External mounts from host (all mounts, mode enforced by PathValidator)
+    # External mounts from host (parent mounted RO for defense-in-depth)
     # Optional: may not exist if no --mount-ro/--mount-rw options were used
     #
-    # IMPORTANT: Mount the parent /mounts directory instead of subdirectories.
-    # Docker overlay filesystem has issues when mounting overlay subdirectories
-    # directly to non-root UIDs. Mounting the parent works correctly.
-    # The workspace has symlinks: ./external/ro/{name} -> /mounts/{name}
-    # These symlinks resolve correctly when /mounts is mounted.
+    # IMPORTANT: Mount the parent /mounts directory as READ-ONLY by default.
+    # Specific RW subdirectories are added as dynamic_mounts at session setup
+    # (in agent_core.py) which override the RO parent via bwrap mount ordering.
+    # This provides OS-level enforcement on top of PathValidator mode checking.
     external_mounts:
       source: "/mounts"
       target: "/mounts"
-      mode: rw
+      mode: ro
       optional: true
 
     # Per-user persistent storage - ISOLATED per user

@@ -71,6 +71,7 @@ function FileIcon({ className = '', label }: IconProps): JSX.Element {
         viewBox="0 0 16 16"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
       >
         <path d="M7 0H2V16H14V7H7V0Z" fill="currentColor" />
         <path d="M9 0V5H14L9 0Z" fill="currentColor" />
@@ -88,6 +89,7 @@ function FolderIcon({ className = '' }: IconProps): JSX.Element {
         viewBox="0 0 16 16"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
       >
         <path d="M0 1H6L9 4H16V14H0V1Z" fill="currentColor" />
       </svg>
@@ -100,6 +102,7 @@ function EyeIcon({ className = '' }: IconProps): JSX.Element {
     <span className={`action-icon-wrapper ${className}`}>
       <svg
         className="action-icon-svg"
+        aria-hidden="true"
         viewBox="0 0 32 32"
         xmlns="http://www.w3.org/2000/svg"
       >
@@ -117,6 +120,7 @@ function DownloadIcon({ className = '' }: IconProps): JSX.Element {
     <span className={`action-icon-wrapper ${className}`}>
       <svg
         className="action-icon-svg"
+        aria-hidden="true"
         viewBox="0 -0.5 21 21"
         xmlns="http://www.w3.org/2000/svg"
       >
@@ -134,6 +138,7 @@ function TrashIcon({ className = '' }: IconProps): JSX.Element {
     <span className={`action-icon-wrapper ${className}`}>
       <svg
         className="action-icon-svg"
+        aria-hidden="true"
         viewBox="0 0 16 16"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
@@ -155,6 +160,7 @@ function UploadIcon({ className = '' }: IconProps): JSX.Element {
     <span className={`action-icon-wrapper ${className}`}>
       <svg
         className="action-icon-svg"
+        aria-hidden="true"
         viewBox="0 0 16 16"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
@@ -356,10 +362,10 @@ function DeleteConfirmModal({
   }, [isDeleting, onCancel]);
 
   return (
-    <div className="file-delete-overlay" onClick={onCancel}>
-      <div className="file-delete-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="file-delete-overlay" onClick={onCancel} role="presentation">
+      <div className="file-delete-modal" onClick={(e) => e.stopPropagation()} role="alertdialog" aria-modal="true" aria-labelledby="file-delete-title">
         <div className="file-delete-header">
-          <span>Confirm Delete</span>
+          <span id="file-delete-title">Confirm Delete</span>
         </div>
         <div className="file-delete-content">
           <p>Are you sure you want to delete this file?</p>
@@ -478,7 +484,7 @@ function FileTreeNode({
     : '';
 
   return (
-    <div className="file-tree-node">
+    <div className="file-tree-node" role="treeitem" aria-expanded={file.is_directory ? isExpanded : undefined} aria-selected={isHighlighted}>
       <div
         className={`file-tree-row ${file.is_directory ? 'file-tree-folder' : 'file-tree-file'}${isHighlighted ? ' file-tree-highlighted' : ''}${file.is_readonly ? ' file-readonly' : ''} ${mountClass}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -519,6 +525,7 @@ function FileTreeNode({
                   className="file-action-btn"
                   onClick={() => onView(file)}
                   title="View"
+                  aria-label={`View ${file.name}`}
                 >
                   <EyeIcon />
                 </button>
@@ -528,6 +535,7 @@ function FileTreeNode({
                 className="file-action-btn"
                 onClick={() => onDownload(file)}
                 title="Download"
+                aria-label={`Download ${file.name}`}
               >
                 <DownloadIcon />
               </button>
@@ -536,6 +544,7 @@ function FileTreeNode({
                 className="file-action-btn file-action-delete"
                 onClick={() => onDelete(file)}
                 title="Delete"
+                aria-label={`Delete ${file.name}`}
               >
                 <TrashIcon />
               </button>
@@ -544,7 +553,7 @@ function FileTreeNode({
         </span>
       </div>
       {file.is_directory && isExpanded && (
-        <div className="file-tree-children">
+        <div className="file-tree-children" role="group">
           {isLoading ? (
             <div className="file-tree-loading" style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }}>
               Loading...
@@ -1295,6 +1304,7 @@ export function FileExplorer({
             className="file-upload-btn"
             onClick={() => uploadInputRef.current?.click()}
             title="Upload files"
+            aria-label="Upload files"
             disabled={isLoading || isUploading}
           >
             <UploadIcon />
@@ -1304,6 +1314,7 @@ export function FileExplorer({
             className="file-refresh-btn"
             onClick={refreshAll}
             title="Refresh"
+            aria-label="Refresh file list"
             disabled={isLoading}
           >
             {ICONS.refresh}
@@ -1314,6 +1325,7 @@ export function FileExplorer({
             multiple
             style={{ display: 'none' }}
             onChange={handleFileInputChange}
+            aria-hidden="true"
           />
         </div>
       </div>
@@ -1341,12 +1353,12 @@ export function FileExplorer({
           </div>
         )}
         {isLoading ? (
-          <div className="file-explorer-loading">
+          <div className="file-explorer-loading" role="status" aria-label="Loading files">
             <span className="file-explorer-spinner">{ICONS.spinner}</span>
             Loading files...
           </div>
         ) : error ? (
-          <div className="file-explorer-error">
+          <div className="file-explorer-error" role="alert">
             <span className="file-explorer-error-icon">{ICONS.warning}</span>
             {error}
           </div>
@@ -1367,7 +1379,7 @@ export function FileExplorer({
                 </span>
               </div>
             )}
-            <div className="file-tree">{renderFileTree(files)}</div>
+            <div className="file-tree" role="tree" aria-label="File explorer">{renderFileTree(files)}</div>
           </>
         )}
       </div>

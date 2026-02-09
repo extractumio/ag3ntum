@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +15,9 @@ from ...db.database import get_db
 from ...db.models import Session
 from ...services.auth_service import auth_service, UserEnvironmentError
 from ...services.agent_runner import agent_runner
-from ..deps import get_current_user_id
+from ...services.connection_token import create_connection_token, validate_connection_token
+from ...services.rate_limiter import check_rate_limit, reset_rate_limit
+from ..deps import get_current_user_id, validate_sse_token
 from ..models import TokenResponse, UserResponse
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     email: str = Body(...),
     password: str = Body(...),
     db: AsyncSession = Depends(get_db),
@@ -34,10 +37,35 @@ async def login(
 
     Returns a JWT token valid for 7 days.
 
+    Rate-limited: 5 failed attempts per account per minute,
+    20 failed attempts per IP per minute.
+
     Returns 403 Forbidden if user account is misconfigured (missing home/venv).
+    Returns 429 Too Many Requests when rate limit is exceeded.
     """
+    # Rate limit checks
+    client_ip = request.client.host if request.client else "unknown"
+    account_key = f"rate:auth:account:{email}"
+    ip_key = f"rate:auth:ip:{client_ip}"
+
+    if not await check_rate_limit(account_key, max_attempts=5, window_seconds=60):
+        logger.warning("Auth rate limit exceeded for account: %s", email)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Please try again later.",
+        )
+
+    if not await check_rate_limit(ip_key, max_attempts=20, window_seconds=60):
+        logger.warning("Auth rate limit exceeded for IP: %s", client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Please try again later.",
+        )
+
     try:
         user, token, expires_in = await auth_service.authenticate(db, email, password)
+        # Successful login — reset the per-account counter
+        await reset_rate_limit(account_key)
         return TokenResponse(
             access_token=token,
             token_type="bearer",
@@ -60,14 +88,69 @@ async def login(
 @router.post("/logout")
 async def logout(
     user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Logout (client-side token deletion).
+    Logout and revoke all active tokens for the current user.
 
-    The server does not track tokens, so logout is handled client-side
-    by deleting the token from storage.
+    Increments the user's token_version so all previously issued
+    JWT tokens become invalid.
     """
+    await auth_service.revoke_tokens(db, user_id)
     return {"status": "logged_out"}
+
+
+@router.post("/change-password")
+async def change_password(
+    current_password: str = Body(...),
+    new_password: str = Body(...),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """
+    Change password and revoke all existing tokens.
+
+    Returns a new JWT token valid for 7 days.
+    All previously issued tokens are invalidated.
+    """
+    try:
+        token, expires_in = await auth_service.change_password(
+            db, user_id, current_password, new_password
+        )
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            user_id=user_id,
+            expires_in=expires_in,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("/connection-token")
+async def issue_connection_token(
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """
+    Exchange a JWT for a short-lived, single-use connection token.
+
+    Used by SSE endpoints (EventSource) which cannot set custom headers.
+    The connection token is valid for 30 seconds and can only be used once.
+
+    Returns:
+        {"connection_token": "<token>"}
+    """
+    try:
+        token = await create_connection_token(user_id)
+        return {"connection_token": token}
+    except RuntimeError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not create connection token. Try again later.",
+        )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -108,23 +191,9 @@ async def stream_user_events(
     - New sessions created
 
     Used by the SessionListTab to show real-time updates with badges.
+    Accepts either a short-lived connection token or a JWT.
     """
-    # Extract token from query or header
-    if not token and authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing access token",
-        )
-
-    user_id = await auth_service.validate_token(token, db)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
+    user_id = await validate_sse_token(token, authorization, db)
 
     # Import here to avoid circular imports
     from ...db.database import AsyncSessionLocal

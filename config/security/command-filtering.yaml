@@ -500,7 +500,7 @@ persistence:
     exploit: "echo '/tmp/backdoor.sh' >> /etc/init.d/rc.local"
   
   - pattern: '\.bashrc|\.bash_profile|\.profile|\.zshrc'
-    action: record
+    action: block
     exploit: "echo '/tmp/backdoor.sh' >> ~/.bashrc"
 
 # =============================================================================

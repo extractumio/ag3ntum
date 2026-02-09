@@ -1,0 +1,208 @@
+/* =============================================================================
+ * RESPONSIVE ADJUSTMENTS
+ * ============================================================================= */
+
+@media (max-width: 768px) {
+  .terminal-header {
+    padding: var(--spacing-lg) var(--spacing-2xl);
+  }
+
+  .terminal-output {
+    padding: var(--spacing-lg) var(--spacing-2xl);
+  }
+
+  .terminal-footer {
+    padding: 0 var(--spacing-2xl) var(--spacing-lg);
+  }
+
+  .header-top {
+    flex-direction: column;
+    gap: var(--spacing-md);
+  }
+
+  .header-stats {
+    gap: var(--spacing-lg);
+  }
+
+  /* Mobile layout - left column takes full width */
+  .terminal-main {
+    flex-direction: column;
+  }
+
+  .terminal-left {
+    flex: 1;
+    width: 100%;
+  }
+
+  /* Right panel as slide-in drawer on mobile */
+  .terminal-right {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 85vw;
+    max-width: none;
+    min-width: auto;
+    transform: translateX(100%);
+    transition: transform 0.3s ease;
+    z-index: var(--z-modal);
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .terminal-right.mobile-open {
+    transform: translateX(0);
+  }
+
+  .inline-file-viewer-header,
+  .inline-image-viewer-header {
+    padding: var(--spacing-sm) var(--spacing-lg);
+  }
+
+  .inline-file-viewer-code {
+    font-size: var(--font-sm);
+    padding: var(--spacing-lg);
+  }
+
+  .inline-file-viewer-line-numbers {
+    padding: var(--spacing-lg) var(--spacing-sm) var(--spacing-lg) var(--spacing-lg);
+  }
+
+  .inline-file-viewer-line-numbers .line-number {
+    font-size: var(--font-xs);
+  }
+
+  .inline-image-viewer-content,
+  .inline-image-viewer-container {
+    padding: var(--spacing-xl);
+  }
+
+  .input-footer {
+    flex-wrap: wrap;
+  }
+
+  .input-spacer {
+    flex: none;
+    width: 100%;
+    height: 0;
+  }
+}
+
+/* Mobile panel backdrop and toggle button */
+.mobile-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  z-index: calc(var(--z-modal) - 1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+.mobile-panel-backdrop.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mobile-panel-toggle {
+  position: fixed;
+  bottom: 100px;
+  right: var(--spacing-xl);
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--color-accent-primary);
+  color: var(--color-bg-base);
+  border: none;
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-dropdown);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: var(--font-xl);
+}
+
+@media (max-width: 768px) {
+  .mobile-panel-toggle {
+    display: flex;
+  }
+}
+
+@media (min-width: 769px) {
+  .mobile-panel-backdrop {
+    display: none;
+  }
+}
+
+/* =============================================================================
+ * TABLET BREAKPOINT (768px - 1024px)
+ * ============================================================================= */
+
+@media (max-width: 1024px) {
+  /* Touch-friendly minimum sizes (WCAG 2.5.8: 44x44px target) */
+  .filter-button {
+    min-height: 44px;
+    min-width: 44px;
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .file-action-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: var(--spacing-sm);
+  }
+
+  .session-list-item-delete {
+    min-width: 44px;
+    min-height: 44px;
+    opacity: 1;
+  }
+
+  .session-list-row-main {
+    min-height: 44px;
+  }
+
+  .tool-call-header {
+    min-height: 44px;
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .subagent-call-header {
+    min-height: 44px;
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .output-expand-toggle {
+    min-height: 44px;
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .file-upload-btn,
+  .file-refresh-btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .mobile-panel-toggle {
+    width: 48px;
+    height: 48px;
+  }
+
+  /* Wider file tree rows for easier tapping */
+  .file-tree-row {
+    min-height: 40px;
+    padding-top: var(--spacing-xs);
+    padding-bottom: var(--spacing-xs);
+  }
+
+  /* Session list: hide low-value columns on tablet */
+  .session-col-id {
+    display: none;
+  }
+
+  .session-col-task {
+    flex: 1;
+    min-width: 0;
+  }
+}
+

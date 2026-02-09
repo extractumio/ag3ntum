@@ -565,6 +565,13 @@ class AgentRunner:
             await self._update_session_status(session_id, "failed")
 
         finally:
+            # Drain pending tracer tasks to ensure all events are persisted
+            if tracer is not None:
+                try:
+                    await tracer.drain()
+                except Exception as e:
+                    logger.warning(f"Failed to drain tracer tasks for {session_id}: {e}")
+
             # Cleanup
             self._running_tasks.pop(session_id, None)
             self._cancel_flags.pop(session_id, None)

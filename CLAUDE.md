@@ -1,6 +1,6 @@
 # Ag3ntum Reference
 
-## Architecture & Design Docs (`../DOCUMENTS/TECHNICAL/`)
+## Architecture & Design Docs (located `../DOCUMENTS/TECHNICAL/`)
 
 Consult these before fixing bugs or designing features:
 
@@ -21,14 +21,15 @@ Consult these before fixing bugs or designing features:
 | `inbound_waf_filter.md` | WAF rules, request size limits, DoS prevention |
 | `ask-user-question-logic.md` | Human-in-the-loop interaction flow, AskUserQuestion tool |
 
-Design plans in `docs/plans/`: PostgreSQL migration, host command bridge, prompt system migration, mountpoint redesign.
+Design plans in `docs/plans/`: Place all the new design and implementation documents here.
 
 ---
 
 ## Environment Constraints
 
-- **No sudo access**: Do not suggest solutions requiring sudo (package installs, service restarts, group membership changes). If sudo is truly required, inform the user immediately and let them handle it.
-- **Container UID is 45045**: When fixing file permissions or ownership in the container environment, do not set ownership to the host username (`greg`). Use the container UID.
+- **Sudo access via Interactive Bash**: If the `interactive-bash` MCP tool is available, sudo commands (including `./run.sh rebuild`, `./run.sh build`, and other operations requiring sudo) can be executed autonomously without asking the user for confirmation. Use `mcp__interactive-bash__interactive_start` to launch the command, then `mcp__interactive-bash__interactive_send` to provide the password when prompted. If the interactive-bash tool is NOT available, do not suggest solutions requiring sudo — inform the user and let them handle it.
+- **Tests do NOT require sudo**: `./run.sh test` (and all its flags) runs without sudo. Do not prefix test commands with sudo.
+- **Container UID is 45045**: When fixing file permissions or ownership in the container environment, do not set ownership to the host username. Use the container UID.
 - **Use absolute paths**: Always use absolute paths in shell scripts, not relative paths.
 - **Test user UIDs**: Avoid UIDs in the 50000-50100 range as they conflict with real database users. Use UIDs 59990+ for test users.
 
@@ -51,12 +52,14 @@ When editing files, prefer the Write or Edit tool over bash sed commands. sed-ba
 ./run.sh create-user                   # Create user account
 ./run.sh delete-user                   # Delete user account
 ./run.sh cleanup-test-users            # Remove test users
-./run.sh test                          # ALL tests (backend+security+sandbox+UI)
+./run.sh test                          # All tests EXCEPT E2E (default)
+./run.sh test --all                    # ALL tests including E2E
 ./run.sh test --quick                  # Skip E2E/slow
-./run.sh test --backend                # Backend only (incl. E2E)
+./run.sh test --backend                # Backend only (no E2E)
 ./run.sh test --security               # Security only
 ./run.sh test --sandboxing             # Sandbox only
-./run.sh test --e2e                    # E2E only
+./run.sh test --only-e2e               # E2E only
+./run.sh test --e2e                    # Alias for --only-e2e
 ./run.sh test --ui                     # Frontend vitest (alias: --frontend)
 ./run.sh test --subset "session*,auth*" # Pattern-match test files
 ```
@@ -82,24 +85,27 @@ Project/
 │   ├── external-mounts.yaml       # Host folder access for agents
 │   ├── user_requirements.txt      # User-installable pip packages
 │   ├── redis.conf
-│   ├── security/                  # 7 files
+│   ├── security/                  # 8 files
 │   │   ├── permissions.yaml       # Tool enablement, sandbox
 │   │   ├── tools-security.yaml    # PathValidator, secrets scanning
 │   │   ├── command-filtering.yaml # 140+ regex (16 categories)
 │   │   ├── upload-filtering.yaml  # MIME/extension filters
 │   │   ├── sensitive-data-scanner.yaml
+│   │   ├── seccomp-container.json # Container-level seccomp profile
 │   │   ├── seccomp-isolated.json  # UID 50000-60000
 │   │   └── seccomp-direct.json
 │   └── test/sudoers-test          # Test-only sudoers
 ├── src/
-│   ├── core/                      # Agent logic (32 files)
+│   ├── core/                      # Agent logic (35 files)
+│   │   └── tracers/               # 7 files: base, cli, backend, eventing, null, quiet
 │   ├── api/                       # FastAPI
-│   ├── services/                  # Business logic (16 files)
+│   ├── services/                  # Business logic (18 files)
 │   ├── security/                  # Secrets scanner
-│   ├── db/                        # SQLAlchemy models
+│   ├── db/                        # SQLAlchemy models + retry.py
 │   ├── cli/                       # User management CLI
 │   ├── config.py
 │   └── web_terminal_client/       # React 18 + TS + Vite
+│       └── src/styles/            # 17 component-scoped CSS files
 ├── tools/ag3ntum/                 # 11 MCP tools
 ├── prompts/                       # Jinja2 templates
 ├── tests/
@@ -109,7 +115,7 @@ Project/
 │   ├── security/ (5 files)        # Cmd filter, UID, isolation
 │   ├── sandbox/                   # Bubblewrap
 │   └── web_terminal_console/ (20+)# React vitest + MSW
-├── scripts/                       # Debug, security check
+├── scripts/                       # Debug, security check, sync_linux_users.py
 ├── skills/                        # Symlinked to sessions
 ├── data/                          # SQLite DB, manifests
 ├── logs/                          # Runtime + test logs
@@ -118,8 +124,8 @@ Project/
 ├── docker-compose.test.yml        # Test overlay
 ├── docker-compose.override.yml    # Auto-generated mounts
 ├── Dockerfile                     # Ubuntu 24.04
-├── entrypoint-api.sh              # API: DB user sync → setpriv drop
-├── entrypoint-test.sh             # Test: sudoers + user sync + test users → setpriv drop
+├── entrypoint-api.sh              # API: calls sync_linux_users.py → setpriv drop
+├── entrypoint-test.sh             # Test: sudoers + sync_linux_users.py + test users → setpriv drop
 ├── entrypoint-web.sh              # Web: npm install → setpriv drop
 ├── run.sh                         # CLI (~1700 lines)
 └── install.sh                     # One-command installer
@@ -164,6 +170,7 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 | File | Class | Purpose |
 |------|-------|---------|
 | `agent_core.py` | `ClaudeAgent` | Agent orchestrator, SDK integration, LLM proxy routing |
+| `checkpoint_tracker.py` | `CheckpointTracker` | File checkpoint tracking during execution |
 | `task_runner.py` | `execute_agent_task()` | **Unified entry** for CLI + API |
 | `schemas.py` | `TaskExecutionParams` | Execution params dataclass |
 | `permission_profiles.py` | `PermissionManager` | Tool access, session context |
@@ -172,16 +179,27 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 | `uid_security.py` | `UIDSecurityConfig` | UID/GID validation, seccomp |
 | `path_validator.py` | `Ag3ntumPathValidator` | File path validation, session UID registry |
 | `command_security.py` | `CommandSecurityFilter` | Regex command blocking |
-| `tracer.py` | `TracerBase` | Output tracing (CLI/API/SSE/Null) |
-| `trace_processor.py` | `TraceProcessor` | SDK message → events, circuit breaker |
+| `circuit_breaker.py` | `CircuitBreaker` | Extracted from trace_processor; consecutive failure detection |
+| `pattern_detector.py` | `PatternDetector` | Extracted from trace_processor; unproductive loop detection |
+| `tracer.py` | — | Thin re-export shim; actual implementations in `tracers/` package |
+| `tracers/` | `TracerBase`, `ExecutionTracer`, `BackendConsoleTracer`, `EventingTracer`, `NullTracer`, `QuietTracer` | Tracer implementations (7 files) |
+| `trace_processor.py` | `TraceProcessor` | SDK message → events (delegates to circuit_breaker/pattern_detector) |
 
 ### API (`src/api/`)
 
-`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT) | `routes/files.py` (file explorer) | `routes/health.py` | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS) | `models.py` (Pydantic) | `deps.py` (DI)
+`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `deps.py` (DI)
+
+**Auth endpoints**:
+- `POST /auth/token` — login (rate-limited: 5 failed/account/min, 20 failed/IP/min)
+- `POST /auth/change-password` — password change
+- `POST /auth/connection-token` — short-lived single-use token for SSE auth
+- `POST /auth/logout` — server-side token revocation (increments `token_version`)
 
 ### Services (`src/services/`)
 
-`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached)
+`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting)
+
+**DB utilities** (`src/db/`): `models.py` (SQLAlchemy) | `retry.py` (`with_db_retry` decorator, extracted from event/session services)
 
 ### MCP Tools (`tools/ag3ntum/`) — 11 tools
 
@@ -205,15 +223,15 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 
 React 18.3 + TypeScript 5.6 + Vite 5.4. Full arch: @`../DOCUMENTS/TECHNICAL/web_terminal_client.md`
 
-**Files**: `App.tsx` (orchestrator) | `api.ts` (client) | `sse.ts` (SSE + polling) | `ConnectionManager.ts` (state machine) | `AuthContext.tsx` (JWT) | `hooks/` (6) | `components/messages/` (14) | `FileExplorer.tsx` | `FileViewer.tsx` | `MarkdownRenderer.tsx` | `styles.css` (CSS vars, dark theme)
+**Files**: `App.tsx` (orchestrator, decomposed) | `api.ts` (client) | `ConnectionManager.ts` (SSE state machine, backoff, polling fallback) | `sse.ts` (thin adapter, delegates to ConnectionManager) | `AuthContext.tsx` (JWT) | `hooks/` (7) | `components/messages/` (14) | `components/input/InputField.tsx` | `components/input/StatusFooter.tsx` | `FileExplorer.tsx` | `FileViewer.tsx` | `MarkdownRenderer.tsx` | `styles/` (17 CSS files, split by component)
 
-**Hooks**: `useSSEConnection` | `useSessionManager` | `useUIState` | `useFileOperations`
+**Hooks**: `useSSEConnection` | `useSessionManager` | `useUIState` | `useFileOperations` | `useConversation`
 
 **Connection**: `connected` → `reconnecting` → `polling` → `degraded`
 
 **SSE events**: `agent_start` | `tool_start` | `tool_complete` | `message` | `thinking` | `subagent_*` | `agent_complete` | `error` | `cancelled`
 
-**CSS**: Always `var(--color-*)`, never hardcoded colors.
+**CSS**: Always `var(--color-*)`, never hardcoded colors. Monolithic `styles.css` replaced by `styles/` directory with 17 component-scoped CSS files (variables, base, layout, messages, panels, login, file-explorer, etc.). Entry point: `styles/index.css`.
 
 **Cache**: `apiCache.ts` — TTL 1 min (5 min skills), stale-while-revalidate.
 
@@ -239,9 +257,14 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 | 5 | Middleware | `api/security_middleware.py` | HTTP |
 | 6 | Prompts | `prompts/modules/security.j2` | LLM |
 
-- **UID isolation**: Each user → unique UID (50000..60000, ISOLATED mode). OS-enforced via bwrap. Path translation: @`sandbox_path_resolver.md`
+- **Container seccomp**: `seccomp-container.json` applied at container level (replaces previous `seccomp:unconfined`). Per-session seccomp profiles (`seccomp-isolated.json`, `seccomp-direct.json`) layered on top.
+- **UID isolation**: Each user → unique UID (50000..60000, ISOLATED mode). OS-enforced via bwrap. `UIDSecurityConfig.__post_init__` validates absolute bounds (50000 min for isolated, 1000 min for direct). Path translation: @`sandbox_path_resolver.md`
 - **Shared GID model**: `ag3ntum_api` added to each sandbox user's primary group at creation. Session files use 660/770 (no world access). Cross-user isolation by PathValidator.
 - **File ownership**: Write/Edit/MultiEdit tools `chown` files to sandbox user immediately. Session dirs `chown`'d at creation. `ensure_secure_session_files()` re-applies 660/770 post-execution.
+- **Read-only source**: `src/` volume mounted read-only (`:ro`) in `docker-compose.yml` to prevent agent modification of application code.
+- **WAF hardening**: Body-size-tracking wrapper on `request._receive` prevents Content-Length spoofing bypass of size limits.
+- **Auth rate limiting**: Redis-based rate limiting on login (5 failed/account/min, 20 failed/IP/min). Fails open if Redis unavailable.
+- **Token revocation**: `token_version` field on User model. Logout increments version, invalidating all outstanding JWTs server-side.
 - **Fail-closed**: Security load/validate failure → operation denied. Never catch silently.
 - **Secrets scanning**: `src/security/sensitive_data_scanner.py` + `sensitive-data-scanner.yaml` → auto-redacts in File Explorer
 
@@ -441,7 +464,7 @@ The script makes 3 API calls: text-only, single tool call, multiple tool calls. 
 
 ### Agent (`config/agent.yaml`)
 ```yaml
-model: claude-sonnet-4-20250514
+default_model: claude-sonnet-4-20250514
 max_turns: 100
 timeout_seconds: 1800
 role: default                     # from prompts/roles/
@@ -478,7 +501,7 @@ sandboxed_envs:               # Per-user, sandbox-only
 
 **Unified execution**: CLI + API → `execute_agent_task(TaskExecutionParams(...))`
 
-**Tracers**: `ExecutionTracer` (CLI) | `BackendConsoleTracer` (log) | `EventingTracer` (SSE) | `NullTracer` (test)
+**Tracers** (`src/core/tracers/`): `ExecutionTracer` (CLI) | `BackendConsoleTracer` (log) | `EventingTracer` (SSE) | `NullTracer` (test) | `QuietTracer` (minimal output)
 
 **Task queue**: Redis-backed, priority scoring. Quotas: 4 global, 2/user, 50/day. Auto-resumes on restart. @`task_queue_and_auto_resume.md`
 
@@ -490,7 +513,7 @@ sandboxed_envs:               # Per-user, sandbox-only
 
 **MCP server**: Single `ag3ntum` server → `mcp__ag3ntum__ToolName`. Registered in `tools/ag3ntum/__init__.py`.
 
-**Circuit breaker**: `TraceProcessor` tracks consecutive identical tool failures. After 5 failures with same error signature, trips and stops agent with FAILED status. Prevents infinite retry loops (e.g., proxy models calling tools with invalid args).
+**Circuit breaker**: `CircuitBreaker` (extracted to `circuit_breaker.py`) tracks consecutive identical tool failures. After 5 failures with same error signature, trips and stops agent with FAILED status. `PatternDetector` (extracted to `pattern_detector.py`) detects unproductive loops. Both used by `TraceProcessor`.
 
 ---
 
@@ -588,11 +611,15 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 8. **Frontend SSE fallback** — SSE → backoff → polling (3+ fails) → SSE retry (60s)
 9. **Event dedup** — `Set<number>` on sequence. Duplicates = check backend sequence assignment.
 10. **Shared GID for file access** — `ag3ntum_api` is in each sandbox user's group. Session files are 660/770 (owner+group). Write/Edit tools chown to sandbox user. Adding users requires `./run.sh build` (Dockerfile sudoers rule).
-11. **Entrypoints sync Linux users** — Container `/etc/passwd` is ephemeral. `entrypoint-api.sh` and `entrypoint-test.sh` recreate accounts from DB on every start. Test entrypoint also creates fully-equipped `ag3ntum_tester_a` (59990) and `ag3ntum_tester_b` (59991) with DB entries, venvs, and shared GID memberships.
+11. **Entrypoints sync Linux users** — Container `/etc/passwd` is ephemeral. `entrypoint-api.sh` and `entrypoint-test.sh` call `scripts/sync_linux_users.py` to recreate accounts from DB on every start. Test entrypoint also creates fully-equipped `ag3ntum_tester_a` (59990) and `ag3ntum_tester_b` (59991) with DB entries, venvs, and shared GID memberships.
 12. **Supplementary groups are set at process start** — `setpriv --init-groups` reads `/etc/group` once when the API process launches. Dynamically adding users (and their groups) after startup does NOT update the running process's group list. Tests that need real user directories must use pre-built test users, not dynamic `UserService.create_user()`.
 13. **Always use `./run.sh test <flags>`** — Never run tests via raw `docker exec` or manual `docker compose exec`. The `run.sh` CLI handles: (a) starting the container with `docker-compose.test.yml` overlay (test entrypoint, test volumes), (b) running as `ag3ntum_api` user (not root), (c) restoring production mode after tests. Running `docker exec` directly runs as root, which causes false test results (e.g., security tests that check UID dropping will fail).
 14. **Container recreation for entrypoint changes** — `docker compose up -d` reuses existing containers if the image hasn't changed. After modifying `entrypoint-test.sh`, use `docker compose up -d --force-recreate ag3ntum-api` or `./run.sh rebuild` to ensure the new entrypoint runs.
 15. **Test user UIDs at high end of range** — Pre-built test users use UIDs 59990/59991 (top of 50000–60000 isolated range). Dynamic users allocated sequentially from 50000. Always check `getent passwd` or `SELECT linux_uid FROM users` before assigning UIDs to avoid collisions with existing users.
 16. **LLM proxy auto-routing** — Models in `llm-api-proxy.yaml` are automatically routed via the internal proxy (`/api/llm-proxy`). The SDK's `ANTHROPIC_BASE_URL` is set dynamically. API keys can be in env vars OR `secrets.yaml` → `sandboxed_envs`.
+17. **Token revocation is server-side** — Logout now increments `token_version` on the User model, invalidating all outstanding JWTs. Not just client-side cookie clearing.
+18. **Auth rate limiting is Redis-based** — Login rate limits (5 failed/account/min, 20 failed/IP/min) stored in Redis. Fails open if Redis is unavailable (allows login rather than locking users out).
+19. **Tool `_*_impl()` functions** — MCP tools (bash/edit/glob/grep/ls/read) have extracted `_*_impl()` functions for testability without MCP wrapper. Test these directly instead of going through MCP.
+20. **`src/` is read-only in container** — Mounted with `:ro` flag. Agents cannot modify application source code at runtime.
 
 **Study `requirements.txt` before new features** — use existing packages.
