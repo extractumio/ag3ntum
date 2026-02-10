@@ -33,6 +33,16 @@ function normalizeStatus(value: string): string {
   return statusValue || 'idle';
 }
 
+const FIELD_NAME_ALIASES: Record<string, string> = {
+  status: 'request_status',
+  error: 'request_error_message',
+};
+
+const KNOWN_STATUS_FIELDS = new Set([
+  'status', 'request_status',
+  'error', 'request_error_message',
+]);
+
 function parseHeaderBlock(lines: string[], startIdx: number, endIdx: number): Record<string, string> {
   const fields: Record<string, string> = {};
   lines.slice(startIdx + 1, endIdx).forEach((line) => {
@@ -43,9 +53,10 @@ function parseHeaderBlock(lines: string[], startIdx: number, endIdx: number): Re
     if (separatorIndex === -1) {
       return;
     }
-    const key = line.slice(0, separatorIndex).trim().toLowerCase();
+    let key = line.slice(0, separatorIndex).trim().toLowerCase();
     const value = line.slice(separatorIndex + 1).trim();
     if (key) {
+      key = FIELD_NAME_ALIASES[key] ?? key;
       fields[key] = value;
     }
   });
@@ -88,6 +99,46 @@ function findTrailingHeader(lines: string[]): [number, number] {
   }
 
   return [startIdx, endIdx];
+}
+
+function findUnclosedTrailingHeader(lines: string[]): number {
+  if (lines.length < 2) {
+    return -1;
+  }
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() === '---') {
+      const trailing = lines.slice(i + 1);
+      if (trailing.length === 0) {
+        return -1;
+      }
+
+      let hasStatusField = false;
+      let allValid = true;
+      for (const line of trailing) {
+        const stripped = line.trim();
+        if (!stripped) {
+          continue;
+        }
+        if (!stripped.includes(':')) {
+          allValid = false;
+          break;
+        }
+        const rawKey = stripped.slice(0, stripped.indexOf(':')).trim().toLowerCase();
+        const canonical = FIELD_NAME_ALIASES[rawKey] ?? rawKey;
+        if (KNOWN_STATUS_FIELDS.has(rawKey) || KNOWN_STATUS_FIELDS.has(canonical)) {
+          hasStatusField = true;
+        }
+      }
+
+      if (allValid && hasStatusField) {
+        return i;
+      }
+      return -1;
+    }
+  }
+
+  return -1;
 }
 
 function parseStructuredMessage(text: string): StructuredMessage {
@@ -139,12 +190,41 @@ function parseStructuredMessage(text: string): StructuredMessage {
     }
   }
 
-  // Try to find header at the END of the message
+  // Try to find closed header at the END of the message
   const [startIdx, endIdx] = findTrailingHeader(lines);
   if (startIdx !== -1 && endIdx !== -1) {
     const fields = parseHeaderBlock(lines, startIdx, endIdx);
     if (Object.keys(fields).length > 0) {
       let bodyLines = lines.slice(0, startIdx);
+      while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
+        bodyLines.pop();
+      }
+      const body = bodyLines.join('\n');
+      const statusRaw = fields.request_status;
+      const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+      const error = fields.request_error_message ?? undefined;
+      return { body, fields, status, error };
+    }
+  }
+
+  // Try to find unclosed header at the END of the message (no closing ---)
+  const unclosedStart = findUnclosedTrailingHeader(lines);
+  if (unclosedStart !== -1) {
+    const fields: Record<string, string> = {};
+    lines.slice(unclosedStart + 1).forEach((line) => {
+      const stripped = line.trim();
+      if (!stripped || !stripped.includes(':')) {
+        return;
+      }
+      let key = stripped.slice(0, stripped.indexOf(':')).trim().toLowerCase();
+      const value = stripped.slice(stripped.indexOf(':') + 1).trim();
+      if (key) {
+        key = FIELD_NAME_ALIASES[key] ?? key;
+        fields[key] = value;
+      }
+    });
+    if (Object.keys(fields).length > 0) {
+      let bodyLines = lines.slice(0, unclosedStart);
       while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
         bodyLines.pop();
       }
@@ -256,23 +336,33 @@ function extractSubagentPreview(rawText: string): string {
 // =============================================================================
 
 describe('parseHeaderBlock', () => {
-  it('parses simple key-value pairs', () => {
+  it('parses simple key-value pairs with aliasing', () => {
     const lines = ['---', 'Status: complete', 'Error: none', '---'];
     const result = parseHeaderBlock(lines, 0, 3);
 
     expect(result).toEqual({
-      status: 'complete',
-      error: 'none',
+      request_status: 'complete',
+      request_error_message: 'none',
     });
   });
 
-  it('normalizes keys to lowercase', () => {
+  it('preserves canonical field names', () => {
+    const lines = ['---', 'request_status: complete', 'request_error_message: none', '---'];
+    const result = parseHeaderBlock(lines, 0, 3);
+
+    expect(result).toEqual({
+      request_status: 'complete',
+      request_error_message: 'none',
+    });
+  });
+
+  it('normalizes keys to lowercase and applies aliases', () => {
     const lines = ['---', 'STATUS: value', 'Error: msg', 'CamelCase: test', '---'];
     const result = parseHeaderBlock(lines, 0, 4);
 
     expect(result).toEqual({
-      status: 'value',
-      error: 'msg',
+      request_status: 'value',
+      request_error_message: 'msg',
       camelcase: 'test',
     });
   });
@@ -430,6 +520,123 @@ request_status: complete
       // Should parse the header
       expect(result.status).toBe('complete');
     });
+  });
+
+  describe('unclosed trailing header', () => {
+    it('parses unclosed trailing header (no closing ---)', () => {
+      const text = `Body content here.
+
+---
+status: COMPLETE
+error:`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.status).toBe('complete');
+      expect(result.body).toBe('Body content here.');
+      expect(result.fields.request_status).toBe('COMPLETE');
+    });
+
+    it('parses unclosed trailing header with error', () => {
+      const text = `Something went wrong.
+
+---
+status: FAILED
+error: Connection refused`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toBe('Connection refused');
+      expect(result.body).toBe('Something went wrong.');
+    });
+
+    it('does not match trailing --- without status fields', () => {
+      const text = `Body text.
+
+---
+name: John
+age: 30`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.body).toBe(text);
+      expect(result.fields).toEqual({});
+    });
+
+    it('does not match trailing --- with non key:value lines', () => {
+      const text = `Body text.
+
+---
+This is just a separator.`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.body).toBe(text);
+      expect(result.fields).toEqual({});
+    });
+  });
+
+  describe('field name aliasing', () => {
+    it('maps short status/error to canonical names in start header', () => {
+      const text = `---
+status: COMPLETE
+error: some problem
+---
+Body`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.fields.request_status).toBe('COMPLETE');
+      expect(result.fields.request_error_message).toBe('some problem');
+      expect(result.fields.status).toBeUndefined();
+      expect(result.fields.error).toBeUndefined();
+    });
+
+    it('preserves canonical names in start header', () => {
+      const text = `---
+request_status: PARTIAL
+request_error_message: timeout
+---
+Body`;
+
+      const result = parseStructuredMessage(text);
+
+      expect(result.status).toBe('partial');
+      expect(result.error).toBe('timeout');
+    });
+  });
+});
+
+describe('findUnclosedTrailingHeader', () => {
+  it('finds unclosed header with status field', () => {
+    const lines = ['Body', '---', 'status: COMPLETE', 'error:'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(1);
+  });
+
+  it('returns -1 for no header', () => {
+    const lines = ['Just text', 'No header'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(-1);
+  });
+
+  it('returns -1 for bare separator at end', () => {
+    const lines = ['Body', '---'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(-1);
+  });
+
+  it('returns -1 for non-status fields', () => {
+    const lines = ['Body', '---', 'name: John'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(-1);
+  });
+
+  it('returns -1 for non key:value content', () => {
+    const lines = ['Body', '---', 'Not a key value pair'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(-1);
+  });
+
+  it('returns -1 for too few lines', () => {
+    const lines = ['---'];
+    expect(findUnclosedTrailingHeader(lines)).toBe(-1);
   });
 });
 

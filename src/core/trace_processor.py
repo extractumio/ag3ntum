@@ -560,6 +560,46 @@ class TraceProcessor:
             return self._pattern_detector.message
         return ""
 
+    def _sanitize_tool_result(self, content: Any) -> Any:
+        """
+        Apply text sanitization to tool result content.
+
+        Tool results can be a plain string, a list of content blocks
+        (SDK TextBlock objects or dicts with 'text' keys), or other types.
+        Only string text portions are sanitized; structure is preserved.
+
+        Args:
+            content: The tool result content (string, list, or other).
+
+        Returns:
+            Content with text portions sanitized for display.
+        """
+        if not self._path_display_mapping:
+            return content
+
+        if isinstance(content, str):
+            return self._sanitize_text(content)
+
+        if isinstance(content, list):
+            sanitized = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    sanitized.append({**item, "text": self._sanitize_text(item["text"])})
+                elif hasattr(item, "text") and isinstance(getattr(item, "text", None), str):
+                    # SDK TextBlock-like objects — copy with sanitized text
+                    try:
+                        sanitized.append(type(item)(
+                            type=getattr(item, "type", "text"),
+                            text=self._sanitize_text(item.text),
+                        ))
+                    except Exception:
+                        sanitized.append(item)
+                else:
+                    sanitized.append(item)
+            return sanitized
+
+        return content
+
     def _handle_tool_result(
         self,
         tool_id: str,
@@ -589,10 +629,13 @@ class TraceProcessor:
         else:
             self._circuit_breaker.reset_tool(tool_name)
 
+        # Sanitize tool result text (path translation, system reminders, etc.)
+        display_content = self._sanitize_tool_result(content)
+
         self.tracer.on_tool_complete(
             tool_name=tool_name,
             tool_id=tool_id,
-            result=content,
+            result=display_content,
             duration_ms=0,
             is_error=is_error
         )

@@ -632,6 +632,63 @@ class SessionManager:
         )
         return mounted
 
+    def load_dynamic_mount_info(self, session_id: str) -> list:
+        """
+        Reload persisted dynamic mount metadata from a session directory.
+
+        Used when resuming a session to reconstruct DynamicMountInfo objects
+        without re-creating symlinks (they already exist from the original run).
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            List of DynamicMountInfo objects, or empty list if no metadata exists.
+        """
+        from src.api.models import DynamicMountInfo
+
+        session_dir = self.get_session_dir(session_id)
+        meta_file = session_dir / ".dynamic-mounts.json"
+
+        if not meta_file.exists():
+            return []
+
+        try:
+            raw = json.loads(meta_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                f"Failed to read dynamic mount metadata for session {session_id}: {e}"
+            )
+            return []
+
+        if not isinstance(raw, dict) or not raw:
+            return []
+
+        mounts = []
+        for alias, info in raw.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                mounts.append(DynamicMountInfo(
+                    alias=alias,
+                    workspace_path=f"./{alias}",
+                    mode=info.get("mode", "ro"),
+                    source_base=info.get("source_base", ""),
+                    source_subpath=info.get("source_subpath"),
+                    host_path=info.get("host_path"),
+                ))
+            except Exception as e:
+                logger.warning(
+                    f"Skipping invalid dynamic mount entry '{alias}' "
+                    f"for session {session_id}: {e}"
+                )
+
+        if mounts:
+            logger.info(
+                f"Reloaded {len(mounts)} dynamic mounts for session {session_id}"
+            )
+        return mounts
+
     def get_original_path_mounts(
         self,
         username: str,

@@ -404,6 +404,23 @@ class AgentRunner:
                     )
                     await self._update_session_status(session_id, "failed")
                     return
+            else:
+                # Resume: reload persisted mount info (symlinks already exist)
+                try:
+                    session_manager = SessionManager(sessions_dir)
+                    dynamic_mount_info = session_manager.load_dynamic_mount_info(
+                        session_id
+                    )
+                    if dynamic_mount_info:
+                        logger.info(
+                            f"Reloaded {len(dynamic_mount_info)} dynamic mounts "
+                            f"for resumed session {session_id}"
+                        )
+                except Exception as mount_error:
+                    logger.warning(
+                        f"Failed to reload dynamic mount info for session "
+                        f"{session_id}: {mount_error}"
+                    )
 
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
 

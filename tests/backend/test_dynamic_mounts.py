@@ -7,7 +7,9 @@ Tests cover:
 - Authorization modes (allowlist, self_only)
 - Global blocked patterns
 - DynamicMountRequest Pydantic validation
+- Dynamic mount resume: reload from .dynamic-mounts.json
 """
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import tempfile
@@ -1363,3 +1365,161 @@ class TestDynamicMountSecurityModeEscalation:
         assert result.is_valid is True
         # Default should be RO (most restrictive)
         assert result.resolved_mode in ("ro", "rw")  # Depends on implementation
+
+
+# =============================================================================
+# Dynamic Mount Resume Tests
+# =============================================================================
+
+
+class TestDynamicMountResume:
+    """Test reloading dynamic mount metadata on session resume."""
+
+    def _write_metadata(self, session_dir: Path, metadata: dict) -> None:
+        """Helper: write .dynamic-mounts.json to session dir."""
+        meta_file = session_dir / ".dynamic-mounts.json"
+        meta_file.write_text(json.dumps(metadata))
+
+    def test_load_from_metadata(self, tmp_path: Path) -> None:
+        """Reconstructs DynamicMountInfo list from persisted JSON."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        session_id = "test-resume-session"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(parents=True)
+
+        self._write_metadata(session_dir, {
+            "var-log": {
+                "mode": "ro",
+                "source_base": "logs",
+                "source_subpath": None,
+                "host_path": "/var/log",
+            },
+            "nginx-logs": {
+                "mode": "ro",
+                "source_base": "logs",
+                "source_subpath": "nginx",
+                "host_path": "/var/log/nginx",
+            },
+        })
+
+        sm = SessionManager(sessions_dir)
+        mounts = sm.load_dynamic_mount_info(session_id)
+
+        assert len(mounts) == 2
+
+        by_alias = {m.alias: m for m in mounts}
+
+        assert "var-log" in by_alias
+        m = by_alias["var-log"]
+        assert m.workspace_path == "./var-log"
+        assert m.mode == "ro"
+        assert m.source_base == "logs"
+        assert m.source_subpath is None
+        assert m.host_path == "/var/log"
+
+        assert "nginx-logs" in by_alias
+        m2 = by_alias["nginx-logs"]
+        assert m2.source_subpath == "nginx"
+        assert m2.host_path == "/var/log/nginx"
+
+    def test_no_metadata_file(self, tmp_path: Path) -> None:
+        """Returns empty list when no .dynamic-mounts.json exists."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        session_id = "no-mounts-session"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(parents=True)
+
+        sm = SessionManager(sessions_dir)
+        mounts = sm.load_dynamic_mount_info(session_id)
+
+        assert mounts == []
+
+    def test_corrupt_json(self, tmp_path: Path) -> None:
+        """Returns empty list for corrupt JSON (non-fatal)."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        session_id = "corrupt-session"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(parents=True)
+
+        meta_file = session_dir / ".dynamic-mounts.json"
+        meta_file.write_text("{not valid json")
+
+        sm = SessionManager(sessions_dir)
+        mounts = sm.load_dynamic_mount_info(session_id)
+
+        assert mounts == []
+
+    def test_empty_metadata(self, tmp_path: Path) -> None:
+        """Returns empty list for empty dict metadata."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        session_id = "empty-session"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(parents=True)
+
+        self._write_metadata(session_dir, {})
+
+        sm = SessionManager(sessions_dir)
+        mounts = sm.load_dynamic_mount_info(session_id)
+
+        assert mounts == []
+
+    def test_metadata_with_invalid_entry_skipped(self, tmp_path: Path) -> None:
+        """Invalid entries are skipped; valid ones still loaded."""
+        from src.core.sessions import SessionManager
+
+        sessions_dir = tmp_path / "sessions"
+        session_id = "partial-session"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(parents=True)
+
+        self._write_metadata(session_dir, {
+            "good-mount": {
+                "mode": "rw",
+                "source_base": "projects",
+                "source_subpath": None,
+                "host_path": "/home/projects",
+            },
+            "bad-mount": "not-a-dict",  # Invalid entry
+        })
+
+        sm = SessionManager(sessions_dir)
+        mounts = sm.load_dynamic_mount_info(session_id)
+
+        assert len(mounts) == 1
+        assert mounts[0].alias == "good-mount"
+        assert mounts[0].mode == "rw"
+
+    @pytest.mark.unit
+    def test_agent_runner_has_reload_branch(self) -> None:
+        """Verify agent_runner.py contains the else-branch that reloads mount info."""
+        import inspect
+        from src.services import agent_runner
+
+        source = inspect.getsource(agent_runner)
+        # The else-branch should call load_dynamic_mount_info
+        assert "load_dynamic_mount_info" in source, (
+            "_run_agent must call load_dynamic_mount_info in the else-branch"
+        )
+
+    @pytest.mark.unit
+    def test_load_dynamic_mount_info_callable(self, tmp_path: Path) -> None:
+        """Verify SessionManager.load_dynamic_mount_info exists and is callable."""
+        from src.core.sessions import SessionManager
+
+        sm = SessionManager(tmp_path)
+        # Method should exist and be callable
+        assert callable(getattr(sm, "load_dynamic_mount_info", None))
+
+        # With no session dir, should return empty list (not crash)
+        session_dir = tmp_path / "nonexistent-session"
+        session_dir.mkdir(parents=True)
+        result = sm.load_dynamic_mount_info("nonexistent-session")
+        assert result == []

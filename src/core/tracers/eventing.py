@@ -9,7 +9,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..structured_output import normalize_error_value, parse_structured_output
+from ..structured_output import (
+    _FIELD_NAME_ALIASES,
+    normalize_error_value,
+    parse_structured_output,
+)
 from .base import TracerBase
 
 logger = logging.getLogger(__name__)
@@ -374,6 +378,21 @@ class EventingTracer(TracerBase):
                 self._reset_message_tool_tracking()
                 return
 
+            # Strip any trailing YAML header from accumulated stream text.
+            # The streaming partial handler only strips START headers; trailing
+            # headers (at end of message) pass through as body text during
+            # streaming and need to be caught here.
+            if full_text:
+                trailing_fields, stripped_body = parse_structured_output(full_text)
+                if trailing_fields:
+                    full_text = stripped_body
+                    # Merge trailing fields (they may contain request_status)
+                    if not structured_fields:
+                        structured_fields = trailing_fields
+                    else:
+                        # Trailing fields override (they come later)
+                        structured_fields = {**structured_fields, **trailing_fields}
+
             # Compute message status from tool outcomes
             message_status, message_error = self._compute_message_status()
 
@@ -414,13 +433,14 @@ class EventingTracer(TracerBase):
             self._suppress_next_message = False
             self._last_stream_full_text = ""
 
-        self._tracer.on_message(text, is_partial=False)
         structured_fields = None
 
         fields, body = parse_structured_output(text)
         if fields:
             structured_fields = fields
             text = body
+
+        self._tracer.on_message(text, is_partial=False)
 
         # Compute message status from tool outcomes
         message_status, message_error = self._compute_message_status()
@@ -505,9 +525,11 @@ class EventingTracer(TracerBase):
             key = key.strip().lower()
             value = value.strip()
             if key:
-                # Normalize error field to filter out placeholder values
-                if key == "error":
+                # Normalize error fields to filter out placeholder values
+                if key in ("error", "request_error_message"):
                     value = normalize_error_value(value)
+                # Map short field names to canonical names
+                key = _FIELD_NAME_ALIASES.get(key, key)
                 fields[key] = value
 
         self._stream_structured_fields = fields or None
