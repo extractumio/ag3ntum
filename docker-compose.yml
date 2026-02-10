@@ -4,6 +4,7 @@
 #   AG3NTUM_IMAGE_TAG  - Docker image tag (default: latest)
 #   AG3NTUM_API_PORT   - API port on host (default: 40080)
 #   AG3NTUM_WEB_PORT   - Web UI port on host (default: 50080)
+#   AG3NTUM_REDIS_PORT - Redis debug port on host (default: 46379)
 #   AG3NTUM_UID_MODE   - UID mapping mode: "isolated" (default) or "direct"
 #
 # UID Security Modes:
@@ -104,7 +105,7 @@ services:
     volumes:
       - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
     ports:
-      - "127.0.0.1:46379:6379"
+      - "127.0.0.1:${AG3NTUM_REDIS_PORT:-46379}:6379"
     restart: unless-stopped
 
 # Named volumes for container-managed data
