@@ -126,6 +126,11 @@ class SandboxConfig(BaseModel):
         default_factory=list,
         description="Original-path mounts: bind Docker paths to original locations"
     )
+    tmpfs_paths: list[str] = Field(
+        default_factory=list,
+        description="Paths to mount as tmpfs before bind-mounting content into them. "
+        "Used to hide host filesystem content and create isolated namespaces."
+    )
     network: SandboxNetworkConfig = Field(default_factory=SandboxNetworkConfig)
     environment: SandboxEnvConfig = Field(default_factory=SandboxEnvConfig)
     proc_filtering: ProcFilteringConfig = Field(default_factory=ProcFilteringConfig)
@@ -166,6 +171,7 @@ class SandboxConfig(BaseModel):
             session_mounts=resolve_mounts(self.session_mounts),
             dynamic_mounts=[mount.resolve(placeholders) for mount in self.dynamic_mounts],
             original_path_mounts=[mount.resolve(placeholders) for mount in self.original_path_mounts],
+            tmpfs_paths=list(self.tmpfs_paths),
             network=self.network,
             environment=fresh_environment,
             proc_filtering=self.proc_filtering,
@@ -306,6 +312,15 @@ class SandboxExecutor:
                 )
             cmd.extend(_mount_args(mount))
 
+        # Create tmpfs at specified paths to hide host filesystem content.
+        # This MUST happen BEFORE dynamic mounts so individual bind mounts
+        # can populate the clean tmpfs with only authorized content.
+        # Example: --tmpfs /mounts hides all Docker mounts, then individual
+        # --bind /mounts/name /mounts/name adds only authorized mounts.
+        for tmpfs_path in config.tmpfs_paths:
+            cmd.extend(["--tmpfs", tmpfs_path])
+            logger.debug(f"BWRAP: Created isolation tmpfs at {tmpfs_path}")
+
         # Mount dynamic mounts
         # FAIL-CLOSED for required mounts, skip optional mounts if source doesn't exist
         for mount in config.dynamic_mounts:
@@ -318,6 +333,10 @@ class SandboxExecutor:
                     f"SECURITY: Dynamic mount source does not exist: {mount.source}. "
                     "Refusing to execute command without proper sandbox isolation."
                 )
+            # Create parent directory structure for the target path on tmpfs root
+            target_dir = str(Path(mount.target).parent)
+            if target_dir and target_dir != "/":
+                cmd.extend(["--dir", target_dir])
             cmd.extend(_mount_args(mount))
 
         # Mount original-path mounts

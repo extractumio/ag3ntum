@@ -448,17 +448,19 @@ class SessionManager:
             logger.warning(f"Failed to load per-user mounts: {e}")
 
         # Create persistent storage symlink at workspace root (not under external/)
-        # The persistent directory is at {user_home}/ag3ntum/persistent on the host,
-        # but inside bwrap sandbox it's mounted at /persistent (see permissions.yaml).
-        # The symlink must point to /persistent so that commands running INSIDE bwrap
-        # can access it correctly. Python file tools (Read/Write/Edit) run OUTSIDE bwrap
-        # and use PathValidator to translate paths.
+        # The persistent directory is at {user_home}/ag3ntum/persistent in Docker.
+        # The symlink points to the Docker path so that ALL tools work correctly:
+        #   - LS/Glob/Grep: traverse directories without broken symlinks
+        #   - Read/Write/Edit: PathValidator translates to Docker path (same result)
+        #   - Bash (bwrap): agent_core.py adds a bwrap mount at the Docker path
+        #     so the symlink resolves inside the sandbox too
+        # This follows the same pattern as external mount symlinks which point
+        # to Docker paths (/mounts/{name}), not sandbox paths.
         persistent_link = workspace / "persistent"
         user_home = self._sessions_dir.parent  # e.g., /users/{username}/sessions -> /users/{username}
-        persistent_dir_host = user_home / "ag3ntum" / "persistent"  # Host path (for existence check)
-        persistent_dir_sandbox = Path("/persistent")  # Sandbox mount target (for symlink)
+        persistent_dir_host = user_home / "ag3ntum" / "persistent"  # Docker path (symlink target)
 
-        # Ensure the persistent directory exists on the host
+        # Ensure the persistent directory exists
         # FAIL FAST: If we can't create it, the session should fail - not silently skip
         if not persistent_dir_host.exists():
             try:
@@ -470,21 +472,17 @@ class SessionManager:
                     "This directory is required for bwrap sandbox mounts."
                 )
 
-        # Create or fix the symlink (points to sandbox mount target /persistent)
+        # Create or fix the symlink (points to Docker path)
         try:
             if persistent_link.is_symlink():
                 current_target = persistent_link.readlink()
-                # Check if symlink points to the correct sandbox target
-                if current_target != persistent_dir_sandbox:
-                    # Wrong target (e.g., old host path) - recreate with correct target
+                if current_target != persistent_dir_host:
                     persistent_link.unlink()
-                    persistent_link.symlink_to(persistent_dir_sandbox)
-                    logger.debug(f"Fixed persistent symlink: {persistent_link} -> {persistent_dir_sandbox}")
-                # else: symlink exists and points to correct target, nothing to do
+                    persistent_link.symlink_to(persistent_dir_host)
+                    logger.debug(f"Fixed persistent symlink: {persistent_link} -> {persistent_dir_host}")
             elif not persistent_link.exists():
-                # No symlink - create it pointing to sandbox mount target
-                persistent_link.symlink_to(persistent_dir_sandbox)
-                logger.debug(f"Created persistent symlink: {persistent_link} -> {persistent_dir_sandbox}")
+                persistent_link.symlink_to(persistent_dir_host)
+                logger.debug(f"Created persistent symlink: {persistent_link} -> {persistent_dir_host}")
         except OSError as e:
             raise SessionError(
                 f"Failed to create persistent storage symlink: {e}"

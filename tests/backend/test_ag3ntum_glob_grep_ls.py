@@ -59,6 +59,12 @@ class TestGlobToolBasic:
         validated_result.normalized = tmp_path
         validator.validate_path.return_value = validated_result
         validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
         return validator
 
     @pytest.mark.asyncio
@@ -202,6 +208,12 @@ class TestGrepToolBasic:
         validated_result.normalized = tmp_path
         validator.validate_path.return_value = validated_result
         validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
         return validator
 
     @pytest.mark.asyncio
@@ -376,6 +388,12 @@ class TestLSToolBasic:
         validated_result.normalized = tmp_path
         validator.validate_path.return_value = validated_result
         validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
         return validator
 
     @pytest.mark.asyncio
@@ -521,3 +539,142 @@ class TestLSToolBasic:
             dir_pos = text.find("a_dir")
             file_pos = text.find("z_file.txt")
             assert dir_pos < file_pos
+
+
+class TestLSBrokenSymlinks:
+    """Tests for LS tool handling of broken symlinks.
+
+    Reproduces the bug where workspace/persistent is a symlink to /persistent
+    (sandbox-internal path). MCP tools run outside bwrap where /persistent
+    doesn't exist, causing ENOENT when LS traverses the workspace.
+    """
+
+    @pytest.fixture
+    def mock_validator(self, tmp_path):
+        validator = MagicMock()
+        validated_result = MagicMock()
+        validated_result.normalized = tmp_path
+        validator.validate_path.return_value = validated_result
+        validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_ls_skips_broken_symlink(self, tmp_path, mock_validator):
+        """LS should skip broken symlinks without crashing."""
+        (tmp_path / "real_file.txt").write_text("content")
+        # Create broken symlink (like workspace/persistent -> /persistent)
+        (tmp_path / "broken_link").symlink_to("/nonexistent_target_path")
+
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator', return_value=mock_validator):
+            result = await _ls_impl({"path": "."}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "real_file.txt" in text
+        assert "broken_link" not in text
+
+    @pytest.mark.asyncio
+    async def test_ls_recursive_skips_broken_symlink(self, tmp_path, mock_validator):
+        """Recursive LS should skip broken symlinks without crashing."""
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        (subdir / "main.py").write_text("# main")
+        # Simulates workspace/persistent -> /persistent (broken in container)
+        (tmp_path / "persistent").symlink_to("/persistent")
+
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator', return_value=mock_validator):
+            result = await _ls_impl({"path": ".", "recursive": True}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "main.py" in text
+        assert "persistent" not in text
+
+    @pytest.mark.asyncio
+    async def test_ls_mixed_valid_and_broken_symlinks(self, tmp_path, mock_validator):
+        """LS should list valid symlinks but skip broken ones."""
+        real_target = tmp_path / "real_dir"
+        real_target.mkdir()
+        (real_target / "file.txt").write_text("content")
+        # Valid symlink
+        (tmp_path / "valid_link").symlink_to(real_target)
+        # Broken symlink
+        (tmp_path / "broken_link").symlink_to("/does_not_exist")
+
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator', return_value=mock_validator):
+            result = await _ls_impl({"path": "."}, session_id="test-session")
+
+        text = result["content"][0]["text"]
+        assert "valid_link" in text
+        assert "broken_link" not in text
+
+
+class TestGlobBrokenSymlinks:
+    """Tests for Glob tool handling of broken symlinks."""
+
+    @pytest.fixture
+    def mock_validator(self, tmp_path):
+        validator = MagicMock()
+        validated_result = MagicMock()
+        validated_result.normalized = tmp_path
+        validator.validate_path.return_value = validated_result
+        validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_glob_skips_broken_symlink(self, tmp_path, mock_validator):
+        """Glob should not return broken symlinks as matches."""
+        (tmp_path / "real.py").write_text("# real")
+        (tmp_path / "broken.py").symlink_to("/nonexistent/file.py")
+
+        with patch('tools.ag3ntum.ag3ntum_glob.tool.get_path_validator', return_value=mock_validator):
+            result = await _glob_impl({"pattern": "*.py"}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "real.py" in text
+        assert "broken.py" not in text
+
+
+class TestGrepBrokenSymlinks:
+    """Tests for Grep tool handling of broken symlinks."""
+
+    @pytest.fixture
+    def mock_validator(self, tmp_path):
+        validator = MagicMock()
+        validated_result = MagicMock()
+        validated_result.normalized = tmp_path
+        validator.validate_path.return_value = validated_result
+        validator.workspace = tmp_path
+        def _display_path(p, ws=tmp_path):
+            try:
+                return str(p.relative_to(ws))
+            except ValueError:
+                return str(p.resolve().relative_to(ws.resolve()))
+        validator.docker_to_display_path = _display_path
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_grep_skips_broken_symlink(self, tmp_path, mock_validator):
+        """Grep should skip broken symlinks without crashing."""
+        (tmp_path / "real.py").write_text("hello world\n")
+        (tmp_path / "broken.py").symlink_to("/nonexistent/file.py")
+
+        with patch('tools.ag3ntum.ag3ntum_grep.tool.get_path_validator', return_value=mock_validator):
+            result = await _grep_impl({"pattern": "hello"}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "hello world" in text

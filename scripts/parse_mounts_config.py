@@ -133,7 +133,35 @@ def validate_no_collisions(config: dict) -> list[str]:
     return errors
 
 
-def validate_mount_config(config: dict) -> list[str]:
+def _load_reserved_paths(config_dir: Path) -> frozenset:
+    """Build reserved path set from sandbox config + universal system paths.
+
+    Reads sandbox mount targets from permissions.yaml so adding a new
+    sandbox mount automatically makes it reserved for original-path validation.
+    """
+    # Universal system paths (every Linux system)
+    system_paths = {"/", "/proc", "/sys", "/dev", "/tmp", "/root"}
+
+    # Read sandbox mount targets from permissions.yaml
+    perms_file = config_dir / "security" / "permissions.yaml"
+    if perms_file.exists():
+        try:
+            with open(perms_file, "r", encoding="utf-8") as f:
+                perms = yaml.safe_load(f) or {}
+            sandbox = perms.get("sandbox", {})
+            for section in ("static_mounts", "session_mounts"):
+                mounts = sandbox.get(section, {})
+                if isinstance(mounts, dict):
+                    for mount_info in mounts.values():
+                        if isinstance(mount_info, dict) and "target" in mount_info:
+                            system_paths.add(mount_info["target"])
+        except Exception:
+            pass  # Fall back to universal set on parse errors
+
+    return frozenset(system_paths)
+
+
+def validate_mount_config(config: dict, config_dir: Path | None = None) -> list[str]:
     """Validate mount configuration, return list of errors."""
     errors = []
 
@@ -211,6 +239,9 @@ def validate_mount_config(config: dict) -> list[str]:
 
     # Validate original-path mounts
     original_paths = config.get('original_paths', {})
+    reserved = _load_reserved_paths(config_dir) if config_dir else frozenset({
+        "/", "/proc", "/sys", "/dev", "/tmp", "/root",
+    })
     for mode in ['ro', 'rw']:
         mounts = original_paths.get(mode, [])
         if not isinstance(mounts, list):
@@ -227,10 +258,24 @@ def validate_mount_config(config: dict) -> list[str]:
                 # Must be absolute path
                 if not path.startswith('/'):
                     errors.append(f"original_paths.{mode}[{i}] path must be absolute: {path}")
-                # Check reserved paths
-                from src.core.mount_path_encoder import is_reserved_path
-                if is_reserved_path(path):
-                    errors.append(f"original_paths.{mode}[{i}] path is reserved: {path}")
+                else:
+                    normalized = str(Path(path).resolve())
+                    if normalized in reserved:
+                        errors.append(f"original_paths.{mode}[{i}] path is reserved: {path}")
+                    else:
+                        # Breadth validation: must have at least 2 components
+                        depth = len([p for p in normalized.strip("/").split("/") if p])
+                        if depth < 2:
+                            errors.append(
+                                f"original_paths.{mode}[{i}] path '{path}' is too broad "
+                                f"(depth {depth}, minimum 2). Mount a more specific path"
+                            )
+                        elif depth == 2:
+                            print(
+                                f"WARNING: original_paths.{mode}[{i}] path '{path}' "
+                                f"is broad — consider mounting a more specific subdirectory",
+                                file=sys.stderr
+                            )
 
     # Validate no name collisions across all mount categories
     # (flattened structure means all mounts share the same namespace)
@@ -461,8 +506,11 @@ def main():
         print(f"ERROR: Failed to parse {config_path}: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Derive config_dir from config file path (e.g., config/external-mounts.yaml -> config/)
+    config_dir = config_path.parent
+
     # Validate
-    errors = validate_mount_config(config)
+    errors = validate_mount_config(config, config_dir=config_dir)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

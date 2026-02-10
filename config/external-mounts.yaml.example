@@ -339,26 +339,38 @@ per_user:
 # -----------------------------------------------------------------------------
 
 # =============================================================================
-# ORIGINAL-PATH MOUNTS (Access paths at their original filesystem locations)
+# ORIGINAL-PATH MOUNTS (RECOMMENDED for script compatibility)
 # =============================================================================
 # Original-path mounts make host paths available at their ORIGINAL locations
-# inside the sandbox, not just under ./external/. This is useful when you need
-# to access paths like /var/log at /var/log (not ./external/ro/logs/).
+# inside the sandbox. The agent sees /var/log as /var/log — scripts with
+# hardcoded absolute paths work unchanged.
 #
-# IMPORTANT: This is an advanced feature. Most users should use regular mounts.
+# WHY USE THIS:
+#   - Scripts with absolute paths (e.g., include('/var/log/www/header.php'))
+#     work without modification
+#   - Agent sees the same paths as the host filesystem
+#   - File Explorer and agent console show consistent paths
 #
 # How it works:
 #   - Docker mounts the path to /mounts/paths/{encoded_name}
 #   - Bubblewrap then bind-mounts it to the original location
 #   - The agent sees /var/log as /var/log (read-only or read-write)
 #
+# NOTE: Standard mounts (global/per_user sections above) ALSO get original-path
+# support automatically — the agent can use both ./external/ro/{name}/ AND the
+# original host path. Use this section when you ONLY want original-path access
+# without creating a workspace symlink.
+#
 # Encoding:
 #   /var/log     -> _var_log      -> /mounts/paths/_var_log
 #   /data/output -> _data_output  -> /mounts/paths/_data_output
 #
-# Reserved paths (cannot be mounted):
-#   /, /bin, /sbin, /lib, /usr, /etc, /proc, /sys, /dev, /tmp,
-#   /workspace, /mounts, /persistent, /skills, /venv, /root
+# Reserved paths (derived from config/security/permissions.yaml sandbox config):
+#   System paths: /, /proc, /sys, /dev, /tmp, /root
+#   Sandbox mount targets: /usr, /lib, /bin, /etc, /workspace, /persistent, etc.
+#   (Adding a new sandbox mount in permissions.yaml automatically makes it reserved)
+#
+# Depth limit: Paths must have at least 2 components (e.g., /var/log, not /var)
 #
 # CASE 13: Read-only original-path mount
 # -----------------------------------------------------------------------------
@@ -367,26 +379,20 @@ per_user:
 #     - path: /var/log
 #       description: "System logs at original location"
 #       optional: true
-#       users: ["*"]             # Available to all users
-# -----------------------------------------------------------------------------
 #
-# CASE 14: Read-write original-path mount
+# CASE 14: Read-write original-path mount for website development
 # -----------------------------------------------------------------------------
 # original_paths:
 #   rw:
-#     - path: /data/output
-#       description: "Shared output at original location"
+#     - path: /var/www/html
+#       description: "Website files — scripts with absolute paths work unchanged"
 #       optional: false
-#       users: ["admin", "data-team"]
 # -----------------------------------------------------------------------------
 #
 # The agent sees:
 #   - /var/log (ro) - read files directly at /var/log
-#   - /data/output (rw) - write files directly to /data/output
-#
-# NOTE: These paths are ALSO available via ./external/ro/ or ./external/rw/
-# with encoded names (e.g., ./external/ro/_var_log/), but the primary use
-# is accessing them at their original locations.
+#   - /var/www/html (rw) - edit website files at /var/www/html
+#   - PHP include('/var/www/html/header.php') works inside the sandbox
 # =============================================================================
 
 # Original-path mounts configuration

@@ -65,16 +65,10 @@ async def _glob_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]
         # Filter to only files (not directories) and limit results
         files = [m for m in matches if m.is_file()][:MAX_RESULTS]
 
-        # Convert to relative paths for display
-        workspace = validator.workspace
+        # Convert to display paths (workspace-relative or mount-aware)
         relative_paths = []
         for f in files:
-            try:
-                rel = f.relative_to(workspace)
-                relative_paths.append(str(rel))
-            except ValueError:
-                # Should not happen after validation, but be safe
-                relative_paths.append(str(f))
+            relative_paths.append(validator.docker_to_display_path(f))
 
         # Sort for consistent output
         relative_paths.sort()

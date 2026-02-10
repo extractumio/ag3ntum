@@ -663,10 +663,6 @@ anti_forensics:
     action: block
     exploit: "export HISTSIZE=0"
   
-  - pattern: '/var/log/'
-    action: block
-    exploit: "rm -f /var/log/auth.log"
-  
   - pattern: '(?:^|[\s;&|`$()])\s*(?:/usr/bin/)?shred\s+.*\.(?:log|history)'
     action: block
     exploit: "shred -zu ~/.bash_history"

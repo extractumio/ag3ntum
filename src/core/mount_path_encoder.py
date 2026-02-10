@@ -191,6 +191,14 @@ def validate_original_path(path: str) -> tuple[bool, str | None]:
     if is_reserved_path(path):
         return False, f"Path '{path}' is reserved and cannot be mounted"
 
+    # Breadth validation: reject overly broad mounts
+    depth = len([p for p in path.strip("/").split("/") if p])
+    if depth < 2:
+        return False, (
+            f"Path '{path}' is too broad (depth {depth}, minimum 2). "
+            f"Mount a more specific path like '{path}/subdir'"
+        )
+
     # Check for encoding collisions
     # (paths that encode to the same value)
     encoded = encode_path(path)

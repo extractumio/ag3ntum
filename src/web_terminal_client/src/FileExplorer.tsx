@@ -788,8 +788,17 @@ export function FileExplorer({
           || m.mount_type === 'user_ro' || m.mount_type === 'user_rw'
       );
 
+      // Deduplicate mounts by host_path (defense-in-depth, backend also deduplicates)
+      const seenHostPaths = new Set<string>();
+      const uniqueMounts = externalMounts.filter(m => {
+        const key = m.host_path || m.name;
+        if (seenHostPaths.has(key)) return false;
+        seenHostPaths.add(key);
+        return true;
+      });
+
       const now = new Date().toISOString();
-      const syntheticEntries: FileInfo[] = externalMounts.map(m => ({
+      const syntheticEntries: FileInfo[] = uniqueMounts.map(m => ({
         name: m.host_path || m.name,
         path: m.path,                    // e.g., "external/ro/global_var_log"
         is_directory: true,

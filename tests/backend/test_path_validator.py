@@ -614,3 +614,144 @@ class TestEdgeCases:
         (workspace / "...").touch()
         result = validator.validate_path("...", "read")
         assert result.normalized == workspace / "..."
+
+
+class TestDockerToDisplayPath:
+    """Test docker_to_display_path reverse path translation."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> Path:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        return workspace
+
+    def test_workspace_relative_path(self, workspace: Path) -> None:
+        """Paths under workspace return relative paths."""
+        config = PathValidatorConfig(workspace_path=workspace)
+        validator = Ag3ntumPathValidator(config)
+        (workspace / "src").mkdir()
+        result = validator.docker_to_display_path(workspace / "src" / "main.py")
+        assert result == "src/main.py"
+
+    def test_workspace_root(self, workspace: Path) -> None:
+        """Workspace root returns '.'."""
+        config = PathValidatorConfig(workspace_path=workspace)
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(workspace)
+        assert result == "."
+
+    def test_persistent_path(self, tmp_path: Path, workspace: Path) -> None:
+        """Persistent storage paths return persistent/... prefix."""
+        persistent = tmp_path / "persistent"
+        persistent.mkdir()
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            persistent_path=persistent,
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(persistent / "data.txt")
+        assert result == "persistent/data.txt"
+
+    def test_persistent_root(self, tmp_path: Path, workspace: Path) -> None:
+        """Persistent root returns 'persistent'."""
+        persistent = tmp_path / "persistent"
+        persistent.mkdir()
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            persistent_path=persistent,
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(persistent)
+        assert result == "persistent"
+
+    def test_global_ro_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Global RO mount paths return external/ro/{name}/... prefix."""
+        mount_path = tmp_path / "mounts" / "global_var_log"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            global_mounts_ro={"global_var_log": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "syslog")
+        assert result == "external/ro/global_var_log/syslog"
+
+    def test_global_rw_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Global RW mount paths return external/rw/{name}/... prefix."""
+        mount_path = tmp_path / "mounts" / "output"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            global_mounts_rw={"output": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "result.csv")
+        assert result == "external/rw/output/result.csv"
+
+    def test_user_ro_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Per-user RO mount paths return external/user-ro/{name}/... prefix."""
+        mount_path = tmp_path / "mounts" / "docs"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            user_mounts_ro={"docs": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "readme.md")
+        assert result == "external/user-ro/docs/readme.md"
+
+    def test_user_rw_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Per-user RW mount paths return external/user-rw/{name}/... prefix."""
+        mount_path = tmp_path / "mounts" / "work"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            user_mounts_rw={"work": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "project")
+        assert result == "external/user-rw/work/project"
+
+    def test_dynamic_ro_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Dynamic RO mount paths return dynamic/{alias}/... prefix."""
+        mount_path = tmp_path / "mounts" / "logs"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            dynamic_mounts_ro={"app_logs": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "app.log")
+        assert result == "dynamic/app_logs/app.log"
+
+    def test_original_path_ro_mount(self, tmp_path: Path, workspace: Path) -> None:
+        """Original-path RO mounts return the original host path."""
+        docker_mount = tmp_path / "mounts" / "paths" / "_var_log"
+        docker_mount.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            original_path_mounts_ro={"/var/log": docker_mount},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(docker_mount / "syslog")
+        assert result == "/var/log/syslog"
+
+    def test_fallback_returns_raw_path(self, workspace: Path) -> None:
+        """Unknown paths return the raw Docker path as fallback."""
+        config = PathValidatorConfig(workspace_path=workspace)
+        validator = Ag3ntumPathValidator(config)
+        unknown = Path("/some/unknown/path")
+        result = validator.docker_to_display_path(unknown)
+        assert result == "/some/unknown/path"
+
+    def test_nested_mount_path(self, tmp_path: Path, workspace: Path) -> None:
+        """Deeply nested paths in mounts are resolved correctly."""
+        mount_path = tmp_path / "mounts" / "global_var_log"
+        mount_path.mkdir(parents=True)
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            global_mounts_ro={"global_var_log": mount_path},
+        )
+        validator = Ag3ntumPathValidator(config)
+        result = validator.docker_to_display_path(mount_path / "apt" / "history.log")
+        assert result == "external/ro/global_var_log/apt/history.log"

@@ -59,7 +59,6 @@ async def _ls_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     # List contents
     try:
         entries: list[str] = []
-        workspace = validator.workspace
 
         if recursive:
             items = list(path.rglob("*"))
@@ -72,17 +71,22 @@ async def _ls_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
             if not include_hidden and item.name.startswith("."):
                 continue
 
-            # Get relative path
-            try:
-                rel = item.relative_to(workspace)
-            except ValueError:
-                rel = item
+            # Skip broken symlinks (e.g. workspace/persistent -> /persistent
+            # which only exists inside the bwrap sandbox, not in container context)
+            if item.is_symlink() and not item.exists():
+                continue
+
+            # Get display path (workspace-relative or mount-aware)
+            rel = validator.docker_to_display_path(item)
 
             # Format entry
             if item.is_dir():
                 entries.append(f"📁 {rel}/")
             else:
-                size = item.stat().st_size
+                try:
+                    size = item.stat().st_size
+                except OSError:
+                    size = 0
                 size_str = _format_size(size)
                 entries.append(f"📄 {rel} ({size_str})")
 

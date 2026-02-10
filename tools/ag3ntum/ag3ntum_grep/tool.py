@@ -76,7 +76,6 @@ async def _grep_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]
     # Search files
     results: list[str] = []
     total_matches = 0
-    workspace = validator.workspace
 
     for file_path in files_to_search:
         if total_matches >= MAX_RESULTS:
@@ -88,11 +87,8 @@ async def _grep_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]
         except Exception:
             continue  # Skip unreadable files
 
-        # Get relative path for display
-        try:
-            rel_path = file_path.relative_to(workspace)
-        except ValueError:
-            rel_path = file_path
+        # Get display path (workspace-relative or mount-aware)
+        rel_path = validator.docker_to_display_path(file_path)
 
         file_matches: list[tuple[int, str]] = []
         for i, line in enumerate(lines):

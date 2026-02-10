@@ -453,6 +453,117 @@ class Ag3ntumPathValidator:
             if len(parts) >= 5 and parts[3] == "sessions":
                 self._session_id = parts[4]
 
+    def docker_to_display_path(self, docker_path: Path) -> str:
+        """
+        Convert a Docker internal path back to an agent-visible display path.
+
+        Used by LS, Glob, Grep tools to show user-friendly paths instead of
+        raw Docker internal paths (e.g., /mounts/global_var_log/apt/).
+
+        Translation priority:
+            1. Workspace-relative (e.g., ./src/main.py → src/main.py)
+            2. Persistent storage (e.g., /users/.../persistent/x → persistent/x)
+            3. Global RO mounts (e.g., /mounts/name/x → external/ro/name/x)
+            4. Global RW mounts (e.g., /mounts/name/x → external/rw/name/x)
+            5. Per-user RO mounts → external/user-ro/name/x
+            6. Per-user RW mounts → external/user-rw/name/x
+            7. Dynamic RO mounts → dynamic/alias/x
+            8. Dynamic RW mounts → dynamic/alias/x
+            9. Original-path mounts → /original/path/x
+           10. Fallback: return str(docker_path)
+
+        Args:
+            docker_path: Docker filesystem path (may be unresolved/symlinked)
+
+        Returns:
+            Agent-visible display path string
+        """
+        # 1. Workspace-relative: try WITHOUT resolving first to preserve symlink names
+        try:
+            return str(docker_path.relative_to(self.workspace))
+        except ValueError:
+            pass
+
+        # For mount paths, resolve to follow symlinks and match mount boundaries
+        resolved = docker_path.resolve()
+
+        # Also try workspace-relative with resolved path (for paths reached via symlinks)
+        try:
+            return str(resolved.relative_to(self.workspace))
+        except ValueError:
+            pass
+
+        # 2. Persistent storage
+        if self.persistent:
+            try:
+                rel = resolved.relative_to(self.persistent)
+                return f"persistent/{rel}" if str(rel) != "." else "persistent"
+            except ValueError:
+                pass
+
+        # 3-4. Global mounts
+        for name, mount_path in self.global_mounts_ro.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"external/ro/{name}/{rel}" if str(rel) != "." else f"external/ro/{name}"
+            except ValueError:
+                pass
+
+        for name, mount_path in self.global_mounts_rw.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"external/rw/{name}/{rel}" if str(rel) != "." else f"external/rw/{name}"
+            except ValueError:
+                pass
+
+        # 5-6. Per-user mounts
+        for name, mount_path in self.user_mounts_ro.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"external/user-ro/{name}/{rel}" if str(rel) != "." else f"external/user-ro/{name}"
+            except ValueError:
+                pass
+
+        for name, mount_path in self.user_mounts_rw.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"external/user-rw/{name}/{rel}" if str(rel) != "." else f"external/user-rw/{name}"
+            except ValueError:
+                pass
+
+        # 7-8. Dynamic mounts
+        for alias, mount_path in self.dynamic_mounts_ro.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"dynamic/{alias}/{rel}" if str(rel) != "." else f"dynamic/{alias}"
+            except ValueError:
+                pass
+
+        for alias, mount_path in self.dynamic_mounts_rw.items():
+            try:
+                rel = resolved.relative_to(mount_path)
+                return f"dynamic/{alias}/{rel}" if str(rel) != "." else f"dynamic/{alias}"
+            except ValueError:
+                pass
+
+        # 9. Original-path mounts (reverse: Docker path → original host path)
+        for orig_path, docker_mount in self.original_path_mounts_ro.items():
+            try:
+                rel = resolved.relative_to(docker_mount)
+                return f"{orig_path}/{rel}" if str(rel) != "." else orig_path
+            except ValueError:
+                pass
+
+        for orig_path, docker_mount in self.original_path_mounts_rw.items():
+            try:
+                rel = resolved.relative_to(docker_mount)
+                return f"{orig_path}/{rel}" if str(rel) != "." else orig_path
+            except ValueError:
+                pass
+
+        # 10. Fallback
+        return str(docker_path)
+
     def validate_path(
         self,
         path: str,

@@ -177,7 +177,7 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 | `sessions.py` | `SessionManager` | Session CRUD, workspace symlinks, file ownership |
 | `sandbox.py` | `SandboxExecutor` | Bubblewrap + UID dropping |
 | `uid_security.py` | `UIDSecurityConfig` | UID/GID validation, seccomp |
-| `path_validator.py` | `Ag3ntumPathValidator` | File path validation, session UID registry |
+| `path_validator.py` | `Ag3ntumPathValidator` | File path validation, session UID registry, `docker_to_display_path()` for tool output |
 | `command_security.py` | `CommandSecurityFilter` | Regex command blocking |
 | `circuit_breaker.py` | `CircuitBreaker` | Extracted from trace_processor; consecutive failure detection |
 | `pattern_detector.py` | `PatternDetector` | Extracted from trace_processor; unproductive loop detection |

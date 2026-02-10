@@ -98,11 +98,13 @@ These paths are accessible at their **original filesystem locations**:
 {% endfor %}
 
 **Usage:**
-- Access files directly at their original paths (e.g., `{{ original_path_mounts[0].path }}/filename`)
-- All Ag3ntum tools work with these paths
+- Access files directly at their original absolute paths (e.g., `{{ original_path_mounts[0].path }}/filename`)
+- All Ag3ntum tools (Read, Write, Edit, Bash, Glob, Grep) work with these paths
+- Scripts with hardcoded absolute paths (e.g., `include('{{ original_path_mounts[0].path }}/file')`) will work unchanged
+- **Prefer using original absolute paths** when working with mounted content — they match the host filesystem
 {% for mount in original_path_mounts %}
 {% if mount.mode == 'ro' %}
-- `{{ mount.path }}` is **read-only** - you cannot modify files in this path
+- `{{ mount.path }}` is **read-only** — you cannot modify files at this path
 {% endif %}
 {% endfor %}
 
@@ -110,8 +112,12 @@ These paths are accessible at their **original filesystem locations**:
 
 ## Important Notes
 
-1. **Read-only access**: You cannot write to `./external/ro/` or `./external/user-ro/` paths. Attempts will fail with "read-only external mount" error.
-2. **Relative paths**: Access mounts using relative paths like `./external/ro/downloads/file.txt`.
+1. **Read-only access**: You cannot write to read-only mounts. Attempts will fail with "read-only external mount" error.
+{% if original_path_mounts %}
+2. **Original paths preferred**: Use absolute host paths (e.g., `{{ original_path_mounts[0].path }}/filename`) rather than workspace-relative paths. This ensures scripts with hardcoded paths work correctly.
+{% else %}
+2. **Relative paths**: Access mounts using relative paths like `./external/ro/mountname/file.txt`.
+{% endif %}
 3. **File changes**: Changes to writable mounts and `./persistent/` are immediately visible to the host system.
 
 {% endif %}
