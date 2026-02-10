@@ -143,6 +143,12 @@ General Examples:
   ./run.sh test --subset sessions,auth   # Run sessions and auth tests
   ./run.sh shell                         # Open shell in container
 
+Multi-Instance (Worktrees):
+  ./worktree.sh create <branch>        # Create worktree with isolated Docker stack
+  ./worktree.sh list                   # List all instances with ports and status
+  ./worktree.sh destroy <name>         # Stop stack and remove worktree
+  See: ./worktree.sh help
+
 CLI Hints:
   View logs:     docker compose logs -f ag3ntum-api
   API health:    curl http://localhost:40080/api/v1/health
@@ -915,66 +921,62 @@ function check_services() {
 }
 
 function do_cleanup() {
-  echo "=== Starting comprehensive cleanup ==="
-  
-  # Step 1: Stop and remove all project containers (including stuck ones)
+  # Determine project name for scoped cleanup
+  local project_name=""
+  if [[ -f .env ]] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+    project_name="$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
+  else
+    project_name="$(basename "$(pwd)")"
+  fi
+
+  echo "=== Starting cleanup for instance: ${project_name} ==="
+
+  # Step 1: Stop and remove project containers (scoped by COMPOSE_PROJECT_NAME in .env)
   echo "Stopping containers..."
   docker compose down --remove-orphans --timeout 10 2>/dev/null || true
-  
-  # Step 2: Force remove any stuck containers using ag3ntum images
-  echo "Force removing any stuck containers..."
-  local stuck_containers
-  stuck_containers=$(docker ps -aq --filter "ancestor=${IMAGE_PREFIX}" 2>/dev/null || true)
-  if [[ -n "${stuck_containers}" ]]; then
-    echo "  Found containers using ${IMAGE_PREFIX} images: ${stuck_containers}"
-    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
+
+  # Step 2: Remove project-specific volumes
+  echo "Removing project volumes..."
+  docker volume ls --filter "name=${project_name}_" -q 2>/dev/null | xargs -r docker volume rm 2>/dev/null || true
+
+  # Step 3: Remove project-specific networks
+  echo "Removing project networks..."
+  docker network ls --filter "name=${project_name}_" -q 2>/dev/null | xargs -r docker network rm 2>/dev/null || true
+
+  # Step 4: Remove ag3ntum images only if no other instances are running
+  local other_running
+  other_running=$(docker compose ls -q 2>/dev/null | grep -v "^${project_name}$" || true)
+  if [[ -z "${other_running}" ]]; then
+    echo "No other instances running. Removing ${IMAGE_PREFIX} images..."
+    local images
+    images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" || true)
+    if [[ -n "${images}" ]]; then
+      echo "  Removing: ${images}"
+      echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
+    fi
+
+    # Also remove any dangling images
+    local dangling
+    dangling=$(docker images -q --filter "dangling=true" 2>/dev/null || true)
+    if [[ -n "${dangling}" ]]; then
+      echo "  Removing dangling images..."
+      echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
+    fi
+  else
+    echo "Other instances still running — preserving shared images."
   fi
 
-  # Also find by name pattern (handles any project name)
-  stuck_containers=$(docker ps -aq --filter "name=ag3ntum" 2>/dev/null || true)
-  if [[ -n "${stuck_containers}" ]]; then
-    echo "  Found ag3ntum containers: ${stuck_containers}"
-    echo "${stuck_containers}" | xargs -r docker rm -f 2>/dev/null || true
-  fi
-
-  # Step 3: Remove all ag3ntum images (all tags)
-  echo "Removing ${IMAGE_PREFIX} images..."
-  local images
-  images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" || true)
-  if [[ -n "${images}" ]]; then
-    echo "  Removing: ${images}"
-    echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
-  fi
-
-  # Also remove any dangling images
-  local dangling
-  dangling=$(docker images -q --filter "dangling=true" 2>/dev/null || true)
-  if [[ -n "${dangling}" ]]; then
-    echo "  Removing dangling images..."
-    echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
-  fi
-
-  # Step 4: Clean up docker compose resources (networks, etc.)
-  # docker compose down already handled this, but clean up any orphans
-  echo "Cleaning networks..."
-  local ag3ntum_networks
-  ag3ntum_networks=$(docker network ls --filter "name=ag3ntum" -q 2>/dev/null || true)
-  if [[ -n "${ag3ntum_networks}" ]]; then
-    echo "  Removing networks: ${ag3ntum_networks}"
-    echo "${ag3ntum_networks}" | xargs -r docker network rm 2>/dev/null || true
-  fi
-  
-  # Step 6: Remove generated files
+  # Step 5: Remove generated files
   echo "Removing generated files..."
   rm -f docker-compose.override.yml
   rm -f .env.bak
   rm -f src/web_terminal_client/public/config.yaml 2>/dev/null || true
 
-  # Step 7: Kill any orphaned processes that might be using ports
+  # Step 6: Check for orphaned processes on configured ports
   echo "Checking for orphaned processes on configured ports..."
   local api_port="${1:-40080}"
   local web_port="${2:-50080}"
-  
+
   # Check if ports are in use by non-docker processes
   for port in "${api_port}" "${web_port}"; do
     local pid
@@ -989,7 +991,7 @@ function do_cleanup() {
       fi
     fi
   done
-  
+
   echo "=== Cleanup complete ==="
 }
 
@@ -1740,6 +1742,15 @@ fi
 
 API_PORT="$(read_config_value 'api.external_port' '40080')"
 WEB_PORT="$(read_config_value 'web.external_port' '50080')"
+REDIS_PORT="${AG3NTUM_REDIS_PORT:-46379}"
+
+# Derive project name: preserve COMPOSE_PROJECT_NAME from .env if set (worktree instances),
+# otherwise use directory basename (backward compatible — "project" for main)
+if [[ -f .env ]] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+  PROJECT_NAME="$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
+else
+  PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}"
+fi
 
 # Setup directories with proper ownership before starting containers
 # This ensures bind-mounted volumes are writable by the container user
@@ -1780,6 +1791,8 @@ cat > .env <<EOF
 AG3NTUM_IMAGE_TAG=${IMAGE_TAG}
 AG3NTUM_API_PORT=${API_PORT}
 AG3NTUM_WEB_PORT=${WEB_PORT}
+AG3NTUM_REDIS_PORT=${REDIS_PORT}
+COMPOSE_PROJECT_NAME=${PROJECT_NAME}
 EOF
 
 echo "Starting containers with tag ${IMAGE_TAG}..."
@@ -1796,9 +1809,11 @@ ROLLBACK_ENV=0
 # Verify fresh containers
 echo ""
 echo "=== Deployment Verification ==="
+echo "Instance:  ${PROJECT_NAME}"
 echo "Image tag: ${IMAGE_TAG}"
-echo "API Port: ${API_PORT}"
-echo "Web Port: ${WEB_PORT}"
+echo "API Port:  ${API_PORT}"
+echo "Web Port:  ${WEB_PORT}"
+echo "Redis Port: ${REDIS_PORT}"
 echo ""
 echo "Container status:"
 docker compose ps

@@ -64,6 +64,17 @@ When editing files, prefer the Write or Edit tool over bash sed commands. sed-ba
 ./run.sh test --subset "session*,auth*" # Pattern-match test files
 ```
 
+**Worktree commands** (multi-instance support):
+```bash
+./worktree.sh create <branch>         # Create worktree with isolated Docker stack
+./worktree.sh create <branch> --name N --slot S  # Explicit name and port slot
+./worktree.sh list                     # List all instances with ports and status
+./worktree.sh status <name>            # Detailed status of an instance
+./worktree.sh destroy <name>           # Stop Docker stack and remove worktree
+```
+
+**Claude Code command**: `/create_worktree <branch> [--build]` — agentic worktree creation
+
 **Always use `./run.sh`** for building, testing, and running containers. Do not use raw docker/docker-compose commands unless explicitly asked.
 
 URLs after build: **Web UI** http://localhost:50080 | **API** http://localhost:40080
@@ -128,6 +139,7 @@ Project/
 ├── entrypoint-test.sh             # Test: sudoers + sync_linux_users.py + test users → setpriv drop
 ├── entrypoint-web.sh              # Web: npm install → setpriv drop
 ├── run.sh                         # CLI (~1700 lines)
+├── worktree.sh                    # Multi-instance worktree manager
 └── install.sh                     # One-command installer
 ```
 
