@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.tracer import EventingTracer, NullTracer
@@ -568,7 +569,7 @@ def redis_url():
     return urlunparse(parsed._replace(path="/1"))
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def redis_hub(redis_url):
     """Create a RedisEventHub for testing (requires Redis to be running)."""
     hub = RedisEventHub(redis_url=redis_url)
@@ -781,6 +782,7 @@ class TestSSEReplayWithPersistence:
         assert events[1]["sequence"] == 4
         assert events[2]["sequence"] == 5
 
+    @requires_redis
     @pytest.mark.asyncio
     async def test_complete_flow_persist_subscribe_replay(
         self,

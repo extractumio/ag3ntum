@@ -137,13 +137,16 @@ class AuthService:
 
         logger.debug(f"User environment validated for '{username}'")
 
-    def generate_token(self, user_id: str, user_secret: str) -> tuple[str, int]:
+    def generate_token(
+        self, user_id: str, user_secret: str, token_version: int = 0
+    ) -> tuple[str, int]:
         """
         Generate a JWT token for a user using their secret.
 
         Args:
             user_id: The user ID to encode in the token.
             user_secret: The user's personal JWT secret.
+            token_version: Current token version for revocation support.
 
         Returns:
             Tuple of (token, expires_in_seconds).
@@ -156,6 +159,7 @@ class AuthService:
             "exp": expiry,
             "iat": datetime.now(timezone.utc),
             "type": "access",
+            "tv": token_version,
         }
 
         token = jwt.encode(payload, user_secret, algorithm=JWT_ALGORITHM)
@@ -197,6 +201,13 @@ class AuthService:
 
             # Verify with user's secret
             payload = jwt.decode(token, user.jwt_secret, algorithms=[JWT_ALGORITHM])
+
+            # Check token version for revocation
+            token_tv = payload.get("tv", 0)
+            if token_tv != user.token_version:
+                logger.debug("Token revoked (version mismatch: token=%d, user=%d)", token_tv, user.token_version)
+                return None
+
             return payload.get("sub")
 
         except UserEnvironmentError:
@@ -248,7 +259,7 @@ class AuthService:
         # This prevents login for users with missing home/venv
         self.validate_user_environment(user.username)
 
-        token, expires_in = self.generate_token(user.id, user.jwt_secret)
+        token, expires_in = self.generate_token(user.id, user.jwt_secret, user.token_version)
         return user, token, expires_in
 
     async def get_user_by_id(
@@ -330,8 +341,64 @@ class AuthService:
         await db.refresh(user)
 
         # Generate token
-        token, expires_in = self.generate_token(user.id, user.jwt_secret)
+        token, expires_in = self.generate_token(user.id, user.jwt_secret, user.token_version)
         return user, token, expires_in
+
+    async def revoke_tokens(self, db: AsyncSession, user_id: str) -> None:
+        """
+        Revoke all existing tokens for a user by incrementing token_version.
+
+        Args:
+            db: Database session.
+            user_id: The user whose tokens should be revoked.
+        """
+        user = await self.get_user_by_id(db, user_id)
+        if user:
+            user.token_version += 1
+            await db.commit()
+            logger.info("Revoked all tokens for user %s (new version: %d)", user_id, user.token_version)
+
+    async def change_password(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        current_password: str,
+        new_password: str,
+    ) -> tuple[str, int]:
+        """
+        Change user password and revoke all existing tokens.
+
+        Args:
+            db: Database session.
+            user_id: The user ID.
+            current_password: Current password for verification.
+            new_password: New password to set.
+
+        Returns:
+            Tuple of (new_token, expires_in_seconds).
+
+        Raises:
+            ValueError: If current password is wrong or user not found.
+        """
+        import bcrypt
+
+        user = await self.get_user_by_id(db, user_id)
+        if not user:
+            raise ValueError("User not found")
+
+        if not bcrypt.checkpw(current_password.encode(), user.password_hash.encode()):
+            raise ValueError("Invalid current password")
+
+        # Update password
+        user.password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+        # Revoke all existing tokens
+        user.token_version += 1
+        await db.commit()
+
+        # Issue a new token with the updated version
+        token, expires_in = self.generate_token(user.id, user.jwt_secret, user.token_version)
+        logger.info("Password changed for user %s, tokens revoked (version: %d)", user_id, user.token_version)
+        return token, expires_in
 
     async def delete_user(
         self,

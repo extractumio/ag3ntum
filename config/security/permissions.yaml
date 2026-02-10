@@ -230,19 +230,14 @@ sandbox:
     # MODE ENFORCEMENT: Read-only vs read-write is enforced by PathValidator,
     # not by path prefix. All mounts share the same /mounts/{name} namespace.
 
-    # External mounts from host (all mounts, mode enforced by PathValidator)
+    # External mounts from host (individually mounted per-session)
     # Optional: may not exist if no --mount-ro/--mount-rw options were used
     #
-    # IMPORTANT: Mount the parent /mounts directory instead of subdirectories.
-    # Docker overlay filesystem has issues when mounting overlay subdirectories
-    # directly to non-root UIDs. Mounting the parent works correctly.
-    # The workspace has symlinks: ./external/ro/{name} -> /mounts/{name}
-    # These symlinks resolve correctly when /mounts is mounted.
-    external_mounts:
-      source: "/mounts"
-      target: "/mounts"
-      mode: rw
-      optional: true
+    # SECURITY: Individual authorized mounts are added as dynamic_mounts at
+    # session setup (in agent_core.py) instead of mounting the entire /mounts
+    # tree. This prevents cross-user mount visibility — each bwrap session
+    # only sees mounts authorized for that user.
+    # The parent directory /mounts is created by bwrap --dir when needed.
 
     # Per-user persistent storage - ISOLATED per user
     # This directory survives across sessions and is unique to each user.
@@ -295,13 +290,12 @@ sandbox:
     clear_env: true
   writable_paths:
     - "/workspace"
-    - "/mounts"                     # All external mounts (flattened, mode enforced by PathValidator)
     - "/persistent"                 # Per-user persistent storage (isolated per-user mount)
   readonly_paths:
     - "/venv"                       # User's Python venv (read-only)
     - "/skills"                     # Global skills directory
     - "/user-skills"                # User's custom skills
-    # Note: /mounts is listed as writable above because some mounts are RW.
+    # Note: Individual mounts are added per-session with correct RO/RW mode.
     # PathValidator enforces per-mount read-only vs read-write mode.
     - "/usr"
     - "/lib"

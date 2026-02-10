@@ -22,10 +22,6 @@ agent:
   # Recommended range: 2000-16000 depending on task complexity
   thinking_tokens: 8000
 
-  # Deprecated: Use default_model instead
-  # Kept for backward compatibility with CLI overrides
-  model: claude-haiku-4-5-20251001
-
   # Maximum conversation turns before stopping
   max_turns: 100
 

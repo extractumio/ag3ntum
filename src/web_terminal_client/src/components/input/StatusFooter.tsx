@@ -9,6 +9,7 @@ import React from 'react';
 import { formatDuration } from '../../utils';
 import { useElapsedTime } from '../../hooks';
 import { StatusSpinner } from '../spinners';
+import { QueueIndicator } from '../QueueIndicator';
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'polling' | 'degraded' | 'disconnected';
 
@@ -22,6 +23,9 @@ export interface StatusFooterStats {
 
 export interface StatusFooterProps {
   isRunning: boolean;
+  isQueued: boolean;
+  queuePosition: number | null;
+  isAutoResume: boolean;
   statusLabel: string;
   statusClass: string;
   stats: StatusFooterStats;
@@ -31,6 +35,9 @@ export interface StatusFooterProps {
 
 export function StatusFooter({
   isRunning,
+  isQueued,
+  queuePosition,
+  isAutoResume,
   statusLabel,
   statusClass,
   stats,
@@ -40,11 +47,11 @@ export function StatusFooter({
   const elapsedTime = useElapsedTime(startTime, isRunning);
 
   const connectionDisplay = {
-    connected: { icon: '●', label: 'Connected', className: 'connected' },
-    reconnecting: { icon: '●', label: 'Reconnecting...', className: 'reconnecting' },
-    polling: { icon: '●', label: 'Connected (polling)', className: 'polling' },
-    degraded: { icon: '●', label: 'Connection issues...', className: 'degraded' },
-    disconnected: { icon: '●', label: 'Disconnected', className: 'disconnected' },
+    connected: { icon: '\u25CF', label: 'Connected', className: 'connected' },
+    reconnecting: { icon: '\u25CF', label: 'Reconnecting...', className: 'reconnecting' },
+    polling: { icon: '\u25CF', label: 'Connected (polling)', className: 'polling' },
+    degraded: { icon: '\u25CF', label: 'Connection issues...', className: 'degraded' },
+    disconnected: { icon: '\u25CF', label: 'Disconnected', className: 'disconnected' },
   }[connectionState];
 
   return (
@@ -53,17 +60,19 @@ export function StatusFooter({
         <span className={`status-connection ${connectionDisplay.className}`}>
           {connectionDisplay.icon} {connectionDisplay.label}
         </span>
-        <span className="status-divider">│</span>
+        <span className="status-divider">{'\u2502'}</span>
         <span className={`status-state ${statusClass}`}>
-          {isRunning ? (
+          {isQueued ? (
+            <QueueIndicator position={queuePosition ?? 0} isAutoResume={isAutoResume} />
+          ) : isRunning ? (
             <>
               <StatusSpinner /> Running...{elapsedTime && ` (${elapsedTime})`}
             </>
           ) : (
             <>
-              {statusLabel === 'Idle' && '● Idle'}
-              {statusLabel === 'Cancelled' && '✗ Cancelled'}
-              {statusLabel === 'Failed' && '✗ Failed'}
+              {statusLabel === 'Idle' && '\u25CF Idle'}
+              {statusLabel === 'Cancelled' && '\u2717 Cancelled'}
+              {statusLabel === 'Failed' && '\u2717 Failed'}
               {statusLabel !== 'Idle' && statusLabel !== 'Cancelled' && statusLabel !== 'Failed' && statusLabel}
             </>
           )}

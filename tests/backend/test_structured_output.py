@@ -3,13 +3,15 @@ Tests for structured_output parsing functions.
 
 Tests cover:
 - Error value normalization
-- Header block parsing
+- Header block parsing (with field name aliasing)
 - Body extraction
+- Unclosed trailing headers
 - Edge cases and malformed inputs
 """
 import pytest
 
 from src.core.structured_output import (
+    _find_unclosed_trailing_header,
     normalize_error_value,
     parse_structured_output,
 )
@@ -85,8 +87,24 @@ This is the body content."""
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "COMPLETE"
-        assert fields["error"] == ""
+        # "status" aliased to "request_status", "error" aliased to "request_error_message"
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["request_error_message"] == ""
+        assert "body content" in body
+
+    @pytest.mark.unit
+    def test_header_with_canonical_fields(self) -> None:
+        """Parse header with canonical field names (no aliasing needed)."""
+        text = """---
+request_status: COMPLETE
+request_error_message:
+---
+This is the body content."""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["request_error_message"] == ""
         assert "body content" in body
 
     @pytest.mark.unit
@@ -100,8 +118,8 @@ Partial output here."""
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "FAILED"
-        assert fields["error"] == "Connection timeout"
+        assert fields["request_status"] == "FAILED"
+        assert fields["request_error_message"] == "Connection timeout"
         assert "Partial output" in body
 
     @pytest.mark.unit
@@ -117,7 +135,7 @@ Done."""
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "COMPLETE"
+        assert fields["request_status"] == "COMPLETE"
         assert fields["progress"] == "100%"
         assert fields["duration"] == "5s"
 
@@ -136,8 +154,8 @@ error:
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "COMPLETE"
-        assert fields["error"] == ""
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["request_error_message"] == ""
         assert "body content" in body
         assert "---" not in body
 
@@ -154,8 +172,8 @@ error: Timeout reached
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "PARTIAL"
-        assert fields["error"] == "Timeout reached"
+        assert fields["request_status"] == "PARTIAL"
+        assert fields["request_error_message"] == "Timeout reached"
         assert "Line 1" in body
         assert "Line 2" in body
         assert "Line 3" in body
@@ -237,7 +255,7 @@ Body"""
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "COMPLETE"
+        assert fields["request_status"] == "COMPLETE"
         # Value should include everything after first colon
         assert "Error at line 10" in fields.get("message", "")
 
@@ -254,12 +272,12 @@ Body"""
 
         fields, body = parse_structured_output(text)
 
-        assert fields["status"] == "COMPLETE"
-        assert "error" in fields
+        assert fields["request_status"] == "COMPLETE"
+        assert "request_error_message" in fields
 
     @pytest.mark.unit
     def test_case_insensitive_keys(self) -> None:
-        """Field keys are normalized to lowercase."""
+        """Field keys are normalized to lowercase (and aliased)."""
         text = """---
 Status: COMPLETE
 ERROR:
@@ -268,8 +286,8 @@ Body"""
 
         fields, body = parse_structured_output(text)
 
-        assert fields.get("status") == "COMPLETE"
-        assert "error" in fields
+        assert fields.get("request_status") == "COMPLETE"
+        assert "request_error_message" in fields
 
     @pytest.mark.unit
     def test_error_normalization_in_header(self) -> None:
@@ -283,4 +301,196 @@ Body"""
         fields, body = parse_structured_output(text)
 
         # "None" should be normalized to empty string
-        assert fields["error"] == ""
+        assert fields["request_error_message"] == ""
+
+
+class TestParseStructuredOutputUnclosedTrailing:
+    """Tests for unclosed trailing headers (no closing ---)."""
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_header(self) -> None:
+        """Parse unclosed trailing header (common with smaller LLMs like haiku)."""
+        text = """Here is the body content.
+
+---
+status: COMPLETE
+error:"""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["request_error_message"] == ""
+        assert "body content" in body
+        assert "---" not in body
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_header_with_error(self) -> None:
+        """Parse unclosed trailing header with error value."""
+        text = """Something went wrong.
+
+---
+status: FAILED
+error: Connection refused"""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "FAILED"
+        assert fields["request_error_message"] == "Connection refused"
+        assert "Something went wrong" in body
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_header_canonical_names(self) -> None:
+        """Parse unclosed trailing header using canonical field names."""
+        text = """Body text here.
+
+---
+request_status: PARTIAL
+request_error_message: Timeout"""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "PARTIAL"
+        assert fields["request_error_message"] == "Timeout"
+        assert "Body text" in body
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_not_matched_without_status_field(self) -> None:
+        """Trailing --- followed by non-status fields should not match."""
+        text = """Body text here.
+
+---
+name: John
+age: 30"""
+
+        fields, body = parse_structured_output(text)
+
+        # Should not detect as a header (no known status field)
+        assert fields == {}
+        assert body == text
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_not_matched_with_non_kv_lines(self) -> None:
+        """Trailing --- with non key:value lines after should not match."""
+        text = """Body text here.
+
+---
+This is just a separator.
+Not a header block."""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields == {}
+        assert body == text
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_strips_empty_lines_from_body(self) -> None:
+        """Trailing empty lines before unclosed header are stripped."""
+        text = """Body content.
+
+
+---
+status: COMPLETE
+error:"""
+
+        fields, body = parse_structured_output(text)
+
+        assert body == "Body content."
+        assert fields["request_status"] == "COMPLETE"
+
+
+class TestFindUnclosedTrailingHeader:
+    """Tests for _find_unclosed_trailing_header helper."""
+
+    @pytest.mark.unit
+    def test_finds_unclosed_header(self) -> None:
+        lines = ["Body", "---", "status: COMPLETE", "error:"]
+        assert _find_unclosed_trailing_header(lines) == 1
+
+    @pytest.mark.unit
+    def test_returns_neg1_for_no_header(self) -> None:
+        lines = ["Just text", "No header"]
+        assert _find_unclosed_trailing_header(lines) == -1
+
+    @pytest.mark.unit
+    def test_returns_neg1_for_bare_separator(self) -> None:
+        lines = ["Body", "---"]
+        assert _find_unclosed_trailing_header(lines) == -1
+
+    @pytest.mark.unit
+    def test_returns_neg1_for_non_status_fields(self) -> None:
+        lines = ["Body", "---", "name: John"]
+        assert _find_unclosed_trailing_header(lines) == -1
+
+    @pytest.mark.unit
+    def test_returns_neg1_for_non_kv_content(self) -> None:
+        lines = ["Body", "---", "Not a key value pair"]
+        assert _find_unclosed_trailing_header(lines) == -1
+
+    @pytest.mark.unit
+    def test_returns_neg1_for_too_few_lines(self) -> None:
+        lines = ["---"]
+        assert _find_unclosed_trailing_header(lines) == -1
+
+
+class TestFieldNameAliasing:
+    """Tests for field name alias mapping (status -> request_status, etc)."""
+
+    @pytest.mark.unit
+    def test_short_names_mapped_in_start_header(self) -> None:
+        """Short field names are mapped to canonical names in start header."""
+        text = """---
+status: COMPLETE
+error: some error
+---
+Body"""
+
+        fields, body = parse_structured_output(text)
+
+        assert "request_status" in fields
+        assert "request_error_message" in fields
+        assert "status" not in fields
+        assert "error" not in fields
+
+    @pytest.mark.unit
+    def test_canonical_names_preserved(self) -> None:
+        """Canonical field names are kept as-is."""
+        text = """---
+request_status: COMPLETE
+request_error_message:
+---
+Body"""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["request_error_message"] == ""
+
+    @pytest.mark.unit
+    def test_short_names_mapped_in_trailing_header(self) -> None:
+        """Short field names are mapped to canonical names in trailing header."""
+        text = """Body text.
+---
+status: PARTIAL
+error: timeout
+---"""
+
+        fields, body = parse_structured_output(text)
+
+        assert "request_status" in fields
+        assert "request_error_message" in fields
+        assert fields["request_status"] == "PARTIAL"
+
+    @pytest.mark.unit
+    def test_non_alias_fields_preserved(self) -> None:
+        """Non-aliased field names are preserved as-is."""
+        text = """---
+status: COMPLETE
+error:
+progress: 50%
+---
+Body"""
+
+        fields, body = parse_structured_output(text)
+
+        assert fields["request_status"] == "COMPLETE"
+        assert fields["progress"] == "50%"

@@ -32,8 +32,9 @@ from ...db.models import User
 from ...services.agent_runner import agent_runner, TaskParams
 from ...services import event_service
 from ...services.auth_service import auth_service
+from ...services.connection_token import validate_connection_token
 from ...services.session_service import session_service
-from ..deps import get_current_user_id
+from ..deps import get_current_user_id, validate_sse_token
 from ..models import (
     AgentConfigOverrides,
     AvailableDynamicMountsResponse,
@@ -978,23 +979,10 @@ async def stream_events(
     """
     Stream real-time execution events for a session (SSE).
 
-    Note: token is passed via query parameter to support EventSource.
+    Accepts either a short-lived connection token (preferred) or a JWT
+    via query parameter or Authorization header.
     """
-    if not token and authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing access token",
-        )
-
-    user_id = await auth_service.validate_token(token, db)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
+    user_id = await validate_sse_token(token, authorization, db)
 
     session = await session_service.get_session(
         db=db,
@@ -1144,16 +1132,9 @@ async def list_events(
     List persisted events for a session.
 
     This endpoint powers polling fallback and session replay.
+    Accepts either a short-lived connection token or a JWT.
     """
-    if not token and authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-
-    user_id = await auth_service.validate_token(token, db) if token else None
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
+    user_id = await validate_sse_token(token, authorization, db)
 
     session = await session_service.get_session(
         db=db,

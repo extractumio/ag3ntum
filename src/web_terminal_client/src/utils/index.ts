@@ -119,6 +119,18 @@ export function isMeaningfulError(error: string | undefined | null): boolean {
   return normalized !== '' && !ERROR_PLACEHOLDERS.has(normalized);
 }
 
+// Mapping from short field names to canonical names expected by the codebase
+const FIELD_NAME_ALIASES: Record<string, string> = {
+  status: 'request_status',
+  error: 'request_error_message',
+};
+
+// Known status field names that indicate a valid structured header
+const KNOWN_STATUS_FIELDS = new Set([
+  'status', 'request_status',
+  'error', 'request_error_message',
+]);
+
 /**
  * Extract fields from a header block between start and end indices.
  */
@@ -132,9 +144,11 @@ export function parseHeaderBlock(lines: string[], startIdx: number, endIdx: numb
     if (separatorIndex === -1) {
       return;
     }
-    const key = line.slice(0, separatorIndex).trim().toLowerCase();
+    let key = line.slice(0, separatorIndex).trim().toLowerCase();
     const value = line.slice(separatorIndex + 1).trim();
     if (key) {
+      // Map short field names to canonical names
+      key = FIELD_NAME_ALIASES[key] ?? key;
       fields[key] = value;
     }
   });
@@ -186,6 +200,52 @@ export function findTrailingHeader(lines: string[]): [number, number] {
   return [startIdx, endIdx];
 }
 
+/**
+ * Find an unclosed trailing header block at the end of lines (no closing ---).
+ * Detects: ---\nkey: value\nkey: value (at end of text, without closing ---).
+ * Returns the start index of the opening ---, or -1 if not found.
+ */
+export function findUnclosedTrailingHeader(lines: string[]): number {
+  if (lines.length < 2) {
+    return -1;
+  }
+
+  // Search backwards for a --- line
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].trim() === '---') {
+      const trailing = lines.slice(i + 1);
+      if (trailing.length === 0) {
+        return -1; // --- at the very end with nothing after
+      }
+
+      let hasStatusField = false;
+      let allValid = true;
+      for (const line of trailing) {
+        const stripped = line.trim();
+        if (!stripped) {
+          continue;
+        }
+        if (!stripped.includes(':')) {
+          allValid = false;
+          break;
+        }
+        const rawKey = stripped.slice(0, stripped.indexOf(':')).trim().toLowerCase();
+        const canonical = FIELD_NAME_ALIASES[rawKey] ?? rawKey;
+        if (KNOWN_STATUS_FIELDS.has(rawKey) || KNOWN_STATUS_FIELDS.has(canonical)) {
+          hasStatusField = true;
+        }
+      }
+
+      if (allValid && hasStatusField) {
+        return i;
+      }
+      return -1; // Only check the last --- occurrence
+    }
+  }
+
+  return -1;
+}
+
 export function parseStructuredMessage(text: string): StructuredMessage {
   if (!text) {
     return { body: text, fields: {} };
@@ -235,7 +295,7 @@ export function parseStructuredMessage(text: string): StructuredMessage {
     }
   }
 
-  // Try to find header at the END of the message
+  // Try to find closed header at the END of the message
   const [startIdx, endIdx] = findTrailingHeader(lines);
   if (startIdx !== -1 && endIdx !== -1) {
     const fields = parseHeaderBlock(lines, startIdx, endIdx);
@@ -243,6 +303,35 @@ export function parseStructuredMessage(text: string): StructuredMessage {
       // Body is everything before the trailing header
       let bodyLines = lines.slice(0, startIdx);
       // Remove trailing empty lines from body
+      while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
+        bodyLines.pop();
+      }
+      const body = bodyLines.join('\n');
+      const statusRaw = fields.request_status;
+      const status = statusRaw ? (normalizeStatus(statusRaw) as ResultStatus) : undefined;
+      const error = fields.request_error_message ?? undefined;
+      return { body, fields, status, error };
+    }
+  }
+
+  // Try to find unclosed header at the END of the message (no closing ---)
+  const unclosedStart = findUnclosedTrailingHeader(lines);
+  if (unclosedStart !== -1) {
+    const fields: Record<string, string> = {};
+    lines.slice(unclosedStart + 1).forEach((line) => {
+      const stripped = line.trim();
+      if (!stripped || !stripped.includes(':')) {
+        return;
+      }
+      let key = stripped.slice(0, stripped.indexOf(':')).trim().toLowerCase();
+      const value = stripped.slice(stripped.indexOf(':') + 1).trim();
+      if (key) {
+        key = FIELD_NAME_ALIASES[key] ?? key;
+        fields[key] = value;
+      }
+    });
+    if (Object.keys(fields).length > 0) {
+      let bodyLines = lines.slice(0, unclosedStart);
       while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
         bodyLines.pop();
       }

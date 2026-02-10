@@ -25,6 +25,7 @@ class User(Base):
     linux_uid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     queue_priority: Mapped[int] = mapped_column(Integer, default=0)  # Higher = higher priority
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)

@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..deps import get_proxy_caller_id
 from ..llm_proxy.config import load_llm_proxy_config, ProxyConfigError
 from ..llm_proxy.translator import (
     claude_to_openai_messages,
@@ -29,6 +30,30 @@ router = APIRouter(prefix="/llm-proxy/v1", tags=["llm-proxy"])
 # Debug directory for saving request/response pairs
 DEBUG_DIR = Path(__file__).resolve().parents[3] / "data" / "llm_proxy_debug"
 
+# Maximum number of debug files to keep (oldest deleted first)
+DEBUG_MAX_FILES = 200
+
+# Fields to redact in debug output (values replaced with "***REDACTED***")
+_SENSITIVE_KEYS = frozenset({
+    "api_key", "api-key", "x-api-key", "authorization",
+    "token", "access_token", "secret", "password",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+})
+
+
+def _redact_sensitive(data: Any, *, _depth: int = 0) -> Any:
+    """Recursively redact sensitive fields from data before writing to debug files."""
+    if _depth > 20:
+        return data
+    if isinstance(data, dict):
+        return {
+            k: ("***REDACTED***" if k.lower() in _SENSITIVE_KEYS else _redact_sensitive(v, _depth=_depth + 1))
+            for k, v in data.items()
+        }
+    if isinstance(data, list):
+        return [_redact_sensitive(item, _depth=_depth + 1) for item in data]
+    return data
+
 
 def _is_debug_enabled() -> bool:
     """Check if debug mode is enabled in config."""
@@ -39,16 +64,49 @@ def _is_debug_enabled() -> bool:
         return False
 
 
+def _cleanup_debug_files() -> None:
+    """Remove oldest debug files if directory exceeds DEBUG_MAX_FILES."""
+    try:
+        if not DEBUG_DIR.exists():
+            return
+        files = sorted(DEBUG_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        if len(files) > DEBUG_MAX_FILES:
+            for f in files[: len(files) - DEBUG_MAX_FILES]:
+                f.unlink(missing_ok=True)
+    except Exception as e:
+        logger.debug("LLM Proxy debug: cleanup error: %s", e)
+
+
 def _save_debug_file(filename: str, data: dict[str, Any]) -> None:
-    """Save a debug JSON file. Caller is responsible for checking debug mode."""
+    """Save a debug JSON file with sensitive fields redacted.
+
+    Caller is responsible for checking debug mode.
+    """
     try:
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        redacted = _redact_sensitive(data)
+        redacted["timestamp"] = datetime.now(timezone.utc).isoformat()
         filepath = DEBUG_DIR / filename
-        data["timestamp"] = datetime.now(timezone.utc).isoformat()
-        filepath.write_text(json.dumps(data, indent=2, default=str))
+        filepath.write_text(json.dumps(redacted, indent=2, default=str))
         logger.debug("LLM Proxy debug: saved %s", filepath)
+        _cleanup_debug_files()
     except Exception as e:
         logger.warning("LLM Proxy debug: failed to save %s: %s", filename, e)
+
+
+def _log_debug_warning() -> None:
+    """Log a startup warning if debug mode is enabled."""
+    if _is_debug_enabled():
+        logger.warning(
+            "LLM Proxy debug mode is ENABLED. Request/response payloads will be "
+            "saved to %s. Sensitive fields are redacted, but disable debug mode "
+            "in production (set proxy.debug: false in llm-api-proxy.yaml).",
+            DEBUG_DIR,
+        )
+
+
+# Log warning at import time (module load = server startup)
+_log_debug_warning()
 
 
 def _resolve_target(model_name: str) -> tuple[str, str, dict[str, Any]]:
@@ -242,8 +300,24 @@ async def _proxy_openai(
         return JSONResponse(status_code=response.status_code, content=translated)
 
 
+@router.post("/messages/count_tokens", response_model=None)
+async def count_tokens(
+    request: Request,
+    caller_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse:
+    """No-op handler for the SDK's count_tokens call.
+
+    The Claude Agent SDK tries to call this endpoint during initialization.
+    Returning a minimal valid response prevents 404 noise in logs.
+    """
+    return JSONResponse(content={"input_tokens": 0})
+
+
 @router.post("/messages", response_model=None)
-async def proxy_messages(request: Request) -> JSONResponse | StreamingResponse:
+async def proxy_messages(
+    request: Request,
+    user_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse | StreamingResponse:
     try:
         payload = await request.json()
     except json.JSONDecodeError as exc:

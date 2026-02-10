@@ -16,73 +16,21 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from functools import wraps
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 
 from ..db.database import AsyncSessionLocal
-from ..services.session_service import session_service
 from ..db.models import Event
+from ..db.retry import with_db_retry
+from ..services.session_service import session_service
 from ..security import scan_and_redact, is_scanner_enabled
 
 logger = logging.getLogger(__name__)
 
-# Type variable for retry decorator
-T = TypeVar("T")
-
-# Retry configuration
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 0.05  # Start with 50ms
-RETRY_BACKOFF_MULTIPLIER = 2.0
-
 # Database operation timeout (seconds)
 DB_OPERATION_TIMEOUT = 10.0
-
-
-def with_db_retry(
-    max_retries: int = MAX_RETRIES,
-    retry_delay: float = RETRY_DELAY_SECONDS,
-    backoff_multiplier: float = RETRY_BACKOFF_MULTIPLIER,
-) -> Callable:
-    """
-    Decorator for retrying database operations on transient failures.
-
-    Retries on OperationalError (connection issues, locks, etc.)
-    but not on IntegrityError (constraint violations).
-    """
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> T:
-            last_error: Optional[Exception] = None
-            delay = retry_delay
-
-            for attempt in range(max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except OperationalError as e:
-                    last_error = e
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Event service DB operation failed "
-                            f"(attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                            f"Retrying in {delay:.3f}s..."
-                        )
-                        await asyncio.sleep(delay)
-                        delay *= backoff_multiplier
-                    else:
-                        logger.error(
-                            f"Event service DB operation failed after "
-                            f"{max_retries + 1} attempts: {e}"
-                        )
-                except IntegrityError:
-                    # Don't retry integrity errors - they won't succeed
-                    raise
-
-            raise last_error  # type: ignore
-        return wrapper
-    return decorator
 
 
 async def record_event(event: dict[str, Any]) -> bool:

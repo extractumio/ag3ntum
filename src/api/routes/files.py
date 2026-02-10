@@ -1581,4 +1581,33 @@ async def get_session_mounts(
     except OSError:
         pass
 
-    return SessionMountsResponse(mounts=mounts)
+    # Deduplicate mounts by host_path.
+    # When the same host path appears in multiple mount types (e.g., global + dynamic
+    # + original_paths), keep only one entry with priority: dynamic > user-specific > global.
+    mount_type_priority = {
+        "dynamic": 0,
+        "user_rw": 1,
+        "user_ro": 2,
+        "external_rw": 3,
+        "external_ro": 4,
+        "persistent": 5,
+    }
+    seen_host_paths: dict[str, int] = {}  # host_path -> index of best mount
+    deduped: list[MountEntry] = []
+    for mount in mounts:
+        key = mount.host_path
+        if not key:
+            # Mounts without host_path (e.g., persistent) always kept
+            deduped.append(mount)
+            continue
+        priority = mount_type_priority.get(mount.mount_type, 99)
+        if key in seen_host_paths:
+            existing_idx = seen_host_paths[key]
+            existing_priority = mount_type_priority.get(deduped[existing_idx].mount_type, 99)
+            if priority < existing_priority:
+                deduped[existing_idx] = mount  # Replace with higher-priority
+        else:
+            seen_host_paths[key] = len(deduped)
+            deduped.append(mount)
+
+    return SessionMountsResponse(mounts=deduped)

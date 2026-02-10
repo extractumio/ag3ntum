@@ -1,0 +1,173 @@
+/* =============================================================================
+ * AGENT PROGRESS & TODO
+ * ============================================================================= */
+
+.agent-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.agent-status-indicator {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.todo-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding-left: var(--spacing-xs);
+  margin-top: var(--spacing-lg);
+}
+
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-md);
+  font-size: var(--font-base);
+}
+
+.todo-bullet {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.todo-text {
+  color: var(--color-text-primary);
+}
+
+.todo-item.todo-completed .todo-bullet {
+  color: var(--color-success);
+}
+
+.todo-item.todo-completed .todo-text {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+.todo-item.todo-in_progress .todo-bullet {
+  color: var(--color-accent-primary);
+}
+
+.todo-item.todo-pending .todo-bullet {
+  color: var(--color-text-muted);
+}
+
+.todo-item.todo-cancelled .todo-bullet {
+  color: var(--color-error);
+}
+
+/* =============================================================================
+ * PAGINATION
+ * ============================================================================= */
+
+.pagination-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg) 0;
+  margin-top: var(--spacing-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.pagination-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.pagination-btn:hover:not(:disabled) {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.pagination-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination-info {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+/* =============================================================================
+ * SESSION INFO
+ * ============================================================================= */
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xl);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  margin-bottom: var(--spacing-xl);
+}
+
+.session-info-row {
+  display: flex;
+  gap: var(--spacing-md);
+  font-size: var(--font-base);
+}
+
+.session-info-label {
+  color: var(--color-text-muted);
+  min-width: 100px;
+}
+
+.session-info-value {
+  color: var(--color-text-primary);
+}
+
+/* =============================================================================
+ * ANIMATIONS
+ * ============================================================================= */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-brightness {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.2); }
+}
+
+@keyframes toast-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes highlight-pulse {
+  0% { background-color: rgba(126, 200, 212, 0.2); }
+  100% { background-color: transparent; }
+}
+

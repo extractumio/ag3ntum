@@ -404,6 +404,23 @@ class AgentRunner:
                     )
                     await self._update_session_status(session_id, "failed")
                     return
+            else:
+                # Resume: reload persisted mount info (symlinks already exist)
+                try:
+                    session_manager = SessionManager(sessions_dir)
+                    dynamic_mount_info = session_manager.load_dynamic_mount_info(
+                        session_id
+                    )
+                    if dynamic_mount_info:
+                        logger.info(
+                            f"Reloaded {len(dynamic_mount_info)} dynamic mounts "
+                            f"for resumed session {session_id}"
+                        )
+                except Exception as mount_error:
+                    logger.warning(
+                        f"Failed to reload dynamic mount info for session "
+                        f"{session_id}: {mount_error}"
+                    )
 
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
 
@@ -565,6 +582,13 @@ class AgentRunner:
             await self._update_session_status(session_id, "failed")
 
         finally:
+            # Drain pending tracer tasks to ensure all events are persisted
+            if tracer is not None:
+                try:
+                    await tracer.drain()
+                except Exception as e:
+                    logger.warning(f"Failed to drain tracer tasks for {session_id}: {e}")
+
             # Cleanup
             self._running_tasks.pop(session_id, None)
             self._cancel_flags.pop(session_id, None)

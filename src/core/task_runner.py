@@ -74,7 +74,7 @@ async def execute_agent_task(
     config_data = config_loader.get_config()
 
     # 3. Apply parameter overrides (params take precedence over config)
-    model = params.model or config_data["model"]
+    model = params.model or config_data.get("default_model") or config_data.get("model", "")
     max_turns = (
         params.max_turns if params.max_turns is not None
         else config_data["max_turns"]

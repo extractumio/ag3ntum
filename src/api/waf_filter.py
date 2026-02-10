@@ -298,17 +298,20 @@ def filter_pydantic_model(model: BaseModel) -> BaseModel:
 async def validate_request_size(request: Request) -> None:
     """
     Middleware to validate request body size.
-    
-    Should be called early in request processing.
-    
+
+    Performs two checks:
+    1. Fast pre-check using Content-Length header (rejects obviously oversized requests)
+    2. Installs a body-size-tracking wrapper on request._receive so actual bytes
+       are measured during body consumption (prevents Content-Length spoofing)
+
     Args:
         request: FastAPI Request object
-        
+
     Raises:
         HTTPException: If request size exceeds limits
     """
+    # Pre-check: reject if Content-Length header already exceeds limit
     content_length = request.headers.get("content-length")
-    
     if content_length:
         try:
             size = int(content_length)
@@ -316,6 +319,33 @@ async def validate_request_size(request: Request) -> None:
         except ValueError:
             # Invalid content-length header - let FastAPI handle it
             pass
+
+    # Install body-size-tracking wrapper on the receive callable.
+    # This measures actual bytes streamed in, regardless of Content-Length header.
+    original_receive = request._receive
+    bytes_received = 0
+
+    async def size_limiting_receive():
+        nonlocal bytes_received
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            body = message.get("body", b"")
+            bytes_received += len(body)
+            if bytes_received > MAX_REQUEST_BODY_SIZE:
+                size_mb = bytes_received / (1024 * 1024)
+                limit_mb = MAX_REQUEST_BODY_SIZE / (1024 * 1024)
+                logger.warning(
+                    "WAF: Request body actual size %.2fMB exceeds limit %.2fMB "
+                    "(Content-Length header may have been spoofed)",
+                    size_mb, limit_mb,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Request body size ({size_mb:.1f}MB) exceeds maximum allowed size ({limit_mb}MB)",
+                )
+        return message
+
+    request._receive = size_limiting_receive
 
 
 # =============================================================================

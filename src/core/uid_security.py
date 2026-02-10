@@ -82,6 +82,12 @@ class UIDSecurityConfig:
         api_user_uid: UID of the API process (default: 45045)
         require_capability_check: Whether to verify CAP_SETUID before use
     """
+    # Absolute bounds — these cannot be overridden by configuration or env vars.
+    # They prevent misconfiguration from accidentally allowing system UIDs.
+    ABSOLUTE_ISOLATED_UID_MIN: int = field(init=False, repr=False, default=50000)
+    ABSOLUTE_DIRECT_UID_MIN: int = field(init=False, repr=False, default=1000)
+    ABSOLUTE_UID_FLOOR: int = field(init=False, repr=False, default=1000)
+
     mode: UIDMode = UIDMode.ISOLATED
 
     # Isolated mode range (dedicated, doesn't map to host users)
@@ -107,6 +113,43 @@ class UIDSecurityConfig:
     legacy_uid_min: int = 2000
     legacy_uid_max: int = 49999
     allow_legacy_uids: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate configuration bounds to prevent security misconfigurations.
+
+        Enforces absolute minimums that cannot be overridden by environment
+        variables or configuration files.
+        """
+        # Isolated mode range must never dip below 50000
+        if self.isolated_uid_min < self.ABSOLUTE_ISOLATED_UID_MIN:
+            raise UIDSecurityError(
+                f"isolated_uid_min ({self.isolated_uid_min}) cannot be below "
+                f"absolute minimum ({self.ABSOLUTE_ISOLATED_UID_MIN})"
+            )
+
+        # Direct mode range must never dip below 1000 (system accounts)
+        if self.direct_uid_min < self.ABSOLUTE_DIRECT_UID_MIN:
+            raise UIDSecurityError(
+                f"direct_uid_min ({self.direct_uid_min}) cannot be below "
+                f"absolute minimum ({self.ABSOLUTE_DIRECT_UID_MIN})"
+            )
+
+        # Max must be greater than min
+        if self.isolated_uid_max <= self.isolated_uid_min:
+            raise UIDSecurityError(
+                f"isolated_uid_max ({self.isolated_uid_max}) must be greater than "
+                f"isolated_uid_min ({self.isolated_uid_min})"
+            )
+        if self.direct_uid_max <= self.direct_uid_min:
+            raise UIDSecurityError(
+                f"direct_uid_max ({self.direct_uid_max}) must be greater than "
+                f"direct_uid_min ({self.direct_uid_min})"
+            )
+
+        # UID 0 must always be in blocked_uids
+        if 0 not in self.blocked_uids:
+            self.blocked_uids.add(0)
+            logger.warning("UID 0 was missing from blocked_uids — re-added")
 
     def get_uid_range(self) -> tuple[int, int]:
         """Get the valid UID range for the current mode."""
@@ -192,18 +235,25 @@ def _load_uid_security_config() -> UIDSecurityConfig:
         mode = UIDMode.ISOLATED
         logger.info("UID_MODE=isolated: Using isolated UID range (50000-60000)")
 
-    # Load additional settings from environment
-    config = UIDSecurityConfig(mode=mode)
-
-    # Override ranges if specified
+    # Collect overrides from environment
+    kwargs: dict = {"mode": mode}
     if os.environ.get("AG3NTUM_ISOLATED_UID_MIN"):
-        config.isolated_uid_min = int(os.environ["AG3NTUM_ISOLATED_UID_MIN"])
+        kwargs["isolated_uid_min"] = int(os.environ["AG3NTUM_ISOLATED_UID_MIN"])
     if os.environ.get("AG3NTUM_ISOLATED_UID_MAX"):
-        config.isolated_uid_max = int(os.environ["AG3NTUM_ISOLATED_UID_MAX"])
+        kwargs["isolated_uid_max"] = int(os.environ["AG3NTUM_ISOLATED_UID_MAX"])
     if os.environ.get("AG3NTUM_DIRECT_UID_MIN"):
-        config.direct_uid_min = int(os.environ["AG3NTUM_DIRECT_UID_MIN"])
+        kwargs["direct_uid_min"] = int(os.environ["AG3NTUM_DIRECT_UID_MIN"])
     if os.environ.get("AG3NTUM_DIRECT_UID_MAX"):
-        config.direct_uid_max = int(os.environ["AG3NTUM_DIRECT_UID_MAX"])
+        kwargs["direct_uid_max"] = int(os.environ["AG3NTUM_DIRECT_UID_MAX"])
+
+    try:
+        config = UIDSecurityConfig(**kwargs)
+    except UIDSecurityError as e:
+        logger.error(
+            "UID security config from environment failed validation: %s. "
+            "Falling back to safe defaults.", e
+        )
+        config = UIDSecurityConfig(mode=mode)
 
     return config
 

@@ -426,6 +426,105 @@ class TestConfigurationManagement:
 
 
 # =============================================================================
+# Test: Absolute Bounds Validation
+# =============================================================================
+
+class TestAbsoluteBoundsValidation:
+    """Test that UID range bounds cannot be set below absolute minimums.
+
+    Environment variables or config overrides must not allow ranges
+    that would overlap with system UIDs.
+    """
+
+    def test_isolated_min_below_50000_rejected(self) -> None:
+        """Isolated mode min cannot be set below 50000."""
+        with pytest.raises(UIDSecurityError, match="isolated_uid_min.*cannot be below"):
+            UIDSecurityConfig(mode=UIDMode.ISOLATED, isolated_uid_min=49999)
+
+    def test_isolated_min_at_zero_rejected(self) -> None:
+        """Isolated mode min at 0 is rejected."""
+        with pytest.raises(UIDSecurityError, match="isolated_uid_min.*cannot be below"):
+            UIDSecurityConfig(mode=UIDMode.ISOLATED, isolated_uid_min=0)
+
+    def test_isolated_min_at_1000_rejected(self) -> None:
+        """Isolated mode min at 1000 is rejected (below 50000)."""
+        with pytest.raises(UIDSecurityError, match="isolated_uid_min.*cannot be below"):
+            UIDSecurityConfig(mode=UIDMode.ISOLATED, isolated_uid_min=1000)
+
+    def test_isolated_min_at_50000_accepted(self) -> None:
+        """Isolated mode min at 50000 (the absolute floor) is accepted."""
+        config = UIDSecurityConfig(mode=UIDMode.ISOLATED, isolated_uid_min=50000)
+        assert config.isolated_uid_min == 50000
+
+    def test_isolated_min_above_50000_accepted(self) -> None:
+        """Isolated mode min above 50000 is accepted."""
+        config = UIDSecurityConfig(
+            mode=UIDMode.ISOLATED, isolated_uid_min=51000, isolated_uid_max=62000
+        )
+        assert config.isolated_uid_min == 51000
+
+    def test_direct_min_below_1000_rejected(self) -> None:
+        """Direct mode min cannot be set below 1000."""
+        with pytest.raises(UIDSecurityError, match="direct_uid_min.*cannot be below"):
+            UIDSecurityConfig(mode=UIDMode.DIRECT, direct_uid_min=999)
+
+    def test_direct_min_at_zero_rejected(self) -> None:
+        """Direct mode min at 0 is rejected."""
+        with pytest.raises(UIDSecurityError, match="direct_uid_min.*cannot be below"):
+            UIDSecurityConfig(mode=UIDMode.DIRECT, direct_uid_min=0)
+
+    def test_direct_min_at_1000_accepted(self) -> None:
+        """Direct mode min at 1000 (the absolute floor) is accepted."""
+        config = UIDSecurityConfig(mode=UIDMode.DIRECT, direct_uid_min=1000)
+        assert config.direct_uid_min == 1000
+
+    def test_max_must_be_greater_than_min_isolated(self) -> None:
+        """Isolated max must be greater than min."""
+        with pytest.raises(UIDSecurityError, match="isolated_uid_max.*must be greater"):
+            UIDSecurityConfig(
+                mode=UIDMode.ISOLATED, isolated_uid_min=50000, isolated_uid_max=50000
+            )
+
+    def test_max_must_be_greater_than_min_direct(self) -> None:
+        """Direct max must be greater than min."""
+        with pytest.raises(UIDSecurityError, match="direct_uid_max.*must be greater"):
+            UIDSecurityConfig(
+                mode=UIDMode.DIRECT, direct_uid_min=1000, direct_uid_max=1000
+            )
+
+    def test_inverted_range_rejected(self) -> None:
+        """Inverted range (max < min) is rejected."""
+        with pytest.raises(UIDSecurityError, match="must be greater"):
+            UIDSecurityConfig(
+                mode=UIDMode.ISOLATED, isolated_uid_min=55000, isolated_uid_max=52000
+            )
+
+    def test_root_uid_re_added_to_blocked_uids(self) -> None:
+        """UID 0 is automatically re-added if removed from blocked_uids."""
+        config = UIDSecurityConfig(blocked_uids=set())
+        assert 0 in config.blocked_uids
+
+    def test_env_override_below_absolute_min_falls_back(self) -> None:
+        """Environment variable below absolute min falls back to safe defaults."""
+        from src.core.uid_security import _load_uid_security_config
+        with patch.dict(os.environ, {"AG3NTUM_ISOLATED_UID_MIN": "100"}):
+            config = _load_uid_security_config()
+            # Should fall back to default (50000), not use 100
+            assert config.isolated_uid_min == 50000
+
+    def test_env_override_valid_range_accepted(self) -> None:
+        """Valid environment variable overrides are accepted."""
+        from src.core.uid_security import _load_uid_security_config
+        with patch.dict(os.environ, {
+            "AG3NTUM_ISOLATED_UID_MIN": "51000",
+            "AG3NTUM_ISOLATED_UID_MAX": "62000",
+        }):
+            config = _load_uid_security_config()
+            assert config.isolated_uid_min == 51000
+            assert config.isolated_uid_max == 62000
+
+
+# =============================================================================
 # Test: Capability Checking
 # =============================================================================
 

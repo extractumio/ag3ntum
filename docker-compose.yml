@@ -40,12 +40,13 @@ services:
       - ./config:/config
       - ./data:/data
       - ./logs:/logs
-      - ./src:/src
+      - ./src:/src:ro
       - ./users:/users
       - ./prompts:/prompts:ro
       - ./skills:/skills:ro
       - ./tools:/tools:ro
       - ./tests:/tests:ro
+      - ./scripts:/scripts:ro
     ports:
       - "${AG3NTUM_API_PORT:-40080}:40080"
     cap_add:
@@ -63,10 +64,9 @@ services:
       - CHOWN
     security_opt:
       - apparmor:unconfined
-      # Note: Seccomp profiles (config/security/seccomp-*.json) are available but
-      # NOT applied at container level as they block Docker's internal operations.
-      # Security is enforced at application level instead (see src/core/uid_security.py)
-      - seccomp:unconfined
+      # Container-level seccomp: default-deny allowlist permitting bwrap, privilege
+      # management, and standard operations. Blocks ptrace, kexec, reboot, etc.
+      - seccomp:./config/security/seccomp-container.json
     depends_on:
       - redis
     restart: unless-stopped

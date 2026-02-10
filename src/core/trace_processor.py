@@ -16,7 +16,6 @@ Usage:
         async for message in client.receive_response():
             processor.process_message(message)
 """
-import hashlib
 import json
 import logging
 import re
@@ -42,6 +41,8 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
+from .circuit_breaker import CircuitBreaker
+from .pattern_detector import PatternDetector
 from .tracer import TracerBase
 
 logger = logging.getLogger(__name__)
@@ -434,27 +435,10 @@ class TraceProcessor:
         self._thinking_emit_interval: float = 1.0  # seconds
         # Track tool errors for session status determination
         self._tool_error_count: int = 0
-        # Circuit breaker: track consecutive identical tool failures
-        # Key: tool_name, Value: (error_signature, consecutive_count)
-        self._tool_failure_tracker: dict[str, tuple[str, int]] = {}
-        self._circuit_breaker_tripped: bool = False
-        self._circuit_breaker_message: str = ""
-        # Max consecutive identical failures before circuit breaker trips
-        self._max_consecutive_failures: int = 5
-
-        # Track tool call sequence to detect repetitive patterns
-        self._tool_call_sequence: list[tuple[str, str]] = []
-        self._max_repetitive_calls: int = 5
-
-        # Track turns without meaningful text output to the user
-        self._turns_without_meaningful_output: int = 0
-        self._max_silent_turns: int = 5
-        self._current_turn_has_output: bool = False
-        self._current_turn_has_tool_call: bool = False  # Tool calls count as productive work
-
-        # Track consecutive TodoWrite-only turns for warning
-        self._consecutive_todowrite_only_turns: int = 0
-        self._max_todowrite_only_turns: int = 3
+        # Circuit breaker for consecutive identical tool failures
+        self._circuit_breaker = CircuitBreaker()
+        # Pattern detector for unproductive agent loops
+        self._pattern_detector = PatternDetector()
 
     def _detect_tool_error(
         self,
@@ -565,94 +549,56 @@ class TraceProcessor:
     @property
     def circuit_breaker_tripped(self) -> bool:
         """Return True if the circuit breaker has been tripped due to repeated failures."""
-        return self._circuit_breaker_tripped
+        return self._circuit_breaker.tripped or self._pattern_detector.tripped
 
     @property
     def circuit_breaker_message(self) -> str:
         """Return the circuit breaker error message if tripped."""
-        return self._circuit_breaker_message
+        if self._circuit_breaker.tripped:
+            return self._circuit_breaker.message
+        if self._pattern_detector.tripped:
+            return self._pattern_detector.message
+        return ""
 
-    def _extract_error_signature(self, error_content: Any) -> str:
+    def _sanitize_tool_result(self, content: Any) -> Any:
         """
-        Extract a normalized error signature from tool result content.
+        Apply text sanitization to tool result content.
 
-        This creates a fingerprint of the error type to detect repeated
-        identical failures (e.g., same validation error, same missing parameter).
+        Tool results can be a plain string, a list of content blocks
+        (SDK TextBlock objects or dicts with 'text' keys), or other types.
+        Only string text portions are sanitized; structure is preserved.
 
         Args:
-            error_content: The tool result content (may be string or list).
+            content: The tool result content (string, list, or other).
 
         Returns:
-            A normalized error signature string.
+            Content with text portions sanitized for display.
         """
-        if isinstance(error_content, str):
-            text = error_content
-        elif isinstance(error_content, list):
-            # Extract text from content blocks
-            parts = []
-            for block in error_content:
-                if isinstance(block, dict) and "text" in block:
-                    parts.append(block["text"])
-                elif isinstance(block, str):
-                    parts.append(block)
-            text = " ".join(parts)
-        else:
-            text = str(error_content)
+        if not self._path_display_mapping:
+            return content
 
-        # Normalize: extract key error patterns, remove variable parts
-        # Extract the error type/message core (first 200 chars, normalized)
-        text = text[:500]
+        if isinstance(content, str):
+            return self._sanitize_text(content)
 
-        # Remove UUIDs, timestamps, and other variable parts
-        text = re.sub(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', '<UUID>', text)
-        text = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '<TIMESTAMP>', text)
-        text = re.sub(r'tool_use_[a-zA-Z0-9_]+', '<TOOL_ID>', text)
+        if isinstance(content, list):
+            sanitized = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    sanitized.append({**item, "text": self._sanitize_text(item["text"])})
+                elif hasattr(item, "text") and isinstance(getattr(item, "text", None), str):
+                    # SDK TextBlock-like objects — copy with sanitized text
+                    try:
+                        sanitized.append(type(item)(
+                            type=getattr(item, "type", "text"),
+                            text=self._sanitize_text(item.text),
+                        ))
+                    except Exception:
+                        sanitized.append(item)
+                else:
+                    sanitized.append(item)
+            return sanitized
 
-        # Keep just the first 200 chars after normalization as the signature
-        return text[:200].strip()
-
-    def _track_tool_failure(self, tool_name: str, error_content: Any) -> None:
-        """
-        Track a tool failure and check if circuit breaker should trip.
-
-        Args:
-            tool_name: Name of the failed tool.
-            error_content: The error content from the tool result.
-        """
-        error_sig = self._extract_error_signature(error_content)
-
-        # Check if this is the same error as before for this tool
-        if tool_name in self._tool_failure_tracker:
-            prev_sig, prev_count = self._tool_failure_tracker[tool_name]
-            if prev_sig == error_sig:
-                # Same error repeated
-                new_count = prev_count + 1
-                self._tool_failure_tracker[tool_name] = (error_sig, new_count)
-
-                if new_count >= self._max_consecutive_failures:
-                    self._circuit_breaker_tripped = True
-                    self._circuit_breaker_message = (
-                        f"Circuit breaker tripped: Tool '{tool_name}' failed "
-                        f"{new_count} consecutive times with the same error. "
-                        f"Error pattern: {error_sig[:100]}..."
-                    )
-                    logger.warning(self._circuit_breaker_message)
-            else:
-                # Different error - reset counter
-                self._tool_failure_tracker[tool_name] = (error_sig, 1)
-        else:
-            # First failure for this tool
-            self._tool_failure_tracker[tool_name] = (error_sig, 1)
-
-    def _reset_tool_failure_tracker(self, tool_name: str) -> None:
-        """
-        Reset the failure tracker for a tool after a successful execution.
-
-        Args:
-            tool_name: Name of the tool that succeeded.
-        """
-        if tool_name in self._tool_failure_tracker:
-            del self._tool_failure_tracker[tool_name]
+        return content
 
     def _handle_tool_result(
         self,
@@ -679,14 +625,17 @@ class TraceProcessor:
 
         if is_error:
             self._tool_error_count += 1
-            self._track_tool_failure(tool_name, content)
+            self._circuit_breaker.track_failure(tool_name, content)
         else:
-            self._reset_tool_failure_tracker(tool_name)
+            self._circuit_breaker.reset_tool(tool_name)
+
+        # Sanitize tool result text (path translation, system reminders, etc.)
+        display_content = self._sanitize_tool_result(content)
 
         self.tracer.on_tool_complete(
             tool_name=tool_name,
             tool_id=tool_id,
-            result=content,
+            result=display_content,
             duration_ms=0,
             is_error=is_error
         )
@@ -700,112 +649,6 @@ class TraceProcessor:
                 duration_ms=duration_ms,
                 is_error=is_error
             )
-
-    def _track_tool_call(self, tool_name: str, tool_input: Any) -> None:
-        """
-        Track a tool call for unproductive loop detection.
-
-        Detects when the same tool is called repeatedly, which often
-        indicates the model is stuck in a loop (e.g., calling TodoWrite
-        repeatedly without making progress).
-
-        Args:
-            tool_name: Name of the tool being called.
-            tool_input: The input arguments to the tool.
-        """
-        # Create a signature from the tool input
-        try:
-            input_str = json.dumps(tool_input, sort_keys=True, default=str)
-        except (TypeError, ValueError):
-            input_str = str(tool_input)
-
-        input_hash = hashlib.md5(input_str.encode()).hexdigest()[:8]
-        self._tool_call_sequence.append((tool_name, input_hash))
-
-        # Keep sequence bounded to prevent memory growth
-        if len(self._tool_call_sequence) > 50:
-            self._tool_call_sequence = self._tool_call_sequence[-50:]
-
-        # Check for repetitive pattern: same tool called N times consecutively
-        if len(self._tool_call_sequence) >= self._max_repetitive_calls:
-            recent = self._tool_call_sequence[-self._max_repetitive_calls:]
-            recent_tools = [t[0] for t in recent]
-
-            if len(set(recent_tools)) == 1:  # All same tool
-                # Don't trip for subagent tools (Task) as they may legitimately be called multiple times
-                if tool_name not in ("Task",):
-                    self._circuit_breaker_tripped = True
-                    self._circuit_breaker_message = (
-                        f"Unproductive loop detected: '{tool_name}' called "
-                        f"{self._max_repetitive_calls} times consecutively without "
-                        f"other actions. This suggests the agent is stuck. "
-                        f"Consider using mcp__ag3ntum__AskUserQuestion to get user guidance."
-                    )
-                    logger.warning(self._circuit_breaker_message)
-
-    def _check_todowrite_only_pattern(self, tool_name: str) -> None:
-        """
-        Check for TodoWrite-only turns.
-
-        Detects when the agent is only calling TodoWrite without taking
-        real actions, which indicates it's stuck updating task lists
-        instead of actually working.
-
-        Args:
-            tool_name: Name of the tool that was just called.
-        """
-        if tool_name == "TodoWrite":
-            # Check if recent sequence is TodoWrite-only
-            if len(self._tool_call_sequence) >= 2:
-                recent = self._tool_call_sequence[-3:]  # Look at last 3 calls
-                if all(t[0] == "TodoWrite" for t in recent):
-                    self._consecutive_todowrite_only_turns += 1
-
-                    if self._consecutive_todowrite_only_turns >= self._max_todowrite_only_turns:
-                        # Emit warning via tracer (not circuit breaker - just a warning)
-                        warning_msg = (
-                            "Warning: Agent has called TodoWrite "
-                            f"{self._consecutive_todowrite_only_turns} times "
-                            "without taking other actions. If blocked, consider "
-                            "asking the user for guidance with mcp__ag3ntum__AskUserQuestion."
-                        )
-                        logger.warning(warning_msg)
-                        # Emit as a system event for visibility
-                        if hasattr(self.tracer, 'on_system_event'):
-                            self.tracer.on_system_event("warning", {"message": warning_msg})
-        else:
-            # Non-TodoWrite tool resets the counter
-            self._consecutive_todowrite_only_turns = 0
-
-    def _on_turn_start(self) -> None:
-        """Called at the start of each turn to reset per-turn tracking."""
-        self._current_turn_has_output = False
-        self._current_turn_has_tool_call = False
-
-    def _on_meaningful_output(self) -> None:
-        """Called when the agent produces meaningful text output."""
-        self._current_turn_has_output = True
-        self._turns_without_meaningful_output = 0
-
-    def _on_turn_end(self) -> None:
-        """Called at the end of each turn to check for no-output pattern."""
-        # Only count as "silent" if there's neither text output NOR tool calls.
-        # An agent making tool calls is making progress, even without chat messages.
-        if self._current_turn_has_output or self._current_turn_has_tool_call:
-            # Productive turn - reset counter
-            self._turns_without_meaningful_output = 0
-        else:
-            # Truly silent turn - no output and no tool calls
-            self._turns_without_meaningful_output += 1
-
-            if self._turns_without_meaningful_output >= self._max_silent_turns:
-                self._circuit_breaker_tripped = True
-                self._circuit_breaker_message = (
-                    f"No activity detected: Agent has produced no text output and made "
-                    f"no tool calls for {self._turns_without_meaningful_output} consecutive "
-                    f"turns. This suggests the agent is stuck."
-                )
-                logger.warning(self._circuit_breaker_message)
 
     def configure_guardrails(
         self,
@@ -826,20 +669,18 @@ class TraceProcessor:
             max_silent_turns: Max turns without user-facing output.
             max_todowrite_only_turns: Max TodoWrite-only turns before warning.
         """
-        if max_consecutive_failures is not None:
-            self._max_consecutive_failures = max_consecutive_failures
-        if max_repetitive_calls is not None:
-            self._max_repetitive_calls = max_repetitive_calls
-        if max_silent_turns is not None:
-            self._max_silent_turns = max_silent_turns
-        if max_todowrite_only_turns is not None:
-            self._max_todowrite_only_turns = max_todowrite_only_turns
+        self._circuit_breaker.configure(max_consecutive_failures=max_consecutive_failures)
+        self._pattern_detector.configure(
+            max_repetitive_calls=max_repetitive_calls,
+            max_silent_turns=max_silent_turns,
+            max_todowrite_only_turns=max_todowrite_only_turns,
+        )
 
         logger.info(
-            f"Guardrails configured: max_failures={self._max_consecutive_failures}, "
-            f"max_repetitive={self._max_repetitive_calls}, "
-            f"max_silent={self._max_silent_turns}, "
-            f"max_todowrite={self._max_todowrite_only_turns}"
+            f"Guardrails configured: max_failures={self._circuit_breaker._max_consecutive_failures}, "
+            f"max_repetitive={self._pattern_detector._max_repetitive_calls}, "
+            f"max_silent={self._pattern_detector._max_silent_turns}, "
+            f"max_todowrite={self._pattern_detector._max_todowrite_only_turns}"
         )
 
     def finalize_orphaned_subagents(self) -> None:
@@ -1031,11 +872,11 @@ class TraceProcessor:
             )
             self._metrics_turns += 1
             self._emit_metrics_update()
-            self._current_turn_has_tool_call = True
+            self._pattern_detector.current_turn_has_tool_call = True
 
             # Track for loop detection and TodoWrite pattern
-            self._track_tool_call(block.name, block.input)
-            self._check_todowrite_only_pattern(block.name)
+            self._pattern_detector.track_tool_call(block.name, block.input)
+            self._pattern_detector.check_todowrite_only_pattern(block.name)
 
             # Track Task tool invocations for subagent tracing
             if block.name == "Task":
@@ -1086,7 +927,7 @@ class TraceProcessor:
                     )
                 # Update the stored input
                 self._pending_tool_calls[tool_id]["input"] = tool_input
-                self._current_turn_has_tool_call = True
+                self._pattern_detector.current_turn_has_tool_call = True
             else:
                 # New tool - emit tool_start
                 self._pending_tool_calls[tool_id] = {
@@ -1098,7 +939,7 @@ class TraceProcessor:
                     tool_input=tool_input,
                     tool_id=tool_id
                 )
-                self._current_turn_has_tool_call = True
+                self._pattern_detector.current_turn_has_tool_call = True
 
                 # Track Task tool invocations for subagent tracing
                 if tool_name == "Task":
@@ -1188,7 +1029,7 @@ class TraceProcessor:
 
         if event_type == "message_start":
             self._stream_has_text = False
-            self._on_turn_start()
+            self._pattern_detector.on_turn_start()
             message = raw_event.get("message", {})
             if isinstance(message, dict):
                 usage = message.get("usage")
@@ -1212,7 +1053,7 @@ class TraceProcessor:
                 else:
                     self.tracer.on_message("", is_partial=False)
                 self._stream_has_text = False
-            self._on_turn_end()
+            self._pattern_detector.on_turn_end()
             # Clear parent context on message stop
             self._current_parent_tool_use_id = None
         else:
@@ -1229,7 +1070,7 @@ class TraceProcessor:
                         filtered_text = self._sanitize_text(text)
                         if filtered_text:
                             self._stream_has_text = True
-                            self._on_meaningful_output()
+                            self._pattern_detector.on_meaningful_output()
                             # Route to subagent handler if in subagent context
                             if self._current_parent_tool_use_id and \
                                self._current_parent_tool_use_id in self._active_subagents:

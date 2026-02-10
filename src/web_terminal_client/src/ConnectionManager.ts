@@ -161,6 +161,13 @@ export class ConnectionManager {
         return;
       }
 
+      // Handle infrastructure error events (don't deduplicate, always show)
+      if (parsed.type === 'infrastructure_error') {
+        console.warn('[ConnectionManager] Infrastructure error:', parsed.data);
+        this.config.onEvent(parsed as TerminalEvent);
+        return;
+      }
+
       const sseEvent = parsed as SSEEvent;
       const seq = sseEvent.sequence;
 

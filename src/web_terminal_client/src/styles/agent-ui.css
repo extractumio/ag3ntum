@@ -1,0 +1,878 @@
+/* =============================================================================
+ * TOOL CALLS
+ * ============================================================================= */
+
+.tool-call-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  margin: var(--spacing-md) 0 var(--spacing-sm);
+}
+
+.tool-call {
+  margin-bottom: var(--spacing-xs);
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  cursor: pointer;
+  font-size: var(--font-base);
+}
+
+.tool-tree {
+  color: var(--color-text-muted);
+}
+
+.tool-toggle {
+  color: var(--color-text-muted);
+  width: 12px;
+  text-align: center;
+}
+
+.tool-time {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+.tool-preview {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  margin-left: var(--spacing-md);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-running-preview {
+  color: var(--color-accent-primary);
+  opacity: 0.8;
+}
+
+.tool-call-body {
+  padding-left: 44px;
+  padding-bottom: var(--spacing-sm);
+  border-left: 1px dashed var(--color-border);
+  margin-left: var(--spacing-sm);
+}
+
+.tool-thinking {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-size: var(--font-md);
+  margin: var(--spacing-xs) 0;
+  padding-left: var(--spacing-md);
+  border-left: 2px dashed var(--color-border);
+}
+
+.tool-thinking-streaming {
+  color: var(--color-accent-primary);
+  animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+.tool-section {
+  margin: var(--spacing-sm) 0 var(--spacing-sm) -10px;
+}
+
+.tool-section-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+.tool-section-body {
+  background: var(--color-bg-code);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-accent-tertiary);
+  font-size: var(--font-sm);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-section-body.tool-output {
+  color: var(--color-text-primary);
+}
+
+/* =============================================================================
+ * SECTION TITLES (shared by tool calls, subagents, files in right panel)
+ * ============================================================================= */
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-xs) 0;
+}
+
+.section-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
+/* =============================================================================
+ * SUBAGENTS
+ * ============================================================================= */
+
+.subagent-section {
+  margin-top: var(--spacing-xl);
+}
+
+.tool-call-section {
+  margin-top: var(--spacing-md);
+}
+
+.subagent-call {
+  margin-bottom: var(--spacing-xs);
+}
+
+.subagent-call-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  cursor: pointer;
+  font-size: var(--font-base);
+}
+
+.subagent-status-icon {
+  font-size: var(--font-sm);
+  width: 16px;
+  text-align: center;
+}
+
+.subagent-status-success .subagent-status-icon {
+  color: var(--color-success);
+}
+
+.subagent-status-error .subagent-status-icon {
+  color: var(--color-error);
+}
+
+.subagent-status-running .subagent-status-icon {
+  color: var(--color-accent-primary);
+}
+
+/* Tool status icons - checkmarks and crosses for tool completion */
+.tool-status-icon {
+  font-size: var(--font-sm);
+  width: 16px;
+  text-align: center;
+}
+
+.tool-status-success .tool-status-icon {
+  color: var(--color-success);
+}
+
+.tool-status-error .tool-status-icon {
+  color: var(--color-error);
+}
+
+.tool-status-running .tool-status-icon {
+  color: var(--color-accent-primary);
+}
+
+.subagent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2xs);
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-2xs) var(--spacing-sm);
+  color: var(--color-violet);
+}
+
+.subagent-icon {
+  font-size: var(--font-sm);
+  margin-right: var(--spacing-xs);
+}
+
+.subagent-name {
+  font-weight: 500;
+}
+
+.subagent-duration {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  margin-left: var(--spacing-xs);
+}
+
+.subagent-preview {
+  display: flex;
+  margin-left: var(--spacing-sm);
+  padding-left: var(--spacing-xs);
+}
+
+.subagent-preview-tree {
+  color: var(--color-text-muted);
+  margin-right: var(--spacing-xs);
+}
+
+.subagent-preview-text {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.subagent-call-body {
+  padding-left: 44px;
+  padding-bottom: var(--spacing-sm);
+  border-left: 1px dashed var(--color-border);
+  margin-left: var(--spacing-sm);
+}
+
+/* Collapsible output component */
+.collapsible-output {
+  position: relative;
+}
+
+.collapsible-output .tool-section-body {
+  margin: 0 0 0 10px;
+}
+
+.output-expand-toggle {
+  display: block;
+  padding: var(--spacing-xs) var(--spacing-md);
+  margin: var(--spacing-2xs) 0 0 10px;
+  background: var(--color-bg-highest);
+  border: 0px none;
+  color: var(--color-accent-primary);
+  font-size: var(--font-sm);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: background var(--transition-normal);
+}
+
+.output-expand-toggle:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-bright);
+}
+
+.output-format-badge {
+  display: inline-block;
+  padding: var(--spacing-2xs) var(--spacing-sm);
+  margin-top: var(--spacing-xs);
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+  background: var(--color-bg-highest);
+  border-radius: var(--radius-sm);
+}
+
+.tool-error {
+  margin: var(--spacing-sm) 0;
+  border-left: 2px solid var(--color-error);
+  padding-left: var(--spacing-md);
+}
+
+.tool-error-title {
+  color: var(--color-error);
+  font-size: var(--font-md);
+}
+
+.tool-suggestion {
+  color: var(--color-warning);
+  font-size: var(--font-md);
+  margin-top: var(--spacing-xs);
+}
+
+/* =============================================================================
+ * REUSABLE SELECTION WIDGETS
+ * Custom checkbox/radio controls for consistent UI across the application
+ * ============================================================================= */
+
+/* Base selection control - use for both single and multi-select */
+.select-control {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-lg) 14px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  font-size: var(--font-md);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition-normal), background var(--transition-normal);
+}
+
+.select-control:hover:not(.disabled) {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-bg-highest);
+}
+
+.select-control.selected {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-select-bg);
+}
+
+.select-control.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Custom indicator box (checkbox/radio replacement) */
+.select-indicator {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-text-muted);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-normal);
+}
+
+.select-control:hover:not(.disabled) .select-indicator {
+  border-color: var(--color-accent-secondary);
+}
+
+.select-control.selected .select-indicator {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-accent-secondary);
+}
+
+/* Inner mark for selected state */
+.select-indicator-mark {
+  display: none;
+  width: 8px;
+  height: 8px;
+  background: var(--color-bg-base);
+}
+
+.select-control.selected .select-indicator-mark {
+  display: block;
+}
+
+/* Multi-select uses square, single-select can optionally use different mark */
+.select-control.multi-select .select-indicator-mark {
+  width: 8px;
+  height: 8px;
+}
+
+.select-label {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.select-control.selected .select-label {
+  color: var(--color-text-bright);
+}
+
+.select-description {
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  margin-left: auto;
+  padding-left: var(--spacing-xl);
+}
+
+/* =============================================================================
+ * ASK USER QUESTION - Interactive question UI (Human-in-the-Loop)
+ * ============================================================================= */
+
+.ask-user-question {
+  margin-bottom: var(--spacing-md);
+  border-left: 2px solid var(--color-accent-secondary);
+  padding-left: var(--spacing-xs);
+}
+
+.ask-user-question.tool-status-running {
+  border-left-color: var(--color-warning);
+}
+
+.ask-user-question.tool-status-success {
+  border-left-color: var(--color-success);
+}
+
+.ask-question-icon {
+  margin-right: var(--spacing-sm);
+  font-size: var(--font-lg);
+  color: var(--color-accent-secondary);
+}
+
+.ask-user-question-body {
+  padding: var(--spacing-md) var(--spacing-md) var(--spacing-md) 44px;
+  border-left: 1px dashed var(--color-border);
+  margin-left: var(--spacing-sm);
+}
+
+.ask-question-block {
+  margin-bottom: var(--spacing-md);
+}
+
+.ask-question-block:last-child {
+  margin-bottom: 0;
+}
+
+.ask-question-header {
+  display: inline-block;
+  padding: var(--spacing-2xs) var(--spacing-md);
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  color: var(--color-accent-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  margin-bottom: var(--spacing-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-question-text {
+  color: var(--color-text-bright);
+  font-size: var(--font-lg);
+  margin-bottom: var(--spacing-sm);
+  line-height: 1.4;
+}
+
+.ask-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+/* Option buttons use the reusable select-control base */
+.ask-option-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  background: var(--color-bg-elevated);
+  border: 0px none;
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition-normal), background var(--transition-normal);
+}
+
+.ask-option-btn:hover:not(.disabled) {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-bg-highest);
+}
+
+.ask-option-btn.selected {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-select-bg);
+}
+
+.ask-option-btn.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Custom indicator (checkbox/radio style) */
+.ask-option-indicator {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-text-muted);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-normal);
+}
+
+.ask-option-btn:hover:not(.disabled) .ask-option-indicator {
+  border-color: var(--color-accent-secondary);
+}
+
+.ask-option-btn.selected .ask-option-indicator {
+  border-color: var(--color-accent-secondary);
+  background: var(--color-accent-secondary);
+}
+
+/* Inner mark shown when selected */
+.ask-option-indicator::after {
+  content: '';
+  display: none;
+  width: 8px;
+  height: 8px;
+  background: var(--color-bg-base);
+}
+
+.ask-option-btn.selected .ask-option-indicator::after {
+  display: block;
+}
+
+.ask-option-label {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.ask-option-btn.selected .ask-option-label {
+  color: var(--color-text-bright);
+}
+
+.ask-option-description {
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  margin-left: auto;
+  padding-left: var(--spacing-xl);
+}
+
+.ask-question-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px dashed var(--color-border);
+}
+
+.ask-submit-btn {
+  padding: var(--spacing-sm) var(--spacing-2xl);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.ask-submit-btn:hover:not(.disabled) {
+  border-color: var(--color-accent-secondary);
+  color: var(--color-text-bright);
+}
+
+.ask-submit-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ask-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+.ask-question-answer {
+  margin-top: var(--spacing-lg);
+  padding: var(--spacing-md) var(--spacing-xl);
+  background: var(--color-btn-hover-bg-success);
+  border-left: 2px solid var(--color-success);
+}
+
+.ask-answer-label {
+  color: var(--color-success);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  margin-right: var(--spacing-md);
+  text-transform: uppercase;
+}
+
+.ask-answer-value {
+  color: var(--color-text-bright);
+  font-size: var(--font-md);
+}
+
+/* AskUserQuestion inline mode - renders in message content area */
+.ask-user-question-inline {
+  margin: var(--spacing-lg) 0;
+  padding: var(--spacing-xl);
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-accent-secondary);
+}
+
+.ask-user-question-inline.tool-status-running {
+  border-left-color: var(--color-warning);
+  background: rgba(232, 211, 116, 0.03);
+}
+
+.ask-user-question-inline.tool-status-success {
+  border-left-color: var(--color-success);
+  background: rgba(125, 211, 163, 0.03);
+}
+
+.ask-user-question-inline .ask-question-block {
+  margin-bottom: var(--spacing-lg);
+}
+
+.ask-user-question-inline .ask-question-block:last-child {
+  margin-bottom: 0;
+}
+
+.ask-user-question-inline .ask-question-header {
+  display: inline-block;
+  padding: var(--spacing-2xs) var(--spacing-md);
+  background: rgba(143, 184, 232, 0.12);
+  color: var(--color-accent-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  margin-bottom: var(--spacing-md);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-user-question-inline .ask-question-text {
+  color: var(--color-text-bright);
+  font-size: var(--font-md);
+  margin-bottom: var(--spacing-md);
+  line-height: 1.4;
+}
+
+.ask-user-question-inline .ask-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.ask-user-question-inline .ask-option-btn {
+  padding: var(--spacing-md) var(--spacing-xl);
+}
+
+.ask-user-question-inline .ask-option-btn:hover:not(.disabled) {
+  background: var(--color-bg-elevated);
+}
+
+.ask-user-question-inline .ask-option-btn.selected {
+  background: rgba(143, 184, 232, 0.1);
+}
+
+.ask-user-question-inline .ask-question-actions {
+  margin-top: var(--spacing-lg);
+  padding-top: var(--spacing-lg);
+}
+
+.ask-user-question-inline .ask-submit-btn {
+  padding: var(--spacing-sm) var(--spacing-2xl);
+  font-size: var(--font-base);
+}
+
+.ask-user-question-inline .ask-question-answer {
+  margin-top: var(--spacing-lg);
+  padding: var(--spacing-md) var(--spacing-xl);
+}
+
+/* Waiting for input status (human-in-the-loop) */
+.ask-user-question.tool-status-waiting,
+.ask-user-question-inline.tool-status-waiting {
+  border-left-color: var(--color-info);
+  background: rgba(232, 168, 122, 0.05);
+}
+
+.ask-waiting-banner {
+  background: rgba(232, 168, 122, 0.12);
+  margin-bottom: var(--spacing-lg);
+  color: var(--color-info-light);
+  font-size: var(--font-base);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.ask-waiting-icon {
+  color: var(--color-info);
+  font-weight: bold;
+}
+
+.ask-question-submitted {
+  background: var(--color-btn-hover-bg-success);
+  border: 1px solid var(--color-success);
+  padding: var(--spacing-lg) 14px;
+  margin-top: var(--spacing-2xl);
+  color: var(--color-success);
+  font-size: var(--font-md);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.ask-submitted-icon {
+  font-weight: bold;
+}
+
+/* Additional comments textarea */
+.ask-additional-comments {
+  margin-top: var(--spacing-lg);
+  padding-top: var(--spacing-lg);
+  border-top: 1px dashed var(--color-border);
+}
+
+.ask-additional-comments-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  margin-bottom: var(--spacing-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ask-additional-comments-textarea {
+  width: 100%;
+  min-height: 54px;
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  font-family: inherit;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.ask-additional-comments-textarea:focus {
+  outline: none;
+  border-color: var(--color-accent-secondary);
+}
+
+.ask-additional-comments-textarea::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* Hide resume-context content in UI (LLM-only message) */
+resume-context {
+  display: none;
+}
+
+/* =============================================================================
+ * AGENT FILES
+ * ============================================================================= */
+
+.agent-files {
+  margin-top: var(--spacing-lg);
+}
+
+.agent-files-title {
+  color: var(--color-success);
+  font-size: var(--font-base);
+  margin-bottom: var(--spacing-xs);
+}
+
+.agent-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding-left: var(--spacing-lg);
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+}
+
+.agent-file-marker {
+  color: var(--color-text-muted);
+}
+
+.agent-file-icon {
+  color: var(--color-success);
+}
+
+.agent-file-name {
+  color: var(--color-accent-primary);
+}
+
+.agent-file-copy {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+
+/* =============================================================================
+ * OUTPUT BLOCK
+ * ============================================================================= */
+
+.output-block {
+  border-left-color: var(--color-border);
+  background: var(--color-bg-user);
+}
+
+.output-status-complete {
+  border-left-color: var(--color-success);
+}
+
+.output-status-partial {
+  border-left-color: var(--color-warning);
+}
+
+.output-status-failed {
+  border-left-color: var(--color-error);
+}
+
+.output-status-running {
+  border-left-color: var(--color-accent-primary);
+}
+
+.output-status-cancelled {
+  border-left-color: var(--color-info);
+}
+
+.output-comments {
+  padding: 0 var(--spacing-xl) var(--spacing-xl);
+}
+
+.comment-toggle {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  cursor: pointer;
+  font-family: inherit;
+  padding: var(--spacing-xs) var(--spacing-sm);
+}
+
+.comment-body {
+  margin-top: var(--spacing-md);
+  padding-left: var(--spacing-xl);
+  border-left: 2px solid var(--color-border);
+}
+
+.output-files {
+  padding: 0 var(--spacing-xl) var(--spacing-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.output-files-title {
+  font-size: var(--font-base);
+  color: var(--color-success);
+}
+
+.output-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  font-size: var(--font-base);
+}
+
+.output-file-name {
+  color: var(--color-text-primary);
+}
+
+.output-file-action {
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.output-error {
+  color: var(--color-error);
+  padding: 0 var(--spacing-xl) var(--spacing-xl);
+  font-size: var(--font-md);
+}
+

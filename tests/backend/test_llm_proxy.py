@@ -6,10 +6,249 @@ Tests cover:
 2. Error message formatting (_validate_response)
 3. API key loading from sandboxed_envs (_get_api_key fallback)
 4. Proxy endpoint routing
+5. Authentication enforcement on proxy endpoints
+6. SSRF protection for provider base URLs
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from pathlib import Path
+from fastapi.testclient import TestClient
+
+
+class TestLlmProxyAuthentication:
+    """Tests that LLM proxy endpoints enforce correct authentication.
+
+    The proxy supports two auth paths:
+    1. Loopback (127.0.0.1) + x-api-key header → "internal-agent" (SDK traffic)
+    2. Standard JWT Bearer token → user_id from token
+
+    External requests (non-loopback) MUST use JWT Bearer auth.
+    """
+
+    def test_proxy_messages_rejects_unauthenticated(self, client):
+        """POST /api/llm-proxy/v1/messages should reject without any auth."""
+        response = client.post(
+            "/api/llm-proxy/v1/messages",
+            json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code in (401, 403)
+
+    def test_proxy_messages_rejects_invalid_token(self, client):
+        """POST /api/llm-proxy/v1/messages should reject invalid Bearer token."""
+        response = client.post(
+            "/api/llm-proxy/v1/messages",
+            headers={"Authorization": "Bearer invalid-token-value"},
+            json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 401
+
+    def test_proxy_messages_accepts_valid_jwt(self, client, auth_headers):
+        """POST /api/llm-proxy/v1/messages should accept valid JWT Bearer token.
+
+        The request will fail at the proxy config level (no model mapping),
+        but it should get past authentication (not 401/403).
+        """
+        with patch("src.api.routes.llm_proxy.load_llm_proxy_config") as mock_config:
+            mock_config.return_value = MagicMock(
+                models={},
+                routing={"allow_unmapped_models": False},
+            )
+            response = client.post(
+                "/api/llm-proxy/v1/messages",
+                headers=auth_headers,
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        # Should NOT be 401 or 403 — authentication passed
+        assert response.status_code not in (401, 403)
+
+    def test_proxy_messages_accepts_loopback_x_api_key(self, test_app):
+        """Loopback request with x-api-key should be accepted as internal-agent.
+
+        This simulates the Claude Agent SDK calling the proxy from inside the
+        container (127.0.0.1) with x-api-key header instead of JWT.
+        """
+        from src.api.deps import get_proxy_caller_id
+
+        # Override the dependency to simulate loopback auth succeeding
+        async def loopback_proxy_caller():
+            return "internal-agent"
+
+        test_app.dependency_overrides[get_proxy_caller_id] = loopback_proxy_caller
+
+        try:
+            with TestClient(test_app, base_url="http://localhost") as c:
+                with patch("src.api.routes.llm_proxy.load_llm_proxy_config") as mock_config:
+                    mock_config.return_value = MagicMock(
+                        models={},
+                        routing={"allow_unmapped_models": False},
+                    )
+                    response = c.post(
+                        "/api/llm-proxy/v1/messages",
+                        headers={"x-api-key": "sk-ant-some-key"},
+                        json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+                    )
+            # Should get past auth — 400 from model resolution, not 401/403
+            assert response.status_code not in (401, 403)
+        finally:
+            test_app.dependency_overrides.pop(get_proxy_caller_id, None)
+
+    def test_proxy_messages_rejects_non_loopback_x_api_key(self, client):
+        """Non-loopback request with only x-api-key should be rejected (401).
+
+        External requests must use JWT Bearer auth. x-api-key alone is only
+        valid from 127.0.0.1.
+        """
+        response = client.post(
+            "/api/llm-proxy/v1/messages",
+            headers={"x-api-key": "sk-ant-some-key"},
+            json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code in (401, 403)
+
+    def test_count_tokens_returns_200_with_loopback_auth(self, test_app):
+        """POST /api/llm-proxy/v1/messages/count_tokens should return 200 for internal agent.
+
+        The SDK calls count_tokens during initialization. A no-op 200 response
+        prevents 404 noise in logs.
+        """
+        from src.api.deps import get_proxy_caller_id
+
+        async def loopback_proxy_caller():
+            return "internal-agent"
+
+        test_app.dependency_overrides[get_proxy_caller_id] = loopback_proxy_caller
+
+        try:
+            with TestClient(test_app, base_url="http://localhost") as c:
+                response = c.post(
+                    "/api/llm-proxy/v1/messages/count_tokens",
+                    headers={"x-api-key": "sk-ant-some-key"},
+                    json={"model": "test-model", "messages": []},
+                )
+            assert response.status_code == 200
+            assert response.json()["input_tokens"] == 0
+        finally:
+            test_app.dependency_overrides.pop(get_proxy_caller_id, None)
+
+    def test_count_tokens_rejects_unauthenticated(self, client):
+        """POST /api/llm-proxy/v1/messages/count_tokens should reject without auth."""
+        response = client.post(
+            "/api/llm-proxy/v1/messages/count_tokens",
+            json={"model": "test-model", "messages": []},
+        )
+        assert response.status_code in (401, 403)
+
+
+class TestGetProxyCallerIdDependency:
+    """Unit tests for get_proxy_caller_id dependency function.
+
+    Tests the auth logic directly to ensure loopback detection and JWT
+    fallback work correctly at the dependency level.
+    """
+
+    @pytest.mark.asyncio
+    async def test_loopback_with_x_api_key_returns_internal_agent(self):
+        """127.0.0.1 + x-api-key should return 'internal-agent'."""
+        from src.api.deps import get_proxy_caller_id
+
+        mock_request = MagicMock()
+        mock_request.client.host = "127.0.0.1"
+        mock_request.headers = {"x-api-key": "sk-ant-test-key"}
+
+        result = await get_proxy_caller_id(
+            request=mock_request, credentials=None, db=MagicMock()
+        )
+        assert result == "internal-agent"
+
+    @pytest.mark.asyncio
+    async def test_non_loopback_with_x_api_key_only_raises_401(self):
+        """Non-loopback + x-api-key only (no JWT) should raise 401."""
+        from src.api.deps import get_proxy_caller_id
+        from fastapi import HTTPException
+
+        mock_request = MagicMock()
+        mock_request.client.host = "172.17.0.1"  # Docker gateway
+        mock_request.headers = {"x-api-key": "sk-ant-test-key"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_proxy_caller_id(
+                request=mock_request, credentials=None, db=MagicMock()
+            )
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_jwt_returns_user_id(self):
+        """Valid JWT Bearer token should return user_id."""
+        from src.api.deps import get_proxy_caller_id
+
+        mock_request = MagicMock()
+        mock_request.client.host = "172.17.0.1"
+        mock_request.headers = {}
+
+        mock_credentials = MagicMock()
+        mock_credentials.credentials = "valid-jwt-token"
+
+        with patch("src.api.deps.auth_service") as mock_auth:
+            mock_auth.validate_token = AsyncMock(return_value="user-123")
+
+            result = await get_proxy_caller_id(
+                request=mock_request, credentials=mock_credentials, db=MagicMock()
+            )
+        assert result == "user-123"
+
+    @pytest.mark.asyncio
+    async def test_invalid_jwt_raises_401(self):
+        """Invalid JWT token should raise 401."""
+        from src.api.deps import get_proxy_caller_id
+        from fastapi import HTTPException
+
+        mock_request = MagicMock()
+        mock_request.client.host = "172.17.0.1"
+        mock_request.headers = {}
+
+        mock_credentials = MagicMock()
+        mock_credentials.credentials = "bad-token"
+
+        with patch("src.api.deps.auth_service") as mock_auth:
+            mock_auth.validate_token = AsyncMock(return_value=None)
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_proxy_caller_id(
+                    request=mock_request, credentials=mock_credentials, db=MagicMock()
+                )
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_no_auth_at_all_raises_401(self):
+        """No x-api-key and no JWT should raise 401."""
+        from src.api.deps import get_proxy_caller_id
+        from fastapi import HTTPException
+
+        mock_request = MagicMock()
+        mock_request.client.host = "172.17.0.1"
+        mock_request.headers = {}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_proxy_caller_id(
+                request=mock_request, credentials=None, db=MagicMock()
+            )
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_loopback_without_x_api_key_falls_through_to_jwt(self):
+        """127.0.0.1 without x-api-key should still require JWT."""
+        from src.api.deps import get_proxy_caller_id
+        from fastapi import HTTPException
+
+        mock_request = MagicMock()
+        mock_request.client.host = "127.0.0.1"
+        mock_request.headers = {}  # No x-api-key
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_proxy_caller_id(
+                request=mock_request, credentials=None, db=MagicMock()
+            )
+        assert exc_info.value.status_code == 401
 
 
 class TestGetProxyBaseUrlForModel:
@@ -1390,6 +1629,55 @@ class TestProxyDebugMode:
             # Should not raise
             _save_debug_file("test.json", {"key": "value"})
 
+    def test_save_debug_file_redacts_sensitive_fields(self, tmp_path):
+        """_save_debug_file should redact API keys and tokens."""
+        from src.api.routes.llm_proxy import _save_debug_file
+        import json
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+
+        with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+            _save_debug_file("redact_test.json", {
+                "payload": {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                "headers": {
+                    "Authorization": "Bearer sk-real-secret-key",
+                    "x-api-key": "sk-ant-real-secret",
+                    "Content-Type": "application/json",
+                },
+                "api_key": "sk-should-be-hidden",
+            })
+
+        content = json.loads((test_debug_dir / "redact_test.json").read_text())
+        # Sensitive values should be redacted
+        assert content["headers"]["Authorization"] == "***REDACTED***"
+        assert content["headers"]["x-api-key"] == "***REDACTED***"
+        assert content["api_key"] == "***REDACTED***"
+        # Non-sensitive values should be preserved
+        assert content["headers"]["Content-Type"] == "application/json"
+        assert content["payload"]["model"] == "test-model"
+
+    def test_debug_file_cleanup_enforces_max_files(self, tmp_path):
+        """Cleanup should remove oldest files when exceeding max."""
+        from src.api.routes.llm_proxy import _cleanup_debug_files, DEBUG_MAX_FILES
+        import time
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+        test_debug_dir.mkdir()
+
+        # Create more files than the limit
+        for i in range(DEBUG_MAX_FILES + 10):
+            (test_debug_dir / f"test_{i:04d}.json").write_text("{}")
+            time.sleep(0.001)  # Ensure different mtimes
+
+        with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+            _cleanup_debug_files()
+
+        remaining = list(test_debug_dir.glob("*.json"))
+        assert len(remaining) <= DEBUG_MAX_FILES
+
     @pytest.mark.asyncio
     async def test_debug_mode_saves_request_file(self, tmp_path):
         """Debug mode should save request to in_<uid>.json."""
@@ -1583,3 +1871,84 @@ class TestNonStreamingUsageMapping:
         assert body["usage"]["input_tokens"] == 17077
         assert body["usage"]["output_tokens"] == 78
         assert body["usage"]["cache_read_input_tokens"] == 7808
+
+
+class TestSSRFProtection:
+    """Tests for SSRF protection on provider base_url validation."""
+
+    def test_loopback_ip_rejected(self):
+        """Provider base_url pointing to 127.0.0.1 should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://127.0.0.1:8080/v1", "evil-provider")
+
+    def test_loopback_localhost_rejected(self):
+        """Provider base_url pointing to localhost should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://localhost:8080/v1", "evil-provider")
+
+    def test_private_10_range_rejected(self):
+        """Provider base_url pointing to 10.x.x.x should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://10.0.0.1:8080/v1", "evil-provider")
+
+    def test_private_172_range_rejected(self):
+        """Provider base_url pointing to 172.16.x.x should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://172.16.0.1:8080/v1", "evil-provider")
+
+    def test_private_192_168_range_rejected(self):
+        """Provider base_url pointing to 192.168.x.x should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://192.168.1.1:8080/v1", "evil-provider")
+
+    def test_ipv6_loopback_rejected(self):
+        """Provider base_url pointing to ::1 should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://[::1]:8080/v1", "evil-provider")
+
+    def test_unspecified_address_rejected(self):
+        """Provider base_url pointing to 0.0.0.0 should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://0.0.0.0:8080/v1", "evil-provider")
+
+    def test_public_url_accepted(self):
+        """Provider base_url pointing to public API should be accepted."""
+        from src.api.llm_proxy.config import validate_base_url
+
+        # Should not raise
+        validate_base_url("https://api.openai.com/v1", "openai")
+
+    def test_public_ip_accepted(self):
+        """Provider base_url with public IP should be accepted."""
+        from src.api.llm_proxy.config import validate_base_url
+
+        # 8.8.8.8 is Google's public DNS
+        validate_base_url("http://8.8.8.8:8080/v1", "custom-provider")
+
+    def test_missing_hostname_rejected(self):
+        """Provider base_url without hostname should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="no hostname"):
+            validate_base_url("", "empty-provider")
+
+    def test_link_local_rejected(self):
+        """Provider base_url pointing to link-local address should be rejected."""
+        from src.api.llm_proxy.config import validate_base_url, ProxyConfigError
+
+        with pytest.raises(ProxyConfigError, match="private/internal"):
+            validate_base_url("http://169.254.169.254/latest/meta-data", "cloud-metadata")

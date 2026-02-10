@@ -1,0 +1,583 @@
+/* =============================================================================
+ * UNIFIED POPUP COMPONENT
+ * Reusable modal/dialog/alert component for consistent UX across the app.
+ * ============================================================================= */
+
+.popup-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+  z-index: var(--z-modal);
+  animation: popup-fade-in 0.2s ease-out;
+}
+
+.popup-overlay-transparent {
+  background: transparent;
+  pointer-events: none;
+}
+
+.popup-overlay-transparent .popup-modal {
+  pointer-events: auto;
+}
+
+.popup-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  max-width: 440px;
+  width: 90%;
+  padding: var(--spacing-xl);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: popup-scale-in 0.2s ease-out;
+}
+
+/* Type-specific border colors */
+.popup-error {
+  border-color: var(--color-red);
+}
+
+.popup-success {
+  border-color: var(--color-green);
+}
+
+.popup-warning {
+  border-color: var(--color-yellow);
+}
+
+.popup-info {
+  border-color: var(--color-cyan);
+}
+
+.popup-confirm {
+  border-color: var(--color-blue);
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.popup-title {
+  margin: 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.popup-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.popup-message {
+  margin: 0;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+.popup-details {
+  margin: 0;
+  padding: var(--spacing-md);
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--color-cyan);
+  word-break: break-all;
+}
+
+.popup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.popup-btn {
+  padding: var(--spacing-sm) var(--spacing-xl);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.popup-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.popup-btn-primary {
+  background: var(--color-cyan);
+  color: var(--color-bg-base);
+  border: none;
+}
+
+.popup-btn-primary:hover:not(:disabled) {
+  background: #5fb8c6;
+}
+
+.popup-btn-secondary {
+  background: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.popup-btn-secondary:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-border-hover);
+}
+
+.popup-btn-danger {
+  background: var(--color-red);
+  color: white;
+  border: none;
+}
+
+.popup-btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+@keyframes popup-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes popup-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* =============================================================================
+ * TOAST NOTIFICATION SYSTEM
+ * Stacked notifications at bottom-right corner. Max 3 visible.
+ * ============================================================================= */
+
+.toast-container {
+  position: fixed;
+  bottom: var(--spacing-xl);
+  right: var(--spacing-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  z-index: 10000;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-highest);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 280px;
+  max-width: 400px;
+  pointer-events: auto;
+  position: relative;
+  overflow: hidden;
+}
+
+.toast-enter {
+  animation: toast-slide-in 0.2s ease-out forwards;
+}
+
+.toast-exit {
+  animation: toast-slide-out 0.2s ease-in forwards;
+}
+
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-slide-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+.toast-success {
+  border-left: 3px solid var(--color-green);
+}
+
+.toast-error {
+  border-left: 3px solid var(--color-red);
+}
+
+.toast-warning {
+  border-left: 3px solid var(--color-yellow);
+}
+
+.toast-info {
+  border-left: 3px solid var(--color-cyan);
+}
+
+.toast-message {
+  flex: 1;
+  color: var(--color-text);
+  font-size: var(--font-sm);
+  line-height: 1.4;
+}
+
+.toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-lg);
+  cursor: pointer;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
+  color: var(--color-text);
+}
+
+.toast-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--color-text-muted);
+  opacity: 0.3;
+  animation: toast-progress linear forwards;
+  width: 100%;
+}
+
+@keyframes toast-progress {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
+}
+
+.toast-success .toast-progress {
+  background: var(--color-green);
+}
+
+.toast-error .toast-progress {
+  background: var(--color-red);
+}
+
+.toast-warning .toast-progress {
+  background: var(--color-yellow);
+}
+
+.toast-info .toast-progress {
+  background: var(--color-cyan);
+}
+
+/* =============================================================================
+ * EXAMPLE LIGHT THEME (uncomment to test)
+ * Apply with: document.documentElement.classList.add('theme-light')
+ * ============================================================================= */
+
+/*
+.theme-light {
+  color-scheme: light;
+
+  --color-green: #16a34a;
+  --color-yellow: #ca8a04;
+  --color-red: #dc2626;
+  --color-cyan: #0891b2;
+  --color-magenta: #9333ea;
+  --color-blue: #2563eb;
+  --color-violet: #7c3aed;
+  --color-orange: #ea580c;
+  --color-orange-light: #fb923c;
+
+  --color-text-primary: #1f2937;
+  --color-text-bright: #111827;
+  --color-text-muted: #6b7280;
+
+  --color-bg-base: #ffffff;
+  --color-bg-elevated: #f9fafb;
+  --color-bg-highest: #f3f4f6;
+  --color-bg-user: #f0f9ff;
+  --color-bg-agent: #fefce8;
+  --color-bg-code: #1f2937;
+
+  --color-border-default: #e5e7eb;
+  --color-border-hover: #d1d5db;
+
+  --color-btn-hover-bg: rgba(8, 145, 178, 0.1);
+  --color-btn-hover-bg-error: rgba(220, 38, 38, 0.1);
+  --color-btn-hover-bg-success: rgba(22, 163, 74, 0.1);
+  --color-select-bg: rgba(37, 99, 235, 0.08);
+  --color-badge-bg: rgba(0, 0, 0, 0.05);
+  --color-overlay: rgba(0, 0, 0, 0.5);
+  --color-focus-ring: rgba(8, 145, 178, 0.2);
+}
+*/
+
+/* =============================================================================
+ * SECURITY ALERT TOAST
+ * Red alert popup requiring manual dismissal. Used to notify users when
+ * sensitive data (API keys, tokens, passwords) was detected and redacted.
+ * ============================================================================= */
+
+.security-alert-toast {
+  position: fixed;
+  top: var(--spacing-3xl);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-xl) var(--spacing-2xl);
+  background: var(--color-bg-highest);
+  border: 2px solid var(--color-error);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg), 0 0 20px rgba(220, 38, 38, 0.3);
+  z-index: var(--z-tooltip);
+  animation: security-alert-pulse 0.5s ease-out;
+  max-width: 480px;
+  min-width: 360px;
+}
+
+@keyframes security-alert-pulse {
+  0% {
+    transform: translateX(-50%) scale(0.95);
+    opacity: 0;
+  }
+  50% {
+    transform: translateX(-50%) scale(1.02);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+    opacity: 1;
+  }
+}
+
+.security-alert-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.security-alert-icon {
+  font-size: var(--font-2xl);
+  color: var(--color-error);
+  flex-shrink: 0;
+}
+
+.security-alert-title {
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--color-error);
+  margin: 0;
+}
+
+.security-alert-message {
+  color: var(--color-text-primary);
+  font-size: var(--font-base);
+  line-height: 1.5;
+}
+
+.security-alert-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: rgba(220, 38, 38, 0.05);
+  border-radius: var(--radius-md);
+  font-size: var(--font-sm);
+}
+
+.security-alert-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.security-alert-detail-label {
+  color: var(--color-text-muted);
+}
+
+.security-alert-detail-value {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.security-alert-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+}
+
+.security-alert-type-badge {
+  display: inline-block;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  font-weight: 500;
+}
+
+.security-alert-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.security-alert-dismiss {
+  padding: var(--spacing-sm) var(--spacing-xl);
+  background: var(--color-error);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.security-alert-dismiss:hover {
+  background: #b91c1c;
+}
+
+.security-alert-dismiss:focus {
+  outline: 2px solid var(--color-error);
+  outline-offset: 2px;
+}
+
+/* =============================================================================
+ * ERROR BOUNDARY
+ * ============================================================================= */
+
+.error-boundary-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background-color: var(--color-bg-base);
+  padding: var(--space-md);
+}
+
+.error-boundary-card {
+  background-color: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
+  padding: var(--space-2xl);
+  max-width: 500px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--color-border);
+}
+
+.error-boundary-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--color-error);
+  margin: 0 auto var(--space-md);
+}
+
+.error-boundary-title {
+  color: var(--color-error);
+  font-size: var(--font-2xl);
+  font-weight: 600;
+  margin-bottom: var(--space-xs);
+}
+
+.error-boundary-message {
+  color: var(--color-text-muted);
+  font-size: var(--font-md);
+  margin-bottom: var(--space-md);
+}
+
+.error-boundary-error-box {
+  background-color: var(--color-bg-base);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm);
+  margin-bottom: var(--space-lg);
+  border: 1px solid var(--color-border);
+  overflow: auto;
+  max-height: 100px;
+}
+
+.error-boundary-error-text {
+  color: var(--color-error);
+  font-size: var(--font-sm);
+  word-break: break-word;
+}
+
+.error-boundary-button-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.error-boundary-button {
+  background-color: var(--color-error);
+  color: var(--color-text-bright);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-lg);
+  font-size: var(--font-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.error-boundary-button:hover {
+  opacity: 0.85;
+}
+
+.error-boundary-countdown {
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+}
+
+.error-boundary-hint {
+  color: var(--color-dim);
+  font-size: var(--font-xs);
+}

@@ -94,7 +94,7 @@ export function ToolCallBlock({
 
   return (
     <div className={`tool-call ${statusClass}`}>
-      <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button">
+      <div className="tool-call-header" onClick={hasContent ? onToggle : undefined} role="button" aria-expanded={hasContent ? expanded : undefined} aria-label={`${tool.tool} tool call, status: ${tool.status}`}>
         <span className="tool-tree">{treeChar}</span>
         {isRunning && (
           <span className={`tool-status-icon ${statusClass}`}><PulsingCircleSpinner /></span>
@@ -116,7 +116,7 @@ export function ToolCallBlock({
         )}
       </div>
       {expanded && hasContent && (
-        <div className="tool-call-body">
+        <div className="tool-call-body" role="region" aria-label={`${tool.tool} details`}>
           {tool.thinking && (
             <div className={`tool-thinking ${isRunning ? 'tool-thinking-streaming' : ''}`}>
               {isRunning ? (

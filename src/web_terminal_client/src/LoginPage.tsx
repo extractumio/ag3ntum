@@ -24,17 +24,17 @@ export function LoginPage() {
         </div>
         <p className="login-subtitle">Sign in to continue</p>
 
-        <form onSubmit={handleSubmit} className="login-form">
-          {error && <div className="login-error">{error}</div>}
+        <form onSubmit={handleSubmit} className="login-form" aria-label="Sign in">
+          {error && <div className="login-error" role="alert">{error}</div>}
 
           <div className="form-group">
             <label htmlFor="email">Email</label>
             <input
               id="email"
-              type="text"
+              type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="Enter your username"
+              placeholder="Enter your email"
               required
               disabled={isLoading}
             />

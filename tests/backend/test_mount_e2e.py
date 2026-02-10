@@ -18,10 +18,9 @@ Prerequisites:
 - External mounts configured in external-mounts.yaml
 
 Run these tests:
-    docker exec project-ag3ntum-api-1 pytest tests/backend/test_mount_e2e.py -v --run-e2e -s
+    ./run.sh test --only-e2e
+    ./run.sh test --all
 """
-import json
-import os
 import uuid
 from pathlib import Path
 
@@ -29,41 +28,24 @@ import httpx
 import pytest
 import pytest_asyncio
 
-# API configuration
-API_BASE_URL = "http://127.0.0.1:40080"
-API_V1_URL = f"{API_BASE_URL}/api/v1"
-
-# Test timeout for agent queries (seconds)
-AGENT_TIMEOUT = 120
-
 from tests.constants import (
     PREBUILT_USER_A_USERNAME as TEST_USER_USERNAME,
     PREBUILT_USER_A_EMAIL as TEST_USER_EMAIL,
     PREBUILT_USER_A_PASSWORD as TEST_USER_PASSWORD,
     PREBUILT_USER_A_UID as TEST_USER_UID,
 )
+from tests.backend.e2e_helpers import (
+    API_V1_URL,
+    is_docker_environment,
+    api_accessible,
+    run_agent_task,
+    get_response_text,
+)
+
 TEST_USER_PERSISTENT_DIR = Path(f"/users/{TEST_USER_USERNAME}/ag3ntum/persistent")
 
 # Unique marker per test run to avoid collisions
 TEST_MARKER = f"E2E_TEST_MARKER_{uuid.uuid4().hex[:8]}"
-
-
-def _is_docker_environment() -> bool:
-    """Check if we're running inside Docker."""
-    return Path("/.dockerenv").exists() or os.environ.get("AG3NTUM_IN_DOCKER") == "1"
-
-
-def _api_accessible() -> bool:
-    """Check if API is accessible."""
-    import socket
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex(('127.0.0.1', 40080))
-        sock.close()
-        return result == 0
-    except Exception:
-        return False
 
 
 # =============================================================================
@@ -73,9 +55,9 @@ def _api_accessible() -> bool:
 @pytest.fixture(scope="module")
 def check_environment():
     """Skip all tests if not in proper environment."""
-    if not _is_docker_environment():
+    if not is_docker_environment():
         pytest.skip("Mount E2E tests require Docker environment")
-    if not _api_accessible():
+    if not api_accessible():
         pytest.skip("API not accessible at localhost:40080")
 
 
@@ -85,7 +67,7 @@ def test_user(check_environment) -> dict:
     Return credentials for the pre-built test user.
 
     The user (ag3ntum_tester_a) is created by entrypoint-test.sh with:
-    - Linux account (UID 50000)
+    - Linux account (UID 59990)
     - Database entry with known credentials
     - Python venv
     - Persistent storage directory
@@ -121,7 +103,7 @@ def test_user(check_environment) -> dict:
                 pass
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def auth_token(test_user: dict) -> str:
     """Get JWT token for pre-built test user."""
     async with httpx.AsyncClient(base_url=API_V1_URL, timeout=30.0) as client:
@@ -138,134 +120,6 @@ async def auth_token(test_user: dict) -> str:
         token = response.json()["access_token"]
         print(f"[SETUP] Got auth token for {test_user['email']}")
         return token
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-async def run_agent_task(
-    token: str,
-    task: str,
-    timeout: int = AGENT_TIMEOUT,
-) -> dict:
-    """
-    Run an agent task and wait for completion.
-
-    Returns dict with session_id, status, events, tool_calls, final_message, error.
-    """
-    result = {
-        "session_id": None,
-        "status": "unknown",
-        "events": [],
-        "tool_calls": [],
-        "final_message": "",
-        "error": None,
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{API_V1_URL}/sessions/run",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"task": task},
-        )
-
-        if response.status_code not in (200, 201):
-            result["error"] = f"Failed to start task: {response.status_code} - {response.text}"
-            result["status"] = "failed"
-            return result
-
-        data = response.json()
-        result["session_id"] = data.get("session_id")
-        print(f"    Session: {result['session_id']}")
-
-    # Stream events
-    current_tool = None
-
-    async with httpx.AsyncClient(timeout=float(timeout)) as client:
-        try:
-            async with client.stream(
-                "GET",
-                f"{API_V1_URL}/sessions/{result['session_id']}/events",
-                params={"token": token},
-            ) as response:
-                async for line in response.aiter_lines():
-                    if not line or line.startswith(":"):
-                        continue
-
-                    if line.startswith("data: "):
-                        try:
-                            event = json.loads(line[6:])
-                            result["events"].append(event)
-
-                            event_type = event.get("type")
-                            event_data = event.get("data", {})
-
-                            if event_type == "tool_start":
-                                current_tool = {
-                                    "name": event_data.get("name", "unknown"),
-                                    "input": event_data.get("tool_input", {}),
-                                }
-
-                            elif event_type == "tool_complete":
-                                if current_tool:
-                                    current_tool["result"] = event_data.get("result", "")
-                                    current_tool["error"] = event_data.get("error")
-                                    result["tool_calls"].append(current_tool)
-                                    current_tool = None
-
-                            elif event_type == "message":
-                                text = event_data.get("text", "")
-                                if text and not event_data.get("is_partial"):
-                                    result["final_message"] = text
-
-                            elif event_type == "error":
-                                result["error"] = event_data.get("message", str(event_data))
-                                result["status"] = "error"
-
-                            elif event_type in ("agent_complete", "cancelled"):
-                                result["status"] = event_type
-                                break
-
-                        except json.JSONDecodeError:
-                            pass
-
-        except httpx.ReadTimeout:
-            result["status"] = "timeout"
-            result["error"] = f"Timeout after {timeout}s"
-
-    tools_used = [t["name"] for t in result["tool_calls"]]
-    print(f"    Status: {result['status']}, Tools: {tools_used}")
-    return result
-
-
-def get_response_text(result: dict) -> str:
-    """Extract readable text from agent result."""
-    # Try to extract text from final_message content blocks
-    if result.get("final_message"):
-        msg = result["final_message"]
-        # Handle list of content blocks: [{'type': 'text', 'text': '...'}]
-        if isinstance(msg, list):
-            texts = []
-            for block in msg:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    texts.append(block.get("text", ""))
-            if texts:
-                return "\n".join(texts)
-        return str(msg)
-    # Fall back to tool call results
-    for tool in result.get("tool_calls", []):
-        if tool.get("result"):
-            return str(tool["result"])
-    return ""
-
-
-def find_tool_result(result: dict, tool_name: str) -> str | None:
-    """Find result from a specific tool call."""
-    for tool in result.get("tool_calls", []):
-        if tool_name in tool.get("name", ""):
-            return tool.get("result", "")
-    return None
 
 
 # =============================================================================

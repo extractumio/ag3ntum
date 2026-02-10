@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SSEEvent } from '../../../src/web_terminal_client/src/types';
 
 // =============================================================================
-// SSE Constants and Types (from sse.ts)
+// SSE Constants and Types (matching ConnectionManager.ts and sse.ts)
 // =============================================================================
 
 const INITIAL_RECONNECT_DELAY_MS = 1000;

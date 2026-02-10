@@ -57,8 +57,9 @@ from .permissions import (
     PermissionDenialTracker,
 )
 from .permission_profiles import PermissionManager
-from .sandbox import SandboxConfig, SandboxExecutor
+from .sandbox import SandboxConfig, SandboxExecutor, SandboxMount
 from .subagent_manager import get_subagent_manager
+from .checkpoint_tracker import CheckpointTracker
 
 # Ensure tools directory is in sys.path for ag3ntum imports
 import sys
@@ -128,131 +129,6 @@ def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional
         f"(type={provider.type}) → {proxy_url}"
     )
     return proxy_url
-
-
-class CheckpointTracker:
-    """
-    Tracks checkpoints during agent execution.
-
-    Captures UUIDs from tool result messages and creates checkpoints
-    for file-modifying tools (Write, Edit). Checkpoints are collected
-    in memory and can be retrieved for database persistence.
-    """
-
-    def __init__(
-        self,
-        session_id: str,
-        auto_checkpoint_tools: list[str],
-        enabled: bool = True,
-        initial_turn_count: int = 0
-    ) -> None:
-        """
-        Initialize the checkpoint tracker.
-
-        Args:
-            session_id: The session ID.
-            auto_checkpoint_tools: Tools that trigger auto-checkpoints.
-            enabled: Whether checkpoint tracking is enabled.
-            initial_turn_count: Starting turn number (cumulative from previous runs).
-        """
-        self._session_id = session_id
-        self._auto_checkpoint_tools = auto_checkpoint_tools
-        self._enabled = enabled
-        self._pending_tool_calls: dict[str, dict[str, Any]] = {}
-        self._turn_counter = 0
-        self._initial_turn_count = initial_turn_count
-        self._checkpoints: list[Checkpoint] = []
-
-    @property
-    def checkpoints(self) -> list[Checkpoint]:
-        """Get all checkpoints created during this execution."""
-        return self._checkpoints.copy()
-
-    def track_tool_use(self, tool_use_id: str, tool_name: str, tool_input: dict) -> None:
-        """
-        Track a tool use request for later checkpoint creation.
-
-        Args:
-            tool_use_id: The tool use ID from the SDK.
-            tool_name: Name of the tool being used.
-            tool_input: The tool input parameters.
-        """
-        if not self._enabled:
-            return
-
-        self._pending_tool_calls[tool_use_id] = {
-            "tool_name": tool_name,
-            "file_path": tool_input.get("file_path"),
-        }
-
-    def process_tool_result(self, tool_use_id: str, uuid: Optional[str]) -> Optional[Checkpoint]:
-        """
-        Process a tool result and create a checkpoint if applicable.
-
-        Args:
-            tool_use_id: The tool use ID from the original request.
-            uuid: The UUID from the tool result message.
-
-        Returns:
-            Created Checkpoint if one was created, None otherwise.
-        """
-        if not self._enabled or not uuid:
-            return None
-
-        tool_info = self._pending_tool_calls.pop(tool_use_id, None)
-        if not tool_info:
-            return None
-
-        tool_name = tool_info.get("tool_name")
-        if tool_name not in self._auto_checkpoint_tools:
-            return None
-
-        # Create checkpoint for file-modifying tool
-        self._turn_counter += 1
-        from datetime import datetime
-        checkpoint = Checkpoint(
-            uuid=uuid,
-            created_at=datetime.now(),
-            checkpoint_type=CheckpointType.AUTO,
-            turn_number=self._initial_turn_count + self._turn_counter,
-            tool_name=tool_name,
-            file_path=tool_info.get("file_path"),
-        )
-        self._checkpoints.append(checkpoint)
-        logger.debug(f"Created auto checkpoint: {checkpoint.to_summary()}")
-        return checkpoint
-
-    def process_message(self, message: Any) -> Optional[Checkpoint]:
-        """
-        Process a message and create checkpoints as needed.
-
-        This method extracts tool use and tool result information from
-        SDK messages and creates checkpoints for file-modifying tools.
-
-        Args:
-            message: SDK message to process.
-
-        Returns:
-            Created Checkpoint if one was created, None otherwise.
-        """
-        if not self._enabled:
-            return None
-
-        # Check for AssistantMessage with tool use blocks
-        if hasattr(message, 'content') and isinstance(message.content, list):
-            for block in message.content:
-                # Tool use block - track for later
-                if hasattr(block, 'name') and hasattr(block, 'id'):
-                    tool_input = getattr(block, 'input', {}) or {}
-                    self.track_tool_use(block.id, block.name, tool_input)
-
-                # Tool result block - create checkpoint
-                if hasattr(block, 'tool_use_id') and hasattr(message, 'uuid'):
-                    uuid = getattr(message, 'uuid', None)
-                    if uuid:
-                        return self.process_tool_result(block.tool_use_id, uuid)
-
-        return None
 
 
 # Jinja environment for templates
@@ -484,6 +360,71 @@ class ClaudeAgent:
 
         return mounts_config
 
+    def _load_original_path_mounts_for_prompt(
+        self,
+        username: Optional[str] = None,
+        dynamic_mounts: Optional[list] = None,
+    ) -> list[dict]:
+        """
+        Collect all original-path mount info for the mounts.j2 template.
+
+        Gathers host paths from:
+        1. The original_paths config section
+        2. All standard external mounts (which auto-get original-path support)
+        3. Dynamic mounts (which also auto-get original-path support)
+
+        Returns list of {"path": "/var/log", "mode": "ro", "description": "..."}.
+        """
+        result: list[dict] = []
+        seen_paths: set[str] = set()
+
+        # 1. Original-path mounts from config
+        if username:
+            try:
+                from ..services.mount_service import get_original_path_mount_service
+                orig_service = get_original_path_mount_service()
+                for mount in orig_service.get_mounts_for_user(username):
+                    if mount.path not in seen_paths:
+                        seen_paths.add(mount.path)
+                        result.append({
+                            "path": mount.path,
+                            "mode": mount.mode,
+                            "description": mount.description or "",
+                        })
+            except Exception as e:
+                logger.debug(f"No original-path mounts from config: {e}")
+
+        # 2. Standard external mounts (global + per-user) — all have host paths
+        try:
+            from ..services.mount_service import get_all_mounts_with_host_paths
+            ext_mounts = get_all_mounts_with_host_paths(username)
+            for mode in ("ro", "rw"):
+                for m in ext_mounts.get(mode, []):
+                    hp = m.get("host_path", "")
+                    if hp and hp not in seen_paths:
+                        seen_paths.add(hp)
+                        result.append({
+                            "path": hp,
+                            "mode": mode,
+                            "description": m.get("description", ""),
+                        })
+        except Exception as e:
+            logger.debug(f"No external mount host paths for prompt: {e}")
+
+        # 3. Dynamic mounts
+        if dynamic_mounts:
+            for dm in dynamic_mounts:
+                hp = getattr(dm, "host_path", None) or ""
+                if hp and hp not in seen_paths:
+                    seen_paths.add(hp)
+                    result.append({
+                        "path": hp,
+                        "mode": getattr(dm, "mode", "ro"),
+                        "description": getattr(dm, "description", ""),
+                    })
+
+        return result
+
     def _setup_workspace_skills(
         self,
         session_id: str,
@@ -526,6 +467,11 @@ class ClaudeAgent:
         if skills_target.exists():
             shutil.rmtree(skills_target)
         skills_target.mkdir(parents=True, exist_ok=True)
+
+        # NOTE: .claude/ is owned by the API process (UID 45045) with default
+        # umask permissions. It is intentionally NOT world-readable inside bwrap.
+        # The SDK reads skills from the Docker context (outside bwrap), so the
+        # sandbox user does not need access to .claude/ via Bash.
 
         # Discover merged skills using shared function (global + user, with user overriding)
         skill_sources = discover_merged_skills(username=username)
@@ -711,57 +657,25 @@ class ClaudeAgent:
             sandboxed_envs=sandboxed_envs
         )
 
-        # Inject per-user mounts from external-mounts.yaml config
-        # These are user-specific mounts that are configured at Docker level
-        # via docker-compose.override.yml (generated by run.sh)
-        # The mounts appear at /mounts/user-ro/{name} and /mounts/user-rw/{name} in Docker
+        # Per-user mounts and external mounts are now added after PathValidator
+        # mount loading (see "SECURITY: Mount only authorized mounts" block below)
+        # to avoid loading mount data twice and to ensure consistent path formats.
+
+        # Add bwrap mount for persistent Docker path so workspace symlink resolves
+        # The workspace symlink: ./persistent -> /users/{username}/ag3ntum/persistent
+        # Bwrap must mount the Docker path at the SAME path inside the sandbox,
+        # following the same pattern as external mount symlinks.
+        # (The /persistent mount from permissions.yaml still exists as an alias.)
         if sandbox_config and sandbox_config.enabled and username:
-            from ..services.mount_service import get_user_mounts
-            from .sandbox import SandboxMount
-            added_count = 0
-
-            try:
-                user_mounts = get_user_mounts(username)
-
-                # Per-user RO mounts
-                # IMPORTANT: Mount to SAME PATH as source so workspace symlinks resolve correctly!
-                # Symlinks: ./external/user-ro/{name} -> /mounts/user-ro/{name}
-                # Bwrap must mount /mounts/user-ro/{name} -> /mounts/user-ro/{name}
-                for mount_info in user_mounts.get("ro", []):
-                    name = mount_info["name"]
-                    docker_path = f"/mounts/user-ro/{name}"
-                    # Only add if the Docker mount exists
-                    if Path(docker_path).exists():
-                        sandbox_config.dynamic_mounts.append(SandboxMount(
-                            source=docker_path,
-                            target=docker_path,  # Same path so symlinks work!
-                            mode="ro",
-                            optional=mount_info.get("optional", True),
-                        ))
-                        added_count += 1
-
-                # Per-user RW mounts
-                # IMPORTANT: Mount to SAME PATH as source so workspace symlinks resolve correctly!
-                # Symlinks: ./external/user-rw/{name} -> /mounts/user-rw/{name}
-                # Bwrap must mount /mounts/user-rw/{name} -> /mounts/user-rw/{name}
-                for mount_info in user_mounts.get("rw", []):
-                    name = mount_info["name"]
-                    docker_path = f"/mounts/user-rw/{name}"
-                    # Only add if the Docker mount exists
-                    if Path(docker_path).exists():
-                        sandbox_config.dynamic_mounts.append(SandboxMount(
-                            source=docker_path,
-                            target=docker_path,  # Same path so symlinks work!
-                            mode="rw",
-                            optional=mount_info.get("optional", True),
-                        ))
-                        added_count += 1
-
-                if added_count > 0:
-                    logger.info(f"SANDBOX: Added {added_count} per-user dynamic mounts")
-
-            except Exception as e:
-                logger.warning(f"Failed to load per-user mounts for '{username}': {e}")
+            persistent_docker_path = f"/users/{username}/ag3ntum/persistent"
+            if Path(persistent_docker_path).exists():
+                sandbox_config.dynamic_mounts.append(SandboxMount(
+                    source=persistent_docker_path,
+                    target=persistent_docker_path,  # Same path so symlink works!
+                    mode="rw",
+                    optional=True,
+                ))
+                logger.debug(f"SANDBOX: Added persistent Docker path mount: {persistent_docker_path}")
 
         self._sandbox_system_message = self._format_sandbox_system_message(
             sandbox_config=sandbox_config,
@@ -854,6 +768,45 @@ class ClaudeAgent:
                             user_mounts_rw_paths[name] = mount_path
                 except Exception as e:
                     logger.warning(f"Failed to load per-user mounts for PathValidator: {e}")
+
+            # SECURITY: Mount only authorized mounts individually into bwrap.
+            # Instead of mounting the entire /mounts tree (which exposes ALL
+            # mounts to every user), each authorized mount is added individually.
+            # This prevents cross-user mount visibility via Bash.
+            #
+            # In Docker (nested container mode), the host filesystem is the base
+            # for bwrap. Without --tmpfs /mounts, all Docker volumes at /mounts/
+            # would be visible. The tmpfs creates a clean empty /mounts directory,
+            # then only authorized mounts are bind-mounted into it.
+            if sandbox_config and sandbox_config.enabled:
+                # Create tmpfs at /mounts to hide all Docker mount volumes,
+                # then add only authorized mounts individually below.
+                sandbox_config.tmpfs_paths.append("/mounts")
+
+                bwrap_mount_count = 0
+                all_bwrap_mounts = [
+                    (global_mounts_ro_paths, "ro"),
+                    (global_mounts_rw_paths, "rw"),
+                    (user_mounts_ro_paths, "ro"),
+                    (user_mounts_rw_paths, "rw"),
+                ]
+                for mount_dict, mode in all_bwrap_mounts:
+                    for _name, _mount_path in mount_dict.items():
+                        source = str(_mount_path)
+                        if Path(source).exists():
+                            sandbox_config.dynamic_mounts.append(SandboxMount(
+                                source=source,
+                                target=source,
+                                mode=mode,
+                                optional=True,
+                            ))
+                            bwrap_mount_count += 1
+                        else:
+                            logger.warning(
+                                f"SANDBOX: Skipping mount '{_name}': path {source} does not exist"
+                            )
+                if bwrap_mount_count > 0:
+                    logger.info(f"SANDBOX: Added {bwrap_mount_count} authorized external mounts to bwrap")
 
             # Build dynamic mount paths for PathValidator
             dynamic_mounts_ro_paths: dict[str, Path] = {}
@@ -1564,6 +1517,10 @@ class ClaudeAgent:
                 "external_mounts": self._load_external_mounts_config(username),
                 # Dynamic mounts for this session
                 "dynamic_mounts": dynamic_mounts or [],
+                # Original-path mounts (host paths accessible at original locations)
+                "original_path_mounts": self._load_original_path_mounts_for_prompt(
+                    username, dynamic_mounts
+                ),
             }
 
             try:

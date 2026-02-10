@@ -4,7 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from '
 import App from './App';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ToastProvider } from './components';
-import './styles.css';
+import './styles/index.css';
 
 // Session ID validation: must match backend pattern YYYYMMDD_HHMMSS_8hexchars
 // This prevents XSS, path traversal, and injection attacks via malformed URLs

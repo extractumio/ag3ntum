@@ -1,0 +1,372 @@
+/* =============================================================================
+ * LAYOUT - Terminal App Structure
+ * ============================================================================= */
+
+.terminal-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.terminal-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xl) var(--spacing-4xl);
+  background: var(--color-bg-base);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  z-index: var(--z-sticky);
+  position: relative;
+}
+
+/* Main content area - two columns below header */
+.terminal-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Left column - conversation + input */
+.terminal-left {
+  flex: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Draggable divider between left and right columns */
+.terminal-divider {
+  width: 6px;
+  background: var(--color-border);
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  transition: background var(--transition-fast);
+}
+
+.terminal-divider:hover,
+.terminal-divider.dragging {
+  background: var(--color-accent-primary);
+}
+
+.terminal-divider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 40px;
+  background: var(--color-text-muted);
+  border-radius: 1px;
+  opacity: 0.5;
+}
+
+.terminal-divider:hover::before,
+.terminal-divider.dragging::before {
+  background: var(--color-bg-base);
+  opacity: 1;
+}
+
+/* Prevent text selection while dragging divider */
+.terminal-main.resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+
+/* Right column - details panel or file explorer */
+.terminal-right {
+  min-width: 250px;
+  max-width: 70%;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+  border-left: 1px solid var(--color-border);
+}
+
+/* =============================================================================
+ * RIGHT PANEL - Details/File Explorer tabs
+ * ============================================================================= */
+
+.right-panel-header {
+  display: flex;
+  align-items: center;
+  padding: var(--spacing-sm) var(--spacing-lg);
+  background: var(--color-bg-highest);
+  border-bottom: 1px solid var(--color-border);
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+}
+
+.right-panel-tab {
+  padding: var(--spacing-xs) var(--spacing-lg);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-family: inherit;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+}
+
+.right-panel-tab:hover {
+  color: var(--color-text-primary);
+}
+
+.right-panel-tab.active {
+  background: transparent;
+  border-bottom-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.right-panel-close {
+  margin-left: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-2xs) var(--spacing-sm);
+}
+
+.right-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  background: var(--color-bg-base);
+}
+
+.right-panel-details {
+  padding: var(--spacing-lg);
+}
+
+.right-panel-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.right-panel-actions .filter-button {
+  flex: 1;
+  text-align: center;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--font-xs);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.right-panel-actions .filter-button:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.right-panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  padding: var(--spacing-4xl);
+  text-align: center;
+  gap: var(--spacing-md);
+}
+
+.right-panel-empty::before {
+  content: '◇';
+  font-size: var(--font-3xl);
+  opacity: 0.3;
+}
+
+/* File explorer inside right panel */
+.terminal-right .file-explorer {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+}
+
+/* File explorer options in right panel header */
+.file-explorer-options {
+  padding: var(--spacing-md) var(--spacing-xl);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+
+.file-explorer-options .file-explorer-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+
+.file-explorer-options .file-explorer-hidden-toggle input[type="checkbox"] {
+  accent-color: var(--color-accent-primary);
+}
+
+.header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-2xl);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-lg);
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+  font-size: var(--font-md);
+}
+
+.header-logo-link {
+  display: flex;
+  align-items: center;
+}
+
+.header-logo {
+  height: 28px;
+  width: auto;
+}
+
+.header-divider {
+  color: var(--color-text-muted);
+}
+
+.header-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+}
+
+.logout-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  font-weight: bold;
+  padding: var(--spacing-xs) var(--spacing-md);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition-normal);
+  margin-left: var(--spacing-xs);
+}
+
+.logout-button:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+  background: var(--color-btn-hover-bg-error);
+}
+
+.header-stats {
+  display: flex;
+  gap: var(--spacing-3xl);
+  flex-wrap: wrap;
+  font-size: var(--font-base);
+  color: var(--color-text-muted);
+  align-items: center;
+}
+
+.header-stats strong {
+  color: var(--color-text-bright);
+}
+
+.header-status {
+  display: inline-flex;
+  gap: var(--spacing-md);
+  align-items: center;
+}
+
+.header-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--font-base);
+  flex-wrap: wrap;
+}
+
+.filter-label {
+  color: var(--color-text-muted);
+}
+
+.filter-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  font-weight: bold;
+  padding: 9px 9px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.filter-button.active,
+.filter-button:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.filter-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--spacing-md);
+}
+
+/* Copy icon buttons */
+.copy-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.copy-icon-btn:hover {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.copy-icon-btn.copied {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.copy-icon-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.copy-icon-svg {
+  width: 100%;
+  height: 100%;
+  color: inherit;
+}
+
+.copy-icon-label {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  font-family: inherit;
+}
+

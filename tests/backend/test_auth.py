@@ -6,9 +6,10 @@ Comprehensive coverage of:
 - Response structure validation
 - Authentication protection on endpoints
 - User environment validation
+- Token revocation (logout, change-password)
 """
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -345,3 +346,129 @@ class TestValidateUserEnvironment:
         with patch("src.services.auth_service.USERS_DIR", temp_user_dir.parent):
             # Should not raise
             auth_service.validate_user_environment(temp_user_dir.name)
+
+
+class TestTokenRevocation:
+    """Tests for JWT token revocation via token_version."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @patch.object(AuthService, "validate_user_environment")
+    async def test_token_with_wrong_version_rejected(
+        self, mock_validate_env, test_session: AsyncSession, test_user: dict
+    ) -> None:
+        """Token with outdated version should be rejected."""
+        auth_svc = AuthService()
+        # Generate token with version 0
+        token, _ = auth_svc.generate_token(
+            test_user["id"], test_user["jwt_secret"], token_version=0
+        )
+
+        # Simulate version increment (logout)
+        from sqlalchemy import select
+        from src.db.models import User
+        result = await test_session.execute(
+            select(User).where(User.id == test_user["id"])
+        )
+        user = result.scalar_one()
+        user.token_version = 1
+        await test_session.commit()
+
+        # Token should now be rejected
+        result = await auth_svc.validate_token(token, test_session)
+        assert result is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @patch.object(AuthService, "validate_user_environment")
+    async def test_token_with_current_version_accepted(
+        self, mock_validate_env, test_session: AsyncSession, test_user: dict
+    ) -> None:
+        """Token with matching version should be accepted."""
+        auth_svc = AuthService()
+        token, _ = auth_svc.generate_token(
+            test_user["id"], test_user["jwt_secret"], token_version=0
+        )
+
+        result = await auth_svc.validate_token(token, test_session)
+        assert result == test_user["id"]
+
+    @pytest.mark.unit
+    def test_logout_revokes_tokens(self, client: TestClient, test_user: dict) -> None:
+        """POST /auth/logout should invalidate the token used."""
+        # Login
+        login_resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": test_user["email"], "password": test_user["password"]},
+        )
+        assert login_resp.status_code == 200
+        token = login_resp.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Logout
+        with patch("src.api.routes.auth.check_rate_limit", new_callable=AsyncMock, return_value=True):
+            with patch("src.api.routes.auth.reset_rate_limit", new_callable=AsyncMock):
+                logout_resp = client.post("/api/v1/auth/logout", headers=headers)
+        assert logout_resp.status_code == 200
+
+        # Old token should now be rejected (401 on protected endpoint)
+        me_resp = client.get("/api/v1/auth/me", headers=headers)
+        assert me_resp.status_code == 401
+
+    @pytest.mark.unit
+    def test_change_password_returns_new_token(self, client: TestClient, test_user: dict) -> None:
+        """POST /auth/change-password should return a new valid token."""
+        # Login first
+        login_resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": test_user["email"], "password": test_user["password"]},
+        )
+        token = login_resp.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Change password
+        with patch("src.api.routes.auth.check_rate_limit", new_callable=AsyncMock, return_value=True):
+            with patch("src.api.routes.auth.reset_rate_limit", new_callable=AsyncMock):
+                change_resp = client.post(
+                    "/api/v1/auth/change-password",
+                    headers=headers,
+                    json={
+                        "current_password": test_user["password"],
+                        "new_password": "NewSecurePassword456!",
+                    },
+                )
+        assert change_resp.status_code == 200
+        data = change_resp.json()
+        assert "access_token" in data
+        new_token = data["access_token"]
+
+        # Old token should be invalid
+        me_resp = client.get("/api/v1/auth/me", headers=headers)
+        assert me_resp.status_code == 401
+
+        # New token should work
+        new_headers = {"Authorization": f"Bearer {new_token}"}
+        me_resp = client.get("/api/v1/auth/me", headers=new_headers)
+        assert me_resp.status_code == 200
+
+    @pytest.mark.unit
+    def test_change_password_wrong_current_rejected(self, client: TestClient, test_user: dict) -> None:
+        """Change password with wrong current password should fail."""
+        login_resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": test_user["email"], "password": test_user["password"]},
+        )
+        token = login_resp.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        with patch("src.api.routes.auth.check_rate_limit", new_callable=AsyncMock, return_value=True):
+            with patch("src.api.routes.auth.reset_rate_limit", new_callable=AsyncMock):
+                change_resp = client.post(
+                    "/api/v1/auth/change-password",
+                    headers=headers,
+                    json={
+                        "current_password": "wrongpassword",
+                        "new_password": "NewPassword123!",
+                    },
+                )
+        assert change_resp.status_code == 400

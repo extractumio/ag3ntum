@@ -6,12 +6,13 @@ Provides dependency injection for authentication, database sessions, etc.
 import logging
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.database import get_db
 from ..services.auth_service import auth_service, UserEnvironmentError
+from ..services.connection_token import validate_connection_token
 from ..core.sandbox_path_resolver import (
     configure_sandbox_path_resolver,
     has_sandbox_path_resolver,
@@ -57,6 +58,50 @@ async def get_current_user_id(
         )
 
     return user_id
+
+
+async def get_proxy_caller_id(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme_optional),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """
+    Auth dependency for the LLM proxy endpoint.
+
+    Accepts two authentication methods:
+    1. Loopback requests (127.0.0.1) with x-api-key header → returns "internal-agent"
+       (This is how the Claude Agent SDK authenticates when ANTHROPIC_BASE_URL is set)
+    2. Standard JWT Bearer token → falls back to get_current_user_id logic
+
+    This is needed because the SDK sends x-api-key (Anthropic API auth), not
+    JWT Bearer tokens, when making requests to the proxy endpoint.
+    """
+    client_host = request.client.host if request.client else None
+    x_api_key = request.headers.get("x-api-key")
+
+    # Path 1: Loopback traffic with x-api-key (internal SDK calls)
+    if client_host == "127.0.0.1" and x_api_key:
+        logger.info("LLM Proxy: loopback auth accepted from %s", client_host)
+        return "internal-agent"
+
+    # Path 2: Standard JWT Bearer auth
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+        try:
+            user_id = await auth_service.validate_token(token, db)
+        except UserEnvironmentError as e:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(e),
+            )
+        if user_id:
+            return user_id
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def get_current_user(
@@ -171,6 +216,54 @@ async def get_current_user_id_from_query_or_header(
         )
 
     return user_id
+
+
+async def validate_sse_token(
+    token: Optional[str],
+    authorization: Optional[str],
+    db: AsyncSession,
+) -> str:
+    """Validate an SSE connection token or JWT for SSE/polling endpoints.
+
+    Tries connection token first (preferred, single-use, short-lived),
+    then falls back to JWT validation for backward compatibility.
+
+    Args:
+        token: Query parameter token (connection token or JWT).
+        authorization: Authorization header value.
+        db: Database session for JWT validation.
+
+    Returns:
+        The authenticated user_id.
+
+    Raises:
+        HTTPException: 401 if neither token is valid.
+    """
+    # Extract token from header if not provided as query param
+    actual_token = token
+    if not actual_token and authorization and authorization.lower().startswith("bearer "):
+        actual_token = authorization.split(" ", 1)[1]
+
+    if not actual_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing access token",
+        )
+
+    # Try connection token first (preferred for SSE)
+    user_id = await validate_connection_token(actual_token)
+    if user_id:
+        return user_id
+
+    # Fall back to JWT validation (backward compatibility)
+    user_id = await auth_service.validate_token(actual_token, db)
+    if user_id:
+        return user_id
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired token",
+    )
 
 
 def configure_sandbox_path_resolver_if_needed(

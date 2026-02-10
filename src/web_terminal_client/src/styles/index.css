@@ -1,0 +1,30 @@
+/* =============================================================================
+ * Ag3ntum Web Terminal - CSS Entry Point
+ *
+ * Split from monolithic styles.css into component-scoped files.
+ * Import order matters: variables and base must come first.
+ * ============================================================================= */
+
+/* Foundation: CSS variables (theme system) and base/global styles */
+@import './variables.css';
+@import './base.css';
+
+/* Layout: app structure, right panel */
+@import './layout.css';
+
+/* Components */
+@import './session-selector.css';
+@import './messages.css';
+@import './agent-ui.css';
+@import './input-area.css';
+@import './markdown.css';
+@import './misc-ui.css';
+@import './file-viewer.css';
+@import './file-explorer.css';
+@import './panels.css';
+@import './login.css';
+@import './session-list.css';
+@import './overlays.css';
+
+/* Responsive (media queries) - must come after component styles */
+@import './responsive.css';
