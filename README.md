@@ -216,6 +216,4 @@ Tenant separation is enforced by the Linux kernel, not application logic. Bypass
 
 ---
 
-<p align="center">
-  Built on the <a href="https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/sdk">Claude Code Agent SDK</a>
-</p>
+Built on the <a href="https://platform.claude.com/docs/en/get-started">Claude Code Agent SDK</a>
