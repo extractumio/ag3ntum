@@ -26,6 +26,7 @@ from ...config import load_sandboxed_envs
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/llm-proxy/v1", tags=["llm-proxy"])
+session_router = APIRouter(prefix="/llm-proxy/s/{session_id}/v1", tags=["llm-proxy"])
 
 # Debug directory for saving request/response pairs
 DEBUG_DIR = Path(__file__).resolve().parents[3] / "data" / "llm_proxy_debug"
@@ -64,12 +65,20 @@ def _is_debug_enabled() -> bool:
         return False
 
 
-def _cleanup_debug_files() -> None:
+def _get_debug_dir(session_id: str | None = None) -> Path:
+    """Return the debug directory, optionally scoped to a session."""
+    if session_id:
+        return DEBUG_DIR / session_id
+    return DEBUG_DIR
+
+
+def _cleanup_debug_files(session_id: str | None = None) -> None:
     """Remove oldest debug files if directory exceeds DEBUG_MAX_FILES."""
     try:
-        if not DEBUG_DIR.exists():
+        target_dir = _get_debug_dir(session_id)
+        if not target_dir.exists():
             return
-        files = sorted(DEBUG_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        files = sorted(target_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
         if len(files) > DEBUG_MAX_FILES:
             for f in files[: len(files) - DEBUG_MAX_FILES]:
                 f.unlink(missing_ok=True)
@@ -77,19 +86,25 @@ def _cleanup_debug_files() -> None:
         logger.debug("LLM Proxy debug: cleanup error: %s", e)
 
 
-def _save_debug_file(filename: str, data: dict[str, Any]) -> None:
+def _save_debug_file(
+    filename: str,
+    data: dict[str, Any],
+    session_id: str | None = None,
+) -> None:
     """Save a debug JSON file with sensitive fields redacted.
 
     Caller is responsible for checking debug mode.
+    When session_id is provided, files are saved under data/llm_proxy_debug/<session_id>/.
     """
     try:
-        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        target_dir = _get_debug_dir(session_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
         redacted = _redact_sensitive(data)
         redacted["timestamp"] = datetime.now(timezone.utc).isoformat()
-        filepath = DEBUG_DIR / filename
+        filepath = target_dir / filename
         filepath.write_text(json.dumps(redacted, indent=2, default=str))
         logger.debug("LLM Proxy debug: saved %s", filepath)
-        _cleanup_debug_files()
+        _cleanup_debug_files(session_id)
     except Exception as e:
         logger.warning("LLM Proxy debug: failed to save %s: %s", filename, e)
 
@@ -160,30 +175,68 @@ async def _proxy_anthropic(
     provider_config: Any,
     api_key: str,
     stream: bool,
+    session_id: str | None = None,
 ) -> JSONResponse | StreamingResponse:
     headers = {
         "x-api-key": api_key,
         "anthropic-version": payload.get("anthropic_version", "2023-06-01"),
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        if stream:
-            response = await client.stream(
-                "POST",
-                f"{provider_config.base_url}/v1/messages",
-                headers=headers,
-                json=payload,
-            )
-            return StreamingResponse(
-                response.aiter_bytes(),
-                media_type="text/event-stream",
-                status_code=response.status_code,
-            )
 
+    # Debug: save request payload before forwarding
+    debug_enabled = _is_debug_enabled()
+    request_uid = str(uuid.uuid4())[:8]
+    if debug_enabled:
+        _save_debug_file(f"in_{request_uid}.json", {
+            "request_uid": request_uid,
+            "provider": "anthropic",
+            "target_model": payload.get("model", "unknown"),
+            "stream": stream,
+            "system_prompt_length": len(json.dumps(payload.get("system", ""))),
+            "messages_count": len(payload.get("messages", [])),
+            "payload": payload,
+        }, session_id=session_id)
+
+    if stream:
+        client = httpx.AsyncClient(timeout=120)
+        req = client.build_request(
+            "POST",
+            f"{provider_config.base_url}/v1/messages",
+            headers=headers,
+            json=payload,
+        )
+        response = await client.send(req, stream=True)
+
+        async def stream_and_cleanup() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_and_cleanup(),
+            media_type="text/event-stream",
+            status_code=response.status_code,
+        )
+
+    async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
             f"{provider_config.base_url}/v1/messages",
             headers=headers,
             json=payload,
         )
+
+    if debug_enabled:
+        try:
+            _save_debug_file(f"out_{request_uid}.json", {
+                "request_uid": request_uid,
+                "provider": "anthropic",
+                "is_stream": False,
+                "response": response.json(),
+            }, session_id=session_id)
+        except Exception:
+            pass
 
     return JSONResponse(status_code=response.status_code, content=response.json())
 
@@ -194,6 +247,7 @@ async def _proxy_openai(
     api_key: str,
     target_model: str,
     stream: bool = False,
+    session_id: str | None = None,
 ) -> JSONResponse | StreamingResponse:
     messages = claude_to_openai_messages(payload)
     tools = payload.get("tools") or []
@@ -247,7 +301,7 @@ async def _proxy_openai(
             "request_uid": request_uid,
             "target_model": target_model,
             "payload": body,
-        })
+        }, session_id=session_id)
 
     if stream:
         async def stream_response() -> AsyncIterator[str]:
@@ -271,7 +325,7 @@ async def _proxy_openai(
                     "request_uid": request_uid,
                     "is_stream": True,
                     "translated_chunks": translated_chunks,
-                })
+                }, session_id=session_id)
 
         return StreamingResponse(
             stream_response(),
@@ -295,29 +349,16 @@ async def _proxy_openai(
                 "is_stream": False,
                 "raw_response": raw_response,
                 "translated_response": translated,
-            })
+            }, session_id=session_id)
 
         return JSONResponse(status_code=response.status_code, content=translated)
 
 
-@router.post("/messages/count_tokens", response_model=None)
-async def count_tokens(
+async def _handle_proxy_messages(
     request: Request,
-    caller_id: str = Depends(get_proxy_caller_id),
-) -> JSONResponse:
-    """No-op handler for the SDK's count_tokens call.
-
-    The Claude Agent SDK tries to call this endpoint during initialization.
-    Returning a minimal valid response prevents 404 noise in logs.
-    """
-    return JSONResponse(content={"input_tokens": 0})
-
-
-@router.post("/messages", response_model=None)
-async def proxy_messages(
-    request: Request,
-    user_id: str = Depends(get_proxy_caller_id),
+    session_id: str | None = None,
 ) -> JSONResponse | StreamingResponse:
+    """Core proxy logic shared by both session-scoped and non-session routes."""
     try:
         payload = await request.json()
     except json.JSONDecodeError as exc:
@@ -333,7 +374,7 @@ async def proxy_messages(
             detail="Missing model in request payload",
         )
 
-    logger.info("LLM Proxy: received request for model=%s", model_name)
+    logger.info("LLM Proxy: received request for model=%s (session=%s)", model_name, session_id)
 
     try:
         provider_name, target_model, providers = _resolve_target(model_name)
@@ -358,11 +399,51 @@ async def proxy_messages(
     stream = bool(payload.get("stream"))
 
     if provider_config.type == "anthropic":
-        return await _proxy_anthropic(payload, provider_config, api_key, stream)
+        return await _proxy_anthropic(payload, provider_config, api_key, stream, session_id=session_id)
     if provider_config.type in {"openai", "openai-compatible"}:
-        return await _proxy_openai(payload, provider_config, api_key, target_model, stream)
+        return await _proxy_openai(payload, provider_config, api_key, target_model, stream, session_id=session_id)
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"Unsupported provider type '{provider_config.type}'",
     )
+
+
+# --- Non-session routes (backwards compatibility) ---
+
+@router.post("/messages/count_tokens", response_model=None)
+async def count_tokens(
+    request: Request,
+    caller_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse:
+    """No-op handler for the SDK's count_tokens call."""
+    return JSONResponse(content={"input_tokens": 0})
+
+
+@router.post("/messages", response_model=None)
+async def proxy_messages(
+    request: Request,
+    user_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse | StreamingResponse:
+    return await _handle_proxy_messages(request)
+
+
+# --- Session-scoped routes (debug files organized by session) ---
+
+@session_router.post("/messages/count_tokens", response_model=None)
+async def count_tokens_session(
+    request: Request,
+    session_id: str,
+    caller_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse:
+    """No-op handler for the SDK's count_tokens call (session-scoped)."""
+    return JSONResponse(content={"input_tokens": 0})
+
+
+@session_router.post("/messages", response_model=None)
+async def proxy_messages_session(
+    request: Request,
+    session_id: str,
+    user_id: str = Depends(get_proxy_caller_id),
+) -> JSONResponse | StreamingResponse:
+    return await _handle_proxy_messages(request, session_id=session_id)

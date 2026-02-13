@@ -29,13 +29,13 @@ subagents:
   # general-purpose: Override with security-hardened version
   # ---------------------------------------------------------------------------
   # This replaces Claude Code's built-in general-purpose subagent with
-  # Ag3ntum's security constraints (from modules/security.j2) and tool
-  # policies (from modules/tools.j2).
+  # Ag3ntum's security constraints (from modules/security.md) and tool
+  # policies (from modules/tools.md).
   #
   general-purpose:
     enabled: true
     description: "General-purpose agent for research, code search, and multi-step tasks"
-    prompt_template: "subagents/general-purpose/prompt.j2"
+    prompt_template: "subagents/general-purpose/prompt.md"
     # MCP tools available to this subagent via the ag3ntum server.
     # These tools go through Ag3ntum's security layer (PathValidator, sandbox).
     # IMPORTANT: MCP tool names must be added to parent's all_tools list (see agent_core.py)
@@ -68,7 +68,7 @@ subagents:
   Bash:
     enabled: false
     description: "Disabled - use mcp__ag3ntum__Bash tool directly instead"
-    prompt_template: "subagents/disabled.j2"
+    prompt_template: "subagents/disabled.md"
     tools: []
 
   # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ subagents:
   Explore:
     enabled: true
     description: "Fast, read-only agent for exploring codebases and finding files"
-    prompt_template: "subagents/Explore/prompt.j2"
+    prompt_template: "subagents/Explore/prompt.md"
     # MCP tools for read-only exploration via the ag3ntum server.
     # See general-purpose comment for MCP tool availability.
     tools:
@@ -106,7 +106,7 @@ subagents:
   claude-code-guide:
     enabled: false
     description: "Disabled - Claude Code documentation is not available"
-    prompt_template: "subagents/disabled.j2"
+    prompt_template: "subagents/disabled.md"
     tools: []
 
   # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ subagents:
   statusline-setup:
     enabled: false
     description: "Disabled - Status line configuration is not available"
-    prompt_template: "subagents/disabled.j2"
+    prompt_template: "subagents/disabled.md"
     tools: []
 
   # ---------------------------------------------------------------------------
@@ -130,16 +130,16 @@ subagents:
   # Each subagent should have its own folder under prompts/subagents/:
   #
   #   prompts/subagents/<agent-name>/
-  #   ├── prompt.j2      # Main template (includes other modules)
-  #   ├── identity.j2    # Agent identity and capabilities
-  #   └── output.j2      # Output formatting rules
+  #   ├── prompt.md      # Main template (includes other modules)
+  #   ├── identity.md    # Agent identity and capabilities
+  #   └── output.md      # Output formatting rules
   #
   # Example of a custom research agent:
   #
   # research-agent:
   #   enabled: true
   #   description: "Specialized agent for web research and summarization"
-  #   prompt_template: "subagents/research-agent/prompt.j2"
+  #   prompt_template: "subagents/research-agent/prompt.md"
   #   tools:
   #     - mcp__ag3ntum__WebFetch
   #     - mcp__ag3ntum__Read

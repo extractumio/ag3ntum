@@ -211,8 +211,8 @@ class EventingTracer(TracerBase):
         """
         async def _save():
             try:
-                from ..db.database import AsyncSessionLocal
-                from ..db.models import Session
+                from src.db.database import AsyncSessionLocal
+                from src.db.models import Session
                 from sqlalchemy import select
 
                 async with AsyncSessionLocal() as db:
@@ -625,7 +625,7 @@ class EventingTracer(TracerBase):
         async def run_scan():
             try:
                 # Import here to avoid circular dependencies
-                from ..security import (
+                from src.security import (
                     scan_session_files,
                     is_scanner_enabled,
                 )

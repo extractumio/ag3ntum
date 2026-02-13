@@ -435,6 +435,8 @@ class TraceProcessor:
         self._thinking_emit_interval: float = 1.0  # seconds
         # Track tool errors for session status determination
         self._tool_error_count: int = 0
+        # Track TodoWrite/TodoRead calls (excluded from turn count)
+        self._todo_tool_count: int = 0
         # Circuit breaker for consecutive identical tool failures
         self._circuit_breaker = CircuitBreaker()
         # Pattern detector for unproductive agent loops
@@ -545,6 +547,11 @@ class TraceProcessor:
     def had_tool_errors(self) -> bool:
         """Return True if any tool errors occurred during execution."""
         return self._tool_error_count > 0
+
+    @property
+    def todo_tool_count(self) -> int:
+        """Return the number of TodoWrite/TodoRead calls (excluded from turn count)."""
+        return self._todo_tool_count
 
     @property
     def circuit_breaker_tripped(self) -> bool:
@@ -870,7 +877,11 @@ class TraceProcessor:
                 tool_input=block.input,
                 tool_id=block.id
             )
-            self._metrics_turns += 1
+            # TodoWrite/TodoRead are planning tools — don't count as turns
+            if block.name in ("TodoWrite", "TodoRead"):
+                self._todo_tool_count += 1
+            else:
+                self._metrics_turns += 1
             self._emit_metrics_update()
             self._pattern_detector.current_turn_has_tool_call = True
 

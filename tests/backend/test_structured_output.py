@@ -15,6 +15,7 @@ from src.core.structured_output import (
     normalize_error_value,
     parse_structured_output,
 )
+from src.core.agent_core import determine_session_status
 
 
 class TestNormalizeErrorValue:
@@ -494,3 +495,127 @@ Body"""
 
         assert fields["request_status"] == "COMPLETE"
         assert fields["progress"] == "50%"
+
+
+class TestDetermineSessionStatus:
+    """Tests for determine_session_status — the priority chain for final status.
+
+    Priority:
+    1. Agent's self-assessment from structured header (request_status)
+    2. Fallback heuristic: default to COMPLETE
+    """
+
+    # --- Agent self-assessment takes precedence ---
+
+    @pytest.mark.unit
+    def test_agent_says_complete_no_errors(self) -> None:
+        """Agent says COMPLETE, no tool errors → COMPLETE."""
+        text = "---\nrequest_status: COMPLETE\nrequest_error_message:\n---\nHere is your answer."
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_agent_says_complete_despite_tool_errors(self) -> None:
+        """Agent says COMPLETE even though tools had errors → COMPLETE (agent recovered)."""
+        text = "---\nrequest_status: COMPLETE\nrequest_error_message:\n---\nHere is your answer."
+        assert determine_session_status(text, had_tool_errors=True, tool_error_count=3) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_agent_says_failed(self) -> None:
+        """Agent says FAILED → FAILED."""
+        text = "---\nrequest_status: FAILED\nrequest_error_message: Could not access file\n---\nSorry."
+        assert determine_session_status(text, had_tool_errors=True, tool_error_count=5) == "FAILED"
+
+    @pytest.mark.unit
+    def test_agent_says_partial(self) -> None:
+        """Agent says PARTIAL → PARTIAL."""
+        text = "---\nrequest_status: PARTIAL\nrequest_error_message:\n---\nStill working."
+        assert determine_session_status(text, had_tool_errors=False) == "PARTIAL"
+
+    @pytest.mark.unit
+    def test_agent_says_failed_no_tool_errors(self) -> None:
+        """Agent says FAILED even without tool errors (e.g., can't fulfill request)."""
+        text = "---\nrequest_status: FAILED\nrequest_error_message: I cannot do that\n---\n"
+        assert determine_session_status(text, had_tool_errors=False) == "FAILED"
+
+    # --- Short field names (alias mapping) ---
+
+    @pytest.mark.unit
+    def test_short_status_field_name(self) -> None:
+        """'status' field (short alias) is mapped to request_status."""
+        text = "---\nstatus: COMPLETE\nerror:\n---\nDone."
+        assert determine_session_status(text, had_tool_errors=True, tool_error_count=1) == "COMPLETE"
+
+    # --- Trailing header (common with Haiku) ---
+
+    @pytest.mark.unit
+    def test_trailing_header_complete(self) -> None:
+        """Trailing header (at end of message) is parsed."""
+        text = "Here is the answer.\n---\nstatus: COMPLETE\nerror:\n---"
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_unclosed_trailing_header(self) -> None:
+        """Unclosed trailing header (no closing ---) is parsed."""
+        text = "Done.\n---\nstatus: COMPLETE\nerror:"
+        assert determine_session_status(text, had_tool_errors=True, tool_error_count=2) == "COMPLETE"
+
+    # --- Fallback heuristic (no structured header) ---
+
+    @pytest.mark.unit
+    def test_no_header_no_errors_defaults_complete(self) -> None:
+        """No structured header, no tool errors → COMPLETE."""
+        text = "Here is the answer to your question."
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_no_header_with_errors_defaults_complete(self) -> None:
+        """No structured header but tool errors → COMPLETE (not FAILED).
+
+        An agent that ran to completion without crash/circuit-breaker
+        likely completed its task despite some tool errors along the way.
+        """
+        text = "I completed your request. Some tools had issues but I worked around them."
+        assert determine_session_status(text, had_tool_errors=True, tool_error_count=2) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_none_result_defaults_complete(self) -> None:
+        """None result text → COMPLETE."""
+        assert determine_session_status(None, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_empty_result_defaults_complete(self) -> None:
+        """Empty result text → COMPLETE."""
+        assert determine_session_status("", had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_none_result_with_errors_defaults_complete(self) -> None:
+        """None result text with tool errors → COMPLETE (agent still ran to completion)."""
+        assert determine_session_status(None, had_tool_errors=True, tool_error_count=1) == "COMPLETE"
+
+    # --- Case insensitivity ---
+
+    @pytest.mark.unit
+    def test_lowercase_status_value(self) -> None:
+        """Lowercase status values are normalized to uppercase."""
+        text = "---\nstatus: complete\nerror:\n---\nDone."
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_mixed_case_status_value(self) -> None:
+        """Mixed case status values are normalized."""
+        text = "---\nstatus: Failed\nerror: something broke\n---\nSorry."
+        assert determine_session_status(text, had_tool_errors=True) == "FAILED"
+
+    # --- Invalid status values fall through to heuristic ---
+
+    @pytest.mark.unit
+    def test_invalid_status_value_falls_through(self) -> None:
+        """Invalid status value (not COMPLETE/PARTIAL/FAILED) falls to heuristic."""
+        text = "---\nstatus: DONE\nerror:\n---\nBody."
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"
+
+    @pytest.mark.unit
+    def test_empty_status_value_falls_through(self) -> None:
+        """Empty status value falls through to heuristic."""
+        text = "---\nstatus:\nerror:\n---\nBody."
+        assert determine_session_status(text, had_tool_errors=False) == "COMPLETE"

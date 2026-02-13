@@ -12,13 +12,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
+import uuid as uuid_mod
+
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     SystemMessage,
 )
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from .prompt_manager import get_prompt_manager
+from .prompt_engine import PromptTemplateEngine, PromptContext
 
 # Import paths from central config
 from ..config import (
@@ -60,6 +64,8 @@ from .permission_profiles import PermissionManager
 from .sandbox import SandboxConfig, SandboxExecutor, SandboxMount
 from .subagent_manager import get_subagent_manager
 from .checkpoint_tracker import CheckpointTracker
+from .hooks import create_pre_compact_hook
+from .structured_output import parse_structured_output
 
 # Ensure tools directory is in sys.path for ag3ntum imports
 import sys
@@ -87,7 +93,53 @@ from ..api.llm_proxy.config import load_llm_proxy_config, ProxyConfigError
 logger = logging.getLogger(__name__)
 
 
-def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional[str]:
+def determine_session_status(
+    result_text: Optional[str],
+    had_tool_errors: bool,
+    tool_error_count: int = 0,
+) -> str:
+    """
+    Determine the final session status using a priority chain.
+
+    Priority:
+    1. Agent's self-assessment from structured header (request_status) — primary
+    2. Fallback: default to COMPLETE (agent ran to completion without crash)
+
+    Args:
+        result_text: The agent's final message text (may contain structured header).
+        had_tool_errors: Whether any tool errors occurred during execution.
+        tool_error_count: Number of tool errors (for logging).
+
+    Returns:
+        Status string: "COMPLETE", "PARTIAL", or "FAILED".
+    """
+    if result_text:
+        header_fields, _ = parse_structured_output(result_text)
+        agent_status = header_fields.get("request_status", "").upper()
+        if agent_status in ("COMPLETE", "PARTIAL", "FAILED"):
+            if had_tool_errors:
+                logger.info(
+                    f"Agent self-assessed as {agent_status} despite "
+                    f"{tool_error_count} tool error(s)"
+                )
+            return agent_status
+
+    # No structured header status — fall back to heuristic.
+    # An agent that ran to completion without crash/circuit-breaker/permission-denial
+    # likely completed its task. Default to COMPLETE.
+    if had_tool_errors:
+        logger.warning(
+            f"No agent status header found; "
+            f"{tool_error_count} tool error(s) during execution"
+        )
+    return "COMPLETE"
+
+
+def _get_proxy_base_url_for_model(
+    model: str,
+    api_port: int = 40080,
+    session_id: str | None = None,
+) -> Optional[str]:
     """
     Check if a model requires routing through the LLM proxy.
 
@@ -97,6 +149,7 @@ def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional
     Args:
         model: The model name (e.g., 'openrouter:openai/gpt-5.2').
         api_port: The API server port (default 40080).
+        session_id: Optional session ID for debug file organization.
 
     Returns:
         The proxy base URL if the model needs proxy routing, None otherwise.
@@ -123,7 +176,11 @@ def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional
     # All proxy-defined models go through the proxy, regardless of provider type
     # The proxy handles routing to the appropriate endpoint
     # NOTE: SDK appends "/v1/messages" to base_url, so we use /api/llm-proxy (not /api/llm-proxy/v1)
-    proxy_url = f"http://127.0.0.1:{api_port}/api/llm-proxy"
+    # When session_id is provided, embed it in the URL for session-scoped debug output
+    if session_id:
+        proxy_url = f"http://127.0.0.1:{api_port}/api/llm-proxy/s/{session_id}"
+    else:
+        proxy_url = f"http://127.0.0.1:{api_port}/api/llm-proxy"
     logger.info(
         f"LLM_PROXY: Model '{model}' → provider '{mapping.provider}' "
         f"(type={provider.type}) → {proxy_url}"
@@ -131,30 +188,8 @@ def _get_proxy_base_url_for_model(model: str, api_port: int = 40080) -> Optional
     return proxy_url
 
 
-# Jinja environment for templates
-# Note: select_autoescape only enables autoescape for HTML/XML extensions,
-# which is appropriate for our text-based prompt templates (.j2, .md)
-_jinja_env = Environment(
-    loader=FileSystemLoader(PROMPTS_DIR),
-    trim_blocks=True,
-    lstrip_blocks=True,
-    autoescape=select_autoescape(),
-)
-
-
-def _filter_startswith(items: list[str], prefix: str) -> list[str]:
-    """Jinja2 filter to select strings starting with a prefix."""
-    return [item for item in items if item.startswith(prefix)]
-
-
-def _filter_contains(items: list[str], value: str) -> bool:
-    """Jinja2 filter to check if a list contains a value."""
-    return value in items
-
-
-# Register custom filters
-_jinja_env.filters["select_startswith"] = _filter_startswith
-_jinja_env.filters["contains"] = _filter_contains
+# User prompt template engine (lightweight, for user.md only)
+_user_prompt_engine = PromptTemplateEngine()
 
 
 class ClaudeAgent:
@@ -263,7 +298,7 @@ class ClaudeAgent:
         """
         Load external mounts configuration for template rendering.
 
-        Returns a dict suitable for the mounts.j2 template with structure:
+        Returns a dict suitable for the mounts template with structure:
         {
             "ro": [{"name": "downloads", "description": "..."}],
             "rw": [{"name": "projects", "description": "..."}],
@@ -366,7 +401,7 @@ class ClaudeAgent:
         dynamic_mounts: Optional[list] = None,
     ) -> list[dict]:
         """
-        Collect all original-path mount info for the mounts.j2 template.
+        Collect all original-path mount info for the mounts template.
 
         Gathers host paths from:
         1. The original_paths config section
@@ -1085,10 +1120,20 @@ class ClaudeAgent:
 
         # Check if model needs LLM proxy routing (non-Anthropic models)
         # This sets ANTHROPIC_BASE_URL to route requests through our proxy
-        proxy_base_url = _get_proxy_base_url_for_model(self._config.base_model)
+        # session_id is embedded in the URL for session-scoped debug output
+        proxy_base_url = _get_proxy_base_url_for_model(
+            self._config.base_model,
+            session_id=session_context.session_id,
+        )
         if proxy_base_url:
             env_vars["ANTHROPIC_BASE_URL"] = proxy_base_url
             logger.info(f"LLM_PROXY: Routing model '{self._config.base_model}' via {proxy_base_url}")
+
+        # Build hooks configuration
+        # PreCompact: logs when context compaction is triggered for diagnostics
+        hooks_config: dict[str, list] = {}
+        pre_compact_hook = create_pre_compact_hook(hook_logger=logger)
+        hooks_config["PreCompact"] = [HookMatcher(hooks=[pre_compact_hook])]
 
         logger.info(
             f"SANDBOX: Final ClaudeAgentOptions - "
@@ -1103,6 +1148,10 @@ class ClaudeAgent:
             f"agents={list(agents.keys()) if agents else 'none'}, "
             f"thinking={'ENABLED (' + str(thinking_tokens) + ' tokens)' if thinking_tokens else 'DISABLED'}"
         )
+
+        # Capture SDK stderr for debugging (especially exit code 1 on resume)
+        def _sdk_stderr_callback(line: str) -> None:
+            logger.debug("SDK_STDERR: %s", line.rstrip())
 
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
@@ -1125,6 +1174,8 @@ class ClaudeAgent:
             output_format=self._config.output_format,
             include_partial_messages=self._config.include_partial_messages,
             agents=agents if agents else None,  # Subagent overrides (global singleton)
+            hooks=hooks_config if hooks_config else None,  # SDK hooks (PreCompact, etc.)
+            stderr=_sdk_stderr_callback,  # Capture SDK process stderr for debugging
         )
 
     def _build_user_prompt(
@@ -1152,11 +1203,11 @@ class ClaudeAgent:
             raise AgentError("Task is required and must not be empty")
 
         # Validate user prompt template exists
-        user_template_path = PROMPTS_DIR / "user.j2"
+        user_template_path = PROMPTS_DIR / "user.md"
         if not user_template_path.exists():
             raise AgentError(
-                f"User prompt template not found: {user_template_path}\n"
-                f"Create the template file in AGENT/prompts/user.j2"
+                f"User prompt template not found in: {PROMPTS_DIR}\n"
+                f"Create the template file in AGENT/prompts/user.md"
             )
 
         params = parameters or {}
@@ -1164,10 +1215,15 @@ class ClaudeAgent:
             session_context.session_id
         )
         try:
-            user_prompt = _jinja_env.get_template("user.j2").render(
-                task=task,
-                working_dir=self._config.working_dir or str(workspace_dir),
-                **params,
+            # Build context for user prompt rendering
+            user_context = PromptContext()
+            user_context.strings["TASK"] = task
+            user_context.strings["WORKING_DIR"] = self._config.working_dir or str(workspace_dir)
+            if params.get("context"):
+                user_context.strings["CONTEXT"] = params["context"]
+            user_context.flags["HAS_CONTEXT"] = bool(params.get("context"))
+            user_prompt = _user_prompt_engine.load_and_render(
+                user_template_path, user_context
             )
         except Exception as e:
             raise AgentError(f"Failed to render user prompt template: {e}") from e
@@ -1320,7 +1376,7 @@ class ClaudeAgent:
 
         Args:
             task: The task description.
-            system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
+            system_prompt: Custom system prompt. If None, loads from prompts/system-prompts/.
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional, for logging - use session_context.claude_session_id).
             fork_session: If True, fork to new session when resuming (optional).
@@ -1368,7 +1424,7 @@ class ClaudeAgent:
 
         Args:
             task: The task description.
-            system_prompt: Custom system prompt. If None, loads from prompts/system.j2.
+            system_prompt: Custom system prompt. If None, loads from prompts/system-prompts/.
             parameters: Additional template parameters (optional).
             resume_session_id: Session ID to resume (optional, for logging only - use session_context.claude_session_id).
             fork_session: If True, fork to new session when resuming (optional).
@@ -1434,13 +1490,6 @@ class ClaudeAgent:
         # Load system prompt from template if not provided
         # Done after session creation so permissions reflect session-specific rules
         if system_prompt is None:
-            system_template_path = PROMPTS_DIR / "system.j2"
-            if not system_template_path.exists():
-                raise AgentError(
-                    f"System prompt template not found: {system_template_path}\n"
-                    f"Create the template file in AGENT/prompts/system.j2"
-                )
-
             # Build permission profile data for the template
             # Now includes session-specific paths after set_session_context()
             permissions_data = None
@@ -1484,51 +1533,29 @@ class ClaudeAgent:
                 session_context.session_id
             )
 
-            # Load role content from role template file (fail-fast if missing)
             # Custom role can be specified via parameters["role"] to override config
             params = parameters or {}
             role_name = params.get("role", self._config.role)
-            role_file = PROMPTS_DIR / "roles" / f"{role_name}.md"
-            if not role_file.exists():
-                raise AgentError(
-                    f"Role file not found: {role_file}\n"
-                    f"Create the role file in AGENT/prompts/roles/{role_name}.md"
-                )
-            try:
-                role_content = role_file.read_text(encoding="utf-8").strip()
-            except IOError as e:
-                raise AgentError(f"Failed to read role file {role_file}: {e}") from e
-
-            # Build template context with all dynamic values
-            template_context = {
-                # Environment info
-                "current_date": datetime.now().strftime("%A, %B %d, %Y"),
-                "model": self._config.model,
-                "session_id": session_context.session_id,
-                "workspace_path": str(workspace_dir),
-                "working_dir": self._config.working_dir or str(workspace_dir),
-                # Role
-                "role_content": role_content,
-                # Permissions
-                "permissions": permissions_data,
-                # Skills (SDK handles discovery via setting_sources)
-                "enable_skills": self._config.enable_skills,
-                # External mounts configuration
-                "external_mounts": self._load_external_mounts_config(username),
-                # Dynamic mounts for this session
-                "dynamic_mounts": dynamic_mounts or [],
-                # Original-path mounts (host paths accessible at original locations)
-                "original_path_mounts": self._load_original_path_mounts_for_prompt(
-                    username, dynamic_mounts
-                ),
-            }
 
             try:
-                system_prompt = _jinja_env.get_template("system.j2").render(
-                    **template_context
+                system_prompt = get_prompt_manager().build_system_prompt(
+                    username=username,
+                    role=role_name,
+                    model=self._config.model,
+                    session_id=session_context.session_id,
+                    docker_workspace_path=str(workspace_dir),
+                    permissions=permissions_data,
+                    enable_skills=self._config.enable_skills,
+                    external_mounts=self._load_external_mounts_config(username),
+                    dynamic_mounts=dynamic_mounts or [],
+                    original_path_mounts=self._load_original_path_mounts_for_prompt(
+                        username, dynamic_mounts
+                    ),
                 )
+            except FileNotFoundError as e:
+                raise AgentError(str(e)) from e
             except Exception as e:
-                raise AgentError(f"Failed to render system prompt template: {e}") from e
+                raise AgentError(f"Failed to render system prompt: {e}") from e
 
         # Validate system prompt is not empty
         if not system_prompt or not system_prompt.strip():
@@ -1631,6 +1658,31 @@ class ClaudeAgent:
                         if isinstance(message, ResultMessage):
                             result = message
 
+            # Persist conversation data to project JSONL for --resume support.
+            # In SDK mode, the binary doesn't write conversations to project files,
+            # so we must write them ourselves for resume to find them.
+            if result and getattr(result, "session_id", None):
+                _session_dir = self._session_manager.get_session_dir(
+                    session_context.session_id
+                )
+                _workspace_dir = self._session_manager.get_workspace_dir(
+                    session_context.session_id
+                )
+                _persist_conversation_for_resume(
+                    session_dir=_session_dir,
+                    workspace_dir=_workspace_dir,
+                    claude_session_id=result.session_id,
+                    user_prompt=user_prompt,
+                    result_text=result.result,
+                    model=self._config.model,
+                )
+
+            # Compute adjusted turn count: exclude TodoWrite/TodoRead from metrics
+            # These are planning tools that shouldn't count against the turn budget
+            _todo_count = trace_processor.todo_tool_count
+            def _adjusted_turns(raw_turns: int) -> int:
+                return max(0, raw_turns - _todo_count)
+
             # Check if circuit breaker was tripped
             if trace_processor.circuit_breaker_tripped:
                 error_msg = trace_processor.circuit_breaker_message
@@ -1647,7 +1699,7 @@ class ClaudeAgent:
                 # Emit completion so the UI can close the stream deterministically
                 self._tracer.on_agent_complete(
                     status="FAILED",
-                    num_turns=result.num_turns if result else 0,
+                    num_turns=_adjusted_turns(result.num_turns) if result else 0,
                     duration_ms=result.duration_ms if result else 0,
                     total_cost_usd=result.total_cost_usd if result else None,
                     result=error_msg,
@@ -1665,7 +1717,7 @@ class ClaudeAgent:
                     metrics=LLMMetrics(
                         model=self._config.model,
                         duration_ms=result.duration_ms if result else 0,
-                        num_turns=result.num_turns if result else 0,
+                        num_turns=_adjusted_turns(result.num_turns) if result else 0,
                         session_id=result.session_id if result else None,
                         total_cost_usd=result.total_cost_usd if result else None,
                         usage=usage,
@@ -1696,7 +1748,7 @@ class ClaudeAgent:
                 if result:
                     self._tracer.on_agent_complete(
                         status="FAILED",
-                        num_turns=result.num_turns,
+                        num_turns=_adjusted_turns(result.num_turns),
                         duration_ms=result.duration_ms,
                         total_cost_usd=result.total_cost_usd,
                         result=result.result,
@@ -1714,7 +1766,7 @@ class ClaudeAgent:
                     metrics=LLMMetrics(
                         model=self._config.model,
                         duration_ms=result.duration_ms if result else 0,
-                        num_turns=result.num_turns if result else 0,
+                        num_turns=_adjusted_turns(result.num_turns) if result else 0,
                         session_id=result.session_id if result else None,
                         total_cost_usd=result.total_cost_usd if result else None,
                         usage=usage,
@@ -1732,13 +1784,13 @@ class ClaudeAgent:
                 usage = TokenUsage.from_sdk_usage(result.usage)
                 # Note: Session update is now handled by caller via AgentResult.metrics
 
-            # Determine status based on tool errors during execution
-            # If any tool returned is_error=True, mark the session as FAILED
-            # (even though the agent completed, tool failures mean the task wasn't fully accomplished)
-            if trace_processor.had_tool_errors():
-                raw_status = "FAILED"
-            else:
-                raw_status = "COMPLETE"
+            # Determine session status using priority chain:
+            # agent self-assessment > fallback heuristic
+            raw_status = determine_session_status(
+                result_text=result.result if result else None,
+                had_tool_errors=trace_processor.had_tool_errors(),
+                tool_error_count=trace_processor.tool_error_count,
+            )
 
             # Finalize any orphaned subagents before emitting completion
             trace_processor.finalize_orphaned_subagents()
@@ -1747,7 +1799,7 @@ class ClaudeAgent:
             if result:
                 self._tracer.on_agent_complete(
                     status=raw_status,
-                    num_turns=result.num_turns,
+                    num_turns=_adjusted_turns(result.num_turns),
                     duration_ms=result.duration_ms,
                     total_cost_usd=result.total_cost_usd,
                     result=result.result,
@@ -1765,7 +1817,7 @@ class ClaudeAgent:
                 metrics=LLMMetrics(
                     model=self._config.model,
                     duration_ms=result.duration_ms,
-                    num_turns=result.num_turns,
+                    num_turns=_adjusted_turns(result.num_turns),
                     session_id=result.session_id,
                     total_cost_usd=result.total_cost_usd,
                     usage=usage,
@@ -2036,6 +2088,125 @@ class ClaudeAgent:
             f"[{i}] {cp.to_summary()}"
             for i, cp in enumerate(checkpoints)
         ]
+
+
+def _persist_conversation_for_resume(
+    session_dir: Path,
+    workspace_dir: Path,
+    claude_session_id: str,
+    user_prompt: str,
+    result_text: Optional[str],
+    model: str,
+) -> None:
+    """
+    Write conversation data to the Claude Code project JSONL file.
+
+    In SDK mode (--output-format stream-json), the Claude Code binary does NOT
+    persist conversation messages to its project JSONL files — only metadata
+    (queue-operation, file-history-snapshot). When --resume is used for a
+    subsequent request, the binary searches these files for conversation data
+    and fails with "No conversation found" if none exists.
+
+    This function writes the user prompt and assistant response to the project
+    file in the format the binary expects, enabling successful resume.
+
+    Args:
+        session_dir: The session directory (CLAUDE_CONFIG_DIR).
+        workspace_dir: The workspace directory (cwd for the agent).
+        claude_session_id: The Claude session ID from the SDK.
+        user_prompt: The user's prompt text.
+        result_text: The assistant's response text (may be None on error).
+        model: The model name used.
+    """
+    try:
+        # Compute project slug from workspace path (same algorithm as Claude Code binary)
+        # Binary replaces both "/" and "_" with "-" and keeps leading "-"
+        # e.g., /users/greg/sessions/20260212_213024_c37241ab/workspace
+        #     → -users-greg-sessions-20260212-213024-c37241ab-workspace
+        slug = str(workspace_dir).replace("/", "-").replace("_", "-")
+        project_dir = session_dir / "projects" / slug
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        project_file = project_dir / f"{claude_session_id}.jsonl"
+
+        from datetime import timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        user_uuid = str(uuid_mod.uuid4())
+        assistant_uuid = str(uuid_mod.uuid4())
+        cwd = str(workspace_dir)
+
+        # Find parentUuid for the user message by reading the last assistant entry
+        parent_uuid = None
+        if project_file.exists():
+            try:
+                with project_file.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("type") == "assistant" and entry.get("uuid"):
+                                parent_uuid = entry["uuid"]
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                parent_uuid = None
+
+        entries = []
+
+        # User message
+        entries.append({
+            "parentUuid": parent_uuid,
+            "isSidechain": False,
+            "userType": "external",
+            "cwd": cwd,
+            "sessionId": claude_session_id,
+            "type": "user",
+            "message": {"role": "user", "content": user_prompt},
+            "uuid": user_uuid,
+            "timestamp": now,
+            "permissionMode": "default",
+        })
+
+        # Assistant message
+        content_blocks = []
+        if result_text:
+            content_blocks.append({"type": "text", "text": result_text})
+
+        entries.append({
+            "parentUuid": user_uuid,
+            "isSidechain": False,
+            "userType": "external",
+            "cwd": cwd,
+            "sessionId": claude_session_id,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": content_blocks,
+                "model": model,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+            },
+            "uuid": assistant_uuid,
+            "timestamp": now,
+        })
+
+        # Append to project file (preserves binary's queue-operation entries)
+        with project_file.open("a", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+        logger.debug(
+            "Persisted conversation for resume: session=%s, file=%s, entries=%d",
+            claude_session_id, project_file, len(entries),
+        )
+    except Exception as e:
+        # Non-fatal: resume may fail but current request succeeded
+        logger.warning(
+            "Failed to persist conversation for resume (session=%s): %s",
+            claude_session_id, e,
+        )
 
 
 async def run_agent(

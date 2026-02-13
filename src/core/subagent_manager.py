@@ -12,8 +12,8 @@ API startup. The same instance is shared across ALL users and ALL sessions.
 
 Why Singleton?
 --------------
-1. **Performance**: Jinja2 templates are rendered once at startup, not on
-   every request. This avoids repeated file I/O and template compilation.
+1. **Performance**: Templates are rendered once at startup, not on
+   every request. This avoids repeated file I/O and template rendering.
 
 2. **Consistency**: All users receive the same security-hardened subagent
    definitions. There's no per-user variation in security constraints.
@@ -66,12 +66,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # Import SDK's AgentDefinition for proper typing
 from claude_agent_sdk.types import AgentDefinition as SDKAgentDefinition
 
 from ..config import CONFIG_DIR, PROMPTS_DIR
+from .prompt_manager import get_prompt_manager
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,6 @@ class SubagentManager:
     Attributes:
         _instance: Class-level singleton instance (None until first access)
         _config_path: Path to subagents.yaml configuration file
-        _jinja_env: Jinja2 environment for template rendering
         _definitions: Dict mapping subagent names to their definitions
         _loaded: Flag indicating whether configuration has been loaded
     """
@@ -163,12 +162,6 @@ class SubagentManager:
         get_subagent_manager() to access the singleton.
         """
         self._config_path = CONFIG_DIR / "subagents.yaml"
-        self._jinja_env = Environment(
-            loader=FileSystemLoader(PROMPTS_DIR),
-            trim_blocks=True,
-            lstrip_blocks=True,
-            autoescape=select_autoescape(),
-        )
         self._definitions: dict[str, SubagentDefinition] = {}
         self._loaded = False
 
@@ -224,7 +217,7 @@ class SubagentManager:
 
         This method:
         1. Reads config/subagents.yaml
-        2. For each subagent, renders its Jinja2 prompt template
+        2. For each subagent, renders its prompt template via PromptManager
         3. Stores the rendered SubagentDefinition for later use
 
         Called automatically by get_instance() on first access. Can be called
@@ -277,10 +270,8 @@ class SubagentManager:
         prompt_template = config.get("prompt_template")
         if prompt_template:
             try:
-                template = self._jinja_env.get_template(prompt_template)
-                # Render with minimal context (subagents don't get full session context)
-                prompt = template.render(
-                    enable_skills=True,  # Enable skills section in template
+                prompt = get_prompt_manager().render_subagent_prompt(
+                    template_path=prompt_template,
                 )
             except Exception as e:
                 logger.error(

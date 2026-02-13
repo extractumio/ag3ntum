@@ -395,8 +395,8 @@ shell_evasion:
     action: block
     exploit: "ruby -e 'system(\"kill -9 147\")'"
   
-  # Eval/exec in shell
-  - pattern: '(?:^|[\s;&|`$()])\s*eval\s+[''"]?\$'
+  # Eval/exec in shell — block eval with ANY argument (eval re-parses as shell code)
+  - pattern: '(?:^|[\s;&|`$()])\s*eval\s+'
     action: block
     exploit: "eval \"$cmd\""
   

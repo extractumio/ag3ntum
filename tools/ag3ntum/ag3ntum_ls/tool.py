@@ -27,6 +27,36 @@ AG3NTUM_LS_TOOL: str = "mcp__ag3ntum__LS"
 MAX_ENTRIES: int = 1000
 
 
+def _format_sandbox_root_listing(entries: list[tuple[str, str, str]]) -> dict[str, Any]:
+    """Format a virtual sandbox root listing for display."""
+    formatted: list[str] = []
+    for display_path, mode, description in entries:
+        mode_str = "rw" if mode == "rw" else "ro"
+        formatted.append(f"📁 {display_path}/  [{mode_str}] {description}")
+    formatted.sort(key=lambda x: x.lower())
+
+    header = "**Contents of `/` (sandbox root)**\n\n"
+    header += "_Virtual listing — shows available paths in the sandboxed environment._\n"
+    return _result(header + f"\n```\n{chr(10).join(formatted)}\n```")
+
+
+def _format_virtual_children_listing(
+    parent_path: str, children: list[tuple[str, str, str]]
+) -> dict[str, Any]:
+    """Format a virtual listing for a mount-parent directory."""
+    formatted: list[str] = []
+    for child_name, mode, description in children:
+        mode_str = "rw" if mode == "rw" else "ro"
+        formatted.append(f"📁 {child_name}/  [{mode_str}] {description}")
+    formatted.sort(key=lambda x: x.lower())
+
+    header = f"**Contents of `{parent_path}` (virtual)**\n\n"
+    header += (
+        f"_This directory is not directly mounted but contains mounted subdirectories._\n"
+    )
+    return _result(header + f"\n```\n{chr(10).join(formatted)}\n```")
+
+
 async def _ls_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     """Core ls implementation - testable without MCP tool wrapper."""
     dir_path = args.get("path", ".")
@@ -39,6 +69,28 @@ async def _ls_impl(args: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     except RuntimeError as e:
         logger.error(f"Ag3ntumLS: PathValidator not configured - {e}")
         return _error(f"Internal error: {e}")
+
+    # Handle sandbox root listing: synthesize virtual directory view
+    # instead of exposing Docker container internals.
+    normalized_dir = dir_path.strip()
+    if normalized_dir in ("/", "/.", "/."):
+        entries = validator.get_sandbox_root_entries()
+        logger.info("Ag3ntumLS: Returning virtual sandbox root listing")
+        return _format_sandbox_root_listing(entries)
+
+    # Handle intermediate mount-parent paths (e.g., /var when /var/log is mounted)
+    # These paths aren't mounts themselves but contain mounted subdirectories.
+    if normalized_dir.startswith("/") and not normalized_dir.startswith("/workspace"):
+        children = validator.find_virtual_children(normalized_dir)
+        if children is not None:
+            # Check if this path is also a real mount — if so, list it normally
+            mount = validator._find_original_path_mount(normalized_dir)
+            if mount is None:
+                # Not a real mount, but has child mounts — show virtual listing
+                logger.info(
+                    f"Ag3ntumLS: Returning virtual children for {normalized_dir}"
+                )
+                return _format_virtual_children_listing(normalized_dir, children)
 
     # Validate path
     try:

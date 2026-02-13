@@ -33,6 +33,7 @@ from tools.ag3ntum.ag3ntum_ls.tool import (
     MAX_ENTRIES as LS_MAX_ENTRIES,
     _format_size,
 )
+from src.core.path_validator import PathValidationError
 
 
 # ============================================================================
@@ -613,6 +614,224 @@ class TestLSBrokenSymlinks:
         text = result["content"][0]["text"]
         assert "valid_link" in text
         assert "broken_link" not in text
+
+
+class TestLSVirtualRootListing:
+    """Tests for LS virtual root listing (LS /)."""
+
+    @pytest.fixture
+    def mock_validator_with_mounts(self, tmp_path):
+        """Create a mock validator with mount data for virtual root tests."""
+        validator = MagicMock()
+        validator.workspace = tmp_path
+        validator.persistent = tmp_path / "persistent"
+        validator.global_skills = Path("/skills")
+        validator.user_skills = Path("/user-skills")
+        validator.original_path_mounts_ro = {"/var/log": Path("/mounts/paths/_var_log")}
+        validator.original_path_mounts_rw = {}
+
+        # Set up get_sandbox_root_entries to return realistic entries
+        validator.get_sandbox_root_entries.return_value = [
+            ("/workspace", "rw", "Session workspace (working directory)"),
+            ("/persistent", "rw", "Persistent storage (cross-session)"),
+            ("/venv", "ro", "Python virtual environment"),
+            ("/skills", "ro", "Global skills"),
+            ("/user-skills", "ro", "User skills"),
+            ("/var/log", "ro", "Mounted from host (read-only)"),
+        ]
+
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_ls_root_returns_virtual_listing(self, mock_validator_with_mounts):
+        """LS / should return a virtual sandbox root listing."""
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator',
+                   return_value=mock_validator_with_mounts):
+            result = await _ls_impl({"path": "/"}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "sandbox root" in text
+        assert "/workspace/" in text
+        assert "/persistent/" in text
+        assert "/venv/" in text
+        assert "/skills/" in text
+        assert "/var/log/" in text
+
+    @pytest.mark.asyncio
+    async def test_ls_root_slash_dot_returns_virtual_listing(self, mock_validator_with_mounts):
+        """LS /. should also return a virtual sandbox root listing."""
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator',
+                   return_value=mock_validator_with_mounts):
+            result = await _ls_impl({"path": "/."}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "sandbox root" in text
+
+    @pytest.mark.asyncio
+    async def test_ls_root_shows_access_modes(self, mock_validator_with_mounts):
+        """LS / should show access modes (ro/rw) for each entry."""
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator',
+                   return_value=mock_validator_with_mounts):
+            result = await _ls_impl({"path": "/"}, session_id="test-session")
+
+        text = result["content"][0]["text"]
+        # workspace should be rw
+        assert "[rw]" in text
+        # skills should be ro
+        assert "[ro]" in text
+
+
+class TestLSVirtualIntermediatePaths:
+    """Tests for LS on intermediate mount-parent paths (e.g., /var when /var/log is mounted)."""
+
+    @pytest.fixture
+    def mock_validator_with_intermediate(self, tmp_path):
+        """Create a mock validator where /var/log is a mount but /var is not."""
+        validator = MagicMock()
+        validator.workspace = tmp_path
+        # /var/log is a mount, but /var is not
+        validator.original_path_mounts_ro = {"/var/log": Path("/mounts/paths/_var_log")}
+        validator.original_path_mounts_rw = {}
+        validator._find_original_path_mount.return_value = None
+
+        validator.find_virtual_children.return_value = [
+            ("log", "ro", "Contains mount: /var/log"),
+        ]
+
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_ls_intermediate_path_shows_children(self, mock_validator_with_intermediate):
+        """LS /var should show virtual children when /var/log is mounted."""
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator',
+                   return_value=mock_validator_with_intermediate):
+            result = await _ls_impl({"path": "/var"}, session_id="test-session")
+
+        assert "is_error" not in result or not result["is_error"]
+        text = result["content"][0]["text"]
+        assert "log/" in text
+        assert "virtual" in text.lower()
+
+    @pytest.fixture
+    def mock_validator_no_children(self, tmp_path):
+        """Create a mock validator where no mounts exist under /foo."""
+        validator = MagicMock()
+        validator.workspace = tmp_path
+        validator.original_path_mounts_ro = {}
+        validator.original_path_mounts_rw = {}
+        validator._find_original_path_mount.return_value = None
+        validator.find_virtual_children.return_value = None
+
+        # Set up validate_path to raise PathValidationError
+        validator.validate_path.side_effect = PathValidationError(
+            "Path outside allowed directories: /foo",
+            path="/foo",
+            reason="Path must be within workspace, skills, or external mount directories",
+        )
+        return validator
+
+    @pytest.mark.asyncio
+    async def test_ls_unrecognized_absolute_path_blocked(self, mock_validator_no_children):
+        """LS /foo (not a mount, no children) should return an error."""
+        with patch('tools.ag3ntum.ag3ntum_ls.tool.get_path_validator',
+                   return_value=mock_validator_no_children):
+            result = await _ls_impl({"path": "/foo"}, session_id="test-session")
+
+        assert result.get("is_error", False)
+        text = result["content"][0]["text"]
+        assert "Error" in text
+
+
+class TestPathValidatorSandboxView:
+    """Tests for PathValidator.get_sandbox_root_entries() and find_virtual_children()."""
+
+    @pytest.fixture
+    def validator(self, tmp_path):
+        """Create a real PathValidator with mount data."""
+        from src.core.path_validator import Ag3ntumPathValidator, PathValidatorConfig
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        persistent = tmp_path / "persistent"
+        persistent.mkdir()
+
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            global_skills_path=Path("/skills"),
+            user_skills_path=Path("/user-skills"),
+            persistent_path=persistent,
+            original_path_mounts_ro={"/var/log": Path("/mounts/paths/_var_log")},
+            original_path_mounts_rw={"/data/output": Path("/mounts/paths/_data_output")},
+        )
+        return Ag3ntumPathValidator(config)
+
+    def test_sandbox_root_entries_contains_workspace(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        paths = [e[0] for e in entries]
+        assert "/workspace" in paths
+
+    def test_sandbox_root_entries_contains_persistent(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        paths = [e[0] for e in entries]
+        assert "/persistent" in paths
+
+    def test_sandbox_root_entries_contains_venv(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        paths = [e[0] for e in entries]
+        assert "/venv" in paths
+
+    def test_sandbox_root_entries_contains_skills(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        paths = [e[0] for e in entries]
+        assert "/skills" in paths
+        assert "/user-skills" in paths
+
+    def test_sandbox_root_entries_contains_original_mounts(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        paths = [e[0] for e in entries]
+        assert "/var/log" in paths
+        assert "/data/output" in paths
+
+    def test_sandbox_root_entries_access_modes(self, validator):
+        entries = validator.get_sandbox_root_entries()
+        entries_dict = {e[0]: e[1] for e in entries}
+        assert entries_dict["/workspace"] == "rw"
+        assert entries_dict["/var/log"] == "ro"
+        assert entries_dict["/data/output"] == "rw"
+        assert entries_dict["/venv"] == "ro"
+
+    def test_find_virtual_children_returns_child(self, validator):
+        children = validator.find_virtual_children("/var")
+        assert children is not None
+        child_names = [c[0] for c in children]
+        assert "log" in child_names
+
+    def test_find_virtual_children_returns_none_for_unknown(self, validator):
+        children = validator.find_virtual_children("/unknown")
+        assert children is None
+
+    def test_find_virtual_children_multiple_mounts_under_parent(self, tmp_path):
+        """Test with multiple mounts under the same parent."""
+        from src.core.path_validator import Ag3ntumPathValidator, PathValidatorConfig
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        config = PathValidatorConfig(
+            workspace_path=workspace,
+            original_path_mounts_ro={
+                "/var/log": Path("/mounts/a"),
+                "/var/cache": Path("/mounts/b"),
+            },
+        )
+        v = Ag3ntumPathValidator(config)
+        children = v.find_virtual_children("/var")
+        assert children is not None
+        child_names = sorted([c[0] for c in children])
+        assert "cache" in child_names
+        assert "log" in child_names
 
 
 class TestGlobBrokenSymlinks:

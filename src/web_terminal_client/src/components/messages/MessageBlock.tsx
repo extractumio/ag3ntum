@@ -10,7 +10,7 @@ import {
   USER_MESSAGE_AUTO_COLLAPSE_THRESHOLD,
   USER_MESSAGE_COLLAPSED_LINES
 } from '../../constants';
-import { stripResumeContext } from '../../utils';
+import { stripResumeContext, stripSystemReminders } from '../../utils';
 import { CopyButtons } from '../common';
 
 export interface MessageBlockProps {
@@ -40,8 +40,8 @@ export function MessageBlock({
   // Match the layout of agent messages
   const showRightPanel = isMobile ? false : !rightPanelCollapsed;
 
-  // Strip resume-context tags (LLM-only content, not for display)
-  const fullContent = stripResumeContext(content);
+  // Strip LLM-only tags (resume-context, system-reminder) from display
+  const fullContent = stripSystemReminders(stripResumeContext(content));
 
   // For large messages, truncate to first N lines when collapsed
   // Collapse if: backend flagged as large OR content exceeds line threshold
