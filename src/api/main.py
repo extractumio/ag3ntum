@@ -11,10 +11,13 @@ Main entry point that configures the FastAPI app with:
 - Dual logging (console with colors + file)
 """
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
+
+from sqlalchemy import text
 
 import yaml
 from fastapi import FastAPI, Request
@@ -25,9 +28,9 @@ from ..config import CONFIG_DIR, ConfigNotFoundError, ConfigValidationError
 from ..services.session_service import InvalidSessionIdError, SessionNotFoundError
 from ..core.logging_config import setup_backend_logging
 from ..core.subagent_manager import get_subagent_manager
-from ..db.database import init_db, DATABASE_PATH
+from ..db.database import engine, init_db, DATABASE_PATH
 from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, llm_proxy_session_router, queue_router, sessions_router, skills_router
-from .waf_filter import validate_request_size
+from .waf_filter import WAFMiddleware
 from .security_middleware import (
     build_allowed_origins,
     build_allowed_hosts,
@@ -197,6 +200,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     logger.info("Database initialized")
 
+    # Verify database is writable (fail fast instead of silent 500 on every write)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS _db_write_check (id INTEGER PRIMARY KEY)"
+            ))
+            await conn.execute(text("DROP TABLE IF EXISTS _db_write_check"))
+        logger.info("Database write check passed")
+    except Exception as e:
+        logger.critical(
+            f"DATABASE IS NOT WRITABLE: {e}\n"
+            f"  Database path: {DATABASE_PATH}\n"
+            f"  Running as UID: {os.getuid()}\n"
+            f"  Fix: ensure ./data/ is owned by UID 45045 "
+            f"(run: sudo chown -R 45045:45045 ./data/)"
+        )
+        raise SystemExit(
+            f"Fatal: database at {DATABASE_PATH} is not writable by UID "
+            f"{os.getuid()}. Run: sudo chown -R 45045:45045 ./data/"
+        )
+
     # NOTE: Linux user sync happens in entrypoint-api.sh BEFORE this process starts.
     # This ensures the process inherits correct supplementary groups (shared GID model).
 
@@ -343,16 +367,11 @@ def create_app() -> FastAPI:
         app.add_middleware(TrustedProxyMiddleware, trusted_proxies=trusted_proxies)
         logger.info(f"Trusted proxy middleware enabled: {trusted_proxies}")
 
-    # WAF Filter Middleware - validates request sizes before processing
-    @app.middleware("http")
-    async def waf_middleware(request: Request, call_next):
-        """WAF filter to validate request body sizes."""
-        # Validate request size (throws HTTPException if too large)
-        await validate_request_size(request)
-
-        # Continue processing request
-        response = await call_next(request)
-        return response
+    # WAF Filter Middleware - validates request sizes before processing.
+    # Implemented as a class middleware (not @app.middleware) to avoid the
+    # BaseHTTPMiddleware bug where exceptions re-raised after the exception
+    # handler responds, stripping CORS headers from error responses.
+    app.add_middleware(WAFMiddleware)
 
     # Register routes under /api/v1 prefix
     app.include_router(health_router, prefix="/api/v1")

@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,38 @@ async def validate_request_size(request: Request) -> None:
         return message
 
     request._receive = size_limiting_receive
+
+
+# =============================================================================
+# ASGI Middleware
+# =============================================================================
+
+class WAFMiddleware:
+    """
+    Pure ASGI middleware for WAF request validation.
+
+    Uses raw ASGI protocol instead of BaseHTTPMiddleware (@app.middleware("http"))
+    to avoid a Starlette bug where BaseHTTPMiddleware re-raises app exceptions
+    after the exception handler has already sent a response. That bug causes
+    outer middleware (CORS, security headers) to never process the error response,
+    resulting in 500 errors without CORS headers — which browsers report as
+    "Failed to fetch" instead of showing the actual error message.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        await validate_request_size(request)
+        # validate_request_size may have replaced request._receive with a
+        # size-limiting wrapper — use the (possibly wrapped) receive for
+        # downstream processing.
+        await self.app(scope, request._receive, send)
 
 
 # =============================================================================

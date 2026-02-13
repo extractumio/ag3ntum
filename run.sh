@@ -19,6 +19,17 @@ USED_MOUNT_NAMES=""
 IMAGE_PREFIX="ag3ntum"  # Image name prefix
 CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 
+# Config file registry: "relative_path:tier"
+# REQUIRED_SECRET = fail with instructions if missing (contains credentials)
+# REQUIRED_SAFE   = auto-create from .example template if missing
+CONFIG_REGISTRY=(
+  "config/secrets.yaml:REQUIRED_SECRET"
+  "config/agent.yaml:REQUIRED_SAFE"
+  "config/api.yaml:REQUIRED_SAFE"
+  "config/external-mounts.yaml:REQUIRED_SAFE"
+  "config/llm-api-proxy.yaml:REQUIRED_SAFE"
+)
+
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
@@ -49,7 +60,6 @@ function safe_remove_file() {
 
 # Directories that container needs to WRITE to (need ownership fix on Linux)
 # Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
-# src/web_terminal_client needs write access for Vite's temp files during dev mode
 WRITABLE_DIRS=("logs" "data" "users")
 
 # Directories that need to exist but should stay user-owned (for script to write, container reads)
@@ -288,6 +298,61 @@ function setup_directories() {
   done
 
   echo "  Directories ready"
+}
+
+# Validate config files from CONFIG_REGISTRY.
+# Auto-creates REQUIRED_SAFE configs from .example templates.
+# Fails with instructions for missing REQUIRED_SECRET configs.
+function validate_and_provision_configs() {
+  local missing_secrets=()
+
+  for entry in "${CONFIG_REGISTRY[@]}"; do
+    local cfg="${entry%%:*}"
+    local tier="${entry##*:}"
+
+    # Already exists — nothing to do
+    if [[ -f "${cfg}" ]]; then
+      continue
+    fi
+
+    if [[ "${tier}" == "REQUIRED_SAFE" ]]; then
+      # Auto-create from .example template
+      if [[ "${cfg}" == "config/external-mounts.yaml" ]]; then
+        # Special case: .example contains sample paths that fail mount validation.
+        # Create a minimal empty config instead.
+        cat > "${cfg}" <<'EXTMOUNTS'
+# External mounts configuration
+# See external-mounts.yaml.example for documentation and examples.
+original_paths:
+  ro: []
+  rw: []
+EXTMOUNTS
+        echo "INFO: Created ${cfg} (minimal empty config)"
+      elif [[ -f "${cfg}.example" ]]; then
+        cp "${cfg}.example" "${cfg}"
+        echo "INFO: Created ${cfg} from ${cfg}.example — review and adjust as needed"
+      else
+        echo "WARNING: ${cfg} is missing and no .example template found"
+      fi
+    elif [[ "${tier}" == "REQUIRED_SECRET" ]]; then
+      missing_secrets+=("${cfg}")
+    fi
+  done
+
+  if [[ ${#missing_secrets[@]} -gt 0 ]]; then
+    echo ""
+    echo "ERROR: Required secret configuration files are missing:"
+    for cfg in "${missing_secrets[@]}"; do
+      echo "  - ${cfg}"
+      if [[ -f "${cfg}.example" ]]; then
+        echo "    Create from example: cp ${cfg}.example ${cfg}"
+      fi
+    done
+    echo ""
+    echo "These files contain credentials and cannot be auto-generated."
+    echo "Run install.sh for guided setup, or create them manually from .example files."
+    exit 1
+  fi
 }
 
 # Validate and process a mount specification
@@ -1169,7 +1234,7 @@ run_ui_tests() {
   # Run vite build first to catch Babel transpilation errors
   # (Vitest uses esbuild which is more permissive than Babel)
   echo "Running vite build to verify transpilation..."
-  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npx vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
     echo ""
     echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
     return 1
@@ -1179,7 +1244,7 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web npm run test:run
+  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && npx vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
   return $?
 }
 
@@ -1739,6 +1804,9 @@ if [[ "${ACTION}" == "rebuild" ]]; then
   ACTION="build"
   # Fall through to build
 fi
+
+# Validate and auto-provision config files before reading any config values
+validate_and_provision_configs
 
 API_PORT="$(read_config_value 'api.external_port' '40080')"
 WEB_PORT="$(read_config_value 'web.external_port' '50080')"
