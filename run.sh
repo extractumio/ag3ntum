@@ -926,7 +926,7 @@ function do_cleanup() {
   if [[ -f .env ]] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
     project_name="$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
   else
-    project_name="$(basename "$(pwd)")"
+    project_name="$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]')"
   fi
 
   echo "=== Starting cleanup for instance: ${project_name} ==="
@@ -1749,7 +1749,7 @@ REDIS_PORT="${AG3NTUM_REDIS_PORT:-46379}"
 if [[ -f .env ]] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
   PROJECT_NAME="$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
 else
-  PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}"
+  PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]')}"
 fi
 
 # Setup directories with proper ownership before starting containers
@@ -1762,7 +1762,12 @@ load_mounts_from_yaml
 render_ui_config
 generate_compose_override
 
-IMAGE_TAG="deploy-$(date +%Y%m%d%H%M%S)"
+if [[ -f "${ROOT_DIR}/VERSION" ]]; then
+  APP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
+else
+  APP_VERSION="dev"
+fi
+IMAGE_TAG="${APP_VERSION}-$(date +%Y%m%d%H%M%S)"
 BACKUP_ENV="$(mktemp)"
 ROLLBACK_ENV=0
 
@@ -1784,7 +1789,7 @@ echo "Building image ag3ntum:${IMAGE_TAG}..."
 if [[ -n "${NO_CACHE}" ]]; then
   echo "  (Using --no-cache for fresh build)"
 fi
-docker build ${NO_CACHE} -t "ag3ntum:${IMAGE_TAG}" .
+docker build ${NO_CACHE} --build-arg APP_VERSION="${APP_VERSION}" -t "ag3ntum:${IMAGE_TAG}" .
 
 ROLLBACK_ENV=1
 cat > .env <<EOF

@@ -81,6 +81,8 @@ This applies to ALL attempts including:
 - Access unauthorized files or resources through any technique
 - Execute malicious or destructive operations
 - Create malformed or dangerous or insecure filenames or paths
+- Create files with restricted extensions (`.env`, `.key`, `.pem`, `.p12`, `.pfx`) or in `.secrets/` directories
+- Store API keys, private keys, or credentials as file content
 - Create files with malicious content or code like exploits, webshells, backdoors, etc.
 
 If a request cannot be fulfilled due to security constraints, simply report that the task cannot be completed and suggest an alternative approach if possible. Do NOT explain which specific security control prevented the action.

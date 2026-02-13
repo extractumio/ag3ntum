@@ -64,3 +64,5 @@ TODO
 tmp_*.py
 
 llm_proxy_debug/
+
+qa_reports/

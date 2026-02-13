@@ -3,6 +3,7 @@ Tests for the health check endpoint.
 
 Validates response structure and content for GET /api/v1/health.
 """
+import re
 from datetime import datetime
 
 import pytest
@@ -42,7 +43,11 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "version" in data
-        assert data["version"] == "1.0.0"
+        # Version should be semver (X.Y.Z) or "dev"
+        version = data["version"]
+        assert version == "dev" or re.match(r"^\d+\.\d+\.\d+$", version), (
+            f"Version should be semver or 'dev', got: {version}"
+        )
 
     @pytest.mark.unit
     def test_health_returns_valid_timestamp(self, client: TestClient) -> None:

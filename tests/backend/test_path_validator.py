@@ -204,6 +204,48 @@ class TestBlocklist:
         with pytest.raises(PathValidationError, match="blocked by policy"):
             validator.validate_path("module.pyc", "read")
 
+    def test_dotenv_local_blocked(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.local (dotenv variant) is blocked by .env.* pattern."""
+        (workspace / ".env.local").touch()
+        with pytest.raises(PathValidationError, match="blocked by policy"):
+            validator.validate_path(".env.local", "read")
+
+    def test_dotenv_development_blocked(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.development is blocked by .env.* pattern."""
+        (workspace / ".env.development").touch()
+        with pytest.raises(PathValidationError, match="blocked by policy"):
+            validator.validate_path(".env.development", "read")
+
+    def test_dotenv_production_blocked(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.production is blocked by .env.* pattern."""
+        (workspace / ".env.production").touch()
+        with pytest.raises(PathValidationError, match="blocked by policy"):
+            validator.validate_path(".env.production", "read")
+
+    def test_dotenv_example_allowed(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.example is exempt from blocklist (safe template)."""
+        (workspace / ".env.example").touch()
+        result = validator.validate_path(".env.example", "read")
+        assert result.normalized == workspace / ".env.example"
+
+    def test_dotenv_sample_allowed(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.sample is exempt from blocklist (safe template)."""
+        (workspace / ".env.sample").touch()
+        result = validator.validate_path(".env.sample", "read")
+        assert result.normalized == workspace / ".env.sample"
+
+    def test_dotenv_template_allowed(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.template is exempt from blocklist (safe template)."""
+        (workspace / ".env.template").touch()
+        result = validator.validate_path(".env.template", "read")
+        assert result.normalized == workspace / ".env.template"
+
+    def test_dotenv_defaults_allowed(self, validator: Ag3ntumPathValidator, workspace: Path) -> None:
+        """.env.defaults is exempt from blocklist (safe template)."""
+        (workspace / ".env.defaults").touch()
+        result = validator.validate_path(".env.defaults", "read")
+        assert result.normalized == workspace / ".env.defaults"
+
     def test_regular_file_not_blocked(
         self, validator: Ag3ntumPathValidator, workspace: Path
     ) -> None:

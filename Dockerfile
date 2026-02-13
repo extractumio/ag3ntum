@@ -1,6 +1,8 @@
 FROM ubuntu:24.04
 
+ARG APP_VERSION=dev
 LABEL org.opencontainers.image.title="ag3ntum"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -117,6 +119,7 @@ RUN mkdir -p /data /sessions \
     && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts \
     && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /entrypoint-api.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
 
+ENV APP_VERSION=${APP_VERSION}
 ENV AG3NTUM_ROOT=/
 ENV PYTHONPATH=/
 ENV PYTHONUNBUFFERED=1

@@ -28,6 +28,7 @@ Sensitive Data:
 import logging
 import os
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -95,6 +96,21 @@ def _is_path_writable(path: Path) -> tuple[bool, str]:
         # Check if parent directory is writable
         try:
             if not os.access(parent, os.W_OK):
+                # Fallback: if this is a sandbox-owned dir missing group-write,
+                # fix permissions so the API process (in the sandbox user's group)
+                # can write. Only applies under /users/ (sudoers scope).
+                if str(parent).startswith("/users/"):
+                    try:
+                        st = parent.stat()
+                        if 50000 <= st.st_uid <= 60000 and not (st.st_mode & stat.S_IWGRP):
+                            subprocess.run(
+                                ["sudo", "chmod", "770", str(parent)],
+                                check=True, capture_output=True, timeout=5,
+                            )
+                            if os.access(parent, os.W_OK):
+                                return True, ""
+                    except (OSError, subprocess.SubprocessError):
+                        pass
                 return False, f"Parent directory is not writable: {parent.name}"
             return True, ""
         except Exception as e:
