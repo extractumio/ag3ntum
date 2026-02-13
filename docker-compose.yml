@@ -77,7 +77,7 @@ services:
     build: .
     # Web container doesn't need shared GID — entrypoint drops to ag3ntum_api
     entrypoint: ["/entrypoint-web.sh"]
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
+    command: ["sh", "-c", "exec npx vite --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs --host 0.0.0.0 --port 50080"]
     working_dir: /src/web_terminal_client
     environment:
       AG3NTUM_ROOT: "/"
@@ -87,7 +87,7 @@ services:
     volumes:
       - ./config:/config
       - ./logs:/logs
-      - ./src:/src
+      - ./src:/src:ro
       - ./tests:/tests:ro
       # Named volume for node_modules - Docker manages permissions internally
       # This avoids host permission issues regardless of who runs install.sh

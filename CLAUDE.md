@@ -32,6 +32,7 @@ Design plans in `docs/plans/`: Place all the new design and implementation docum
 - **Container UID is 45045**: When fixing file permissions or ownership in the container environment, do not set ownership to the host username. Use the container UID.
 - **Use absolute paths**: Always use absolute paths in shell scripts, not relative paths.
 - **Test user UIDs**: Avoid UIDs in the 50000-50100 range as they conflict with real database users. Use UIDs 59990+ for test users.
+- **NEVER delete or move `config/*.yaml` files**: Config files are gitignored, instance-specific, and may contain credentials. Deleting them breaks `./run.sh build` and can lose user customizations. To test config validation behavior, use a temporary directory or mock — never touch the real `config/` files.
 
 ---
 
@@ -185,86 +186,13 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 
 ## Source Code
 
-### Core (`src/core/`)
+- **Core** (`src/core/`, 40 files) — Agent orchestration, sandbox, security, prompts, tracers
+- **API** (`src/api/`) — FastAPI app, routes (sessions, auth, files, health), middleware, WAF
+- **Services** (`src/services/`, 18 files) — Session, event, auth, user, mount, Redis pub/sub
+- **MCP Tools** (`tools/ag3ntum/`, 11 tools) — Sandboxed replacements for native tools (Read/Write/Edit/Bash/Glob/Grep/LS/WebFetch/AskUserQuestion/ReadDocument/MultiEdit)
+- **Web Terminal** (`src/web_terminal_client/`) — React 18.3 + TypeScript 5.6 + Vite 5.4
 
-| File | Class | Purpose |
-|------|-------|---------|
-| `agent_core.py` | `ClaudeAgent` | Agent orchestrator, SDK integration, LLM proxy routing |
-| `checkpoint_tracker.py` | `CheckpointTracker` | File checkpoint tracking during execution |
-| `task_runner.py` | `execute_agent_task()` | **Unified entry** for CLI + API |
-| `schemas.py` | `TaskExecutionParams` | Execution params dataclass |
-| `permission_profiles.py` | `PermissionManager` | Tool access, session context |
-| `sessions.py` | `SessionManager` | Session CRUD, workspace symlinks, file ownership |
-| `sandbox.py` | `SandboxExecutor` | Bubblewrap + UID dropping |
-| `uid_security.py` | `UIDSecurityConfig` | UID/GID validation, seccomp |
-| `path_validator.py` | `Ag3ntumPathValidator` | File path validation, session UID registry, `docker_to_display_path()` for tool output |
-| `command_security.py` | `CommandSecurityFilter` | Regex command blocking |
-| `circuit_breaker.py` | `CircuitBreaker` | Extracted from trace_processor; consecutive failure detection |
-| `pattern_detector.py` | `PatternDetector` | Extracted from trace_processor; unproductive loop detection |
-| `tracer.py` | — | Thin re-export shim; actual implementations in `tracers/` package |
-| `tracers/` | `TracerBase`, `ExecutionTracer`, `BackendConsoleTracer`, `EventingTracer`, `NullTracer`, `QuietTracer` | Tracer implementations (7 files) |
-| `prompt_engine.py` | `PromptTemplateEngine`, `PromptContext` | ${VAR} syntax template engine (replaces Jinja2 for main prompts) |
-| `prompt_context.py` | `build_prompt_context()` | Context builder with tool names, env vars, flags, security strings |
-| `prompt_manager.py` | `PromptManager` | Singleton prompt loader, caching, user overrides, hot reload |
-| `system_reminders.py` | `ReminderType`, `get_reminder()` | 42 contextual reminders injected during agent conversations |
-| `structured_output.py` | `parse_structured_output()` | Parse structured response headers from agent output |
-| `trace_processor.py` | `TraceProcessor` | SDK message → events (delegates to circuit_breaker/pattern_detector) |
-
-### API (`src/api/`)
-
-`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `deps.py` (DI)
-
-**Auth endpoints**:
-- `POST /auth/token` — login (rate-limited: 5 failed/account/min, 20 failed/IP/min)
-- `POST /auth/change-password` — password change
-- `POST /auth/connection-token` — short-lived single-use token for SSE auth
-- `POST /auth/logout` — server-side token revocation (increments `token_version`)
-
-### Services (`src/services/`)
-
-`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting)
-
-**DB utilities** (`src/db/`): `models.py` (SQLAlchemy) | `retry.py` (`with_db_retry` decorator, extracted from event/session services)
-
-### MCP Tools (`tools/ag3ntum/`) — 11 tools
-
-| Tool | Security | Replaces |
-|------|----------|----------|
-| `mcp__ag3ntum__Read` | PathValidator | Read |
-| `mcp__ag3ntum__Write` | PathValidator | Write |
-| `mcp__ag3ntum__Edit` | PathValidator | Edit |
-| `mcp__ag3ntum__MultiEdit` | PathValidator | MultiEdit |
-| `mcp__ag3ntum__Bash` | CmdFilter + Bubblewrap + UID | Bash |
-| `mcp__ag3ntum__Glob` | PathValidator | Glob |
-| `mcp__ag3ntum__Grep` | PathValidator | Grep |
-| `mcp__ag3ntum__LS` | PathValidator | LS |
-| `mcp__ag3ntum__WebFetch` | Domain blocklist | WebFetch |
-| `mcp__ag3ntum__AskUserQuestion` | — | AskUserQuestion |
-| `mcp__ag3ntum__ReadDocument` | Size limits | *New* |
-
-**Native tools BLOCKED** via `permissions.yaml` → `tools.disabled`. All ops use `mcp__ag3ntum__*`.
-
-### Web Terminal (`src/web_terminal_client/`)
-
-React 18.3 + TypeScript 5.6 + Vite 5.4. Full arch: @`../DOCUMENTS/TECHNICAL/web_terminal_client.md`
-
-**Files**: `App.tsx` (orchestrator, decomposed) | `api.ts` (client) | `ConnectionManager.ts` (SSE state machine, backoff, polling fallback) | `sse.ts` (thin adapter, delegates to ConnectionManager) | `AuthContext.tsx` (JWT) | `hooks/` (7) | `components/messages/` (14) | `components/input/InputField.tsx` | `components/input/StatusFooter.tsx` | `FileExplorer.tsx` | `FileViewer.tsx` | `MarkdownRenderer.tsx` | `styles/` (17 CSS files, split by component)
-
-**Hooks**: `useSSEConnection` | `useSessionManager` | `useUIState` | `useFileOperations` | `useConversation`
-
-**Connection**: `connected` → `reconnecting` → `polling` → `degraded`
-
-**SSE events**: `agent_start` | `tool_start` | `tool_complete` | `message` | `thinking` | `subagent_*` | `agent_complete` | `error` | `cancelled`
-
-**CSS**: Always `var(--color-*)`, never hardcoded colors. Monolithic `styles.css` replaced by `styles/` directory with 17 component-scoped CSS files (variables, base, layout, messages, panels, login, file-explorer, etc.). Entry point: `styles/index.css`.
-
-**Cache**: `apiCache.ts` — TTL 1 min (5 min skills), stale-while-revalidate.
-
-**Frontend tests** (Docker):
-```bash
-./run.sh test --ui                                  # Build check + vitest
-docker exec -it project-ag3ntum-web-1 npm run test:run  # Manual
-```
+→ See [docs/source-code-map.md](docs/source-code-map.md) for file-level class/purpose tables.
 
 ---
 
@@ -282,26 +210,17 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 | 5 | Middleware | `api/security_middleware.py` | HTTP |
 | 6 | Prompts | `prompts/modules/security.md`, `prompts/system-prompts/02-security-constraints.md` | LLM |
 
-- **Container seccomp**: `seccomp-container.json` applied at container level (replaces previous `seccomp:unconfined`). Per-session seccomp profiles (`seccomp-isolated.json`, `seccomp-direct.json`) layered on top.
-- **UID isolation**: Each user → unique UID (50000..60000, ISOLATED mode). OS-enforced via bwrap. `UIDSecurityConfig.__post_init__` validates absolute bounds (50000 min for isolated, 1000 min for direct). Path translation: @`sandbox_path_resolver.md`
-- **Shared GID model**: `ag3ntum_api` added to each sandbox user's primary group at creation. Session files use 660/770 (no world access). Cross-user isolation by PathValidator.
-- **File ownership**: Write/Edit/MultiEdit tools `chown` files to sandbox user immediately. Session dirs `chown`'d at creation. `ensure_secure_session_files()` re-applies 660/770 post-execution.
-- **Read-only source**: `src/` volume mounted read-only (`:ro`) in `docker-compose.yml` to prevent agent modification of application code.
-- **WAF hardening**: Body-size-tracking wrapper on `request._receive` prevents Content-Length spoofing bypass of size limits.
-- **Auth rate limiting**: Redis-based rate limiting on login (5 failed/account/min, 20 failed/IP/min). Fails open if Redis unavailable.
-- **Token revocation**: `token_version` field on User model. Logout increments version, invalidating all outstanding JWTs server-side.
 - **Fail-closed**: Security load/validate failure → operation denied. Never catch silently.
-- **Secrets scanning**: `src/security/sensitive_data_scanner.py` + `sensitive-data-scanner.yaml` → auto-redacts in File Explorer
+- **Read-only source**: `src/` volume mounted `:ro` — agents cannot modify application code.
+- **Native tools BLOCKED** via `permissions.yaml` → `tools.disabled`. All ops use `mcp__ag3ntum__*`.
+
+→ See [docs/security-overview.md](docs/security-overview.md) for seccomp, UID isolation, shared GID, WAF, secrets scanning details.
 
 ---
 
 ## Testing
 
 **Always write tests alongside new feature implementations** — do not wait to be asked. If modifying existing functionality, update related tests in the same pass.
-
-All tests run **inside Docker** via `docker-compose.test.yml` (root → drops to ag3ntum_api via `setpriv --init-groups`, `AG3NTUM_TEST_MODE=true`).
-
-**Test entrypoint** (`entrypoint-test.sh`): Installs test sudoers, syncs Linux users from DB, creates fully-equipped test users (`ag3ntum_tester_a` UID 59990, `ag3ntum_tester_b` UID 59991) with DB entries, venvs, persistent storage, and shared GID memberships, then drops privileges. Test users are at the high end of the isolated range to avoid conflicts with real users. Credentials: email `ag3ntum_tester_a@test.local`, password `TestPassword123!`.
 
 | Suite | Location | Runner |
 |-------|----------|--------|
@@ -316,166 +235,8 @@ All tests run **inside Docker** via `docker-compose.test.yml` (root → drops to
 **Markers**: `unit`, `integration`, `slow`, `e2e`. `asyncio_mode = auto`.
 `@pytest.mark.e2e` / `@pytest.mark.slow` skipped by default. `./run.sh test` passes `--run-e2e`. `--quick` skips them.
 
-### Writing Backend Tests
-
-```python
-# tests/backend/test_<module>.py
-class TestFeature:
-    @pytest.mark.unit
-    async def test_behavior(self, test_app, auth_headers):
-        response = await test_app.get("/endpoint", headers=auth_headers)
-        assert response.status_code == 200
-
-    @pytest.mark.e2e
-    async def test_full_flow(self, test_app): ...
-```
-
-**Backend fixtures** (`conftest.py`): `db_engine`/`db_session` (in-memory SQLite) | `test_app` (FastAPI client) | `auth_headers` (JWT) | `mock_agent_runner` | `temp_session_dir` | `test_user_manager`
-
-**Redis fixtures** (`redis/conftest.py`): `redis_connection` | `event_hub` | `tracer_factory`
-
-### Writing E2E / Functional Tests (Real Users)
-
-Tests that need real Linux users (sandbox execution, filesystem permissions, mount access, user isolation) **must reuse pre-built test users**, not create them dynamically.
-
-**Why**: The API process gets its supplementary groups at startup via `setpriv --init-groups`. Dynamically-created users add `ag3ntum_api` to the new user's group, but the already-running API process doesn't pick up the change. This causes `Permission denied` on session workspace directories. Restarting the container mid-test is not viable.
-
-**Pre-built test users** (created by `entrypoint-test.sh`):
-
-| Field | tester_a | tester_b |
-|-------|----------|----------|
-| Username | `ag3ntum_tester_a` | `ag3ntum_tester_b` |
-| UID/GID | 59990 | 59991 |
-| Email | `ag3ntum_tester_a@test.local` | `ag3ntum_tester_b@test.local` |
-| Password | `TestPassword123!` | `TestPassword123!` |
-| Home | `/users/ag3ntum_tester_a` | `/users/ag3ntum_tester_b` |
-
-Both have: Linux accounts, DB entries, Python venvs, persistent storage, shared GID memberships, `.claude/skills/` dirs.
-
-**Pattern for E2E tests**:
-```python
-from types import SimpleNamespace
-
-# Constants (reuse across test files)
-PREBUILT_USER_A_USERNAME = "ag3ntum_tester_a"
-PREBUILT_USER_A_UID = 59990
-
-def _prebuilt_user(username: str, uid: int) -> SimpleNamespace:
-    return SimpleNamespace(username=username, linux_uid=uid)
-
-# Fixture — no DB session needed
-@pytest.fixture
-def test_user(self) -> SimpleNamespace:
-    return _prebuilt_user(PREBUILT_USER_A_USERNAME, PREBUILT_USER_A_UID)
-
-# For API auth, login with known credentials
-response = await client.post("/auth/token", json={
-    "email": "ag3ntum_tester_a@test.local",
-    "password": "TestPassword123!",
-})
-```
-
-**Rules**:
-- Prefix test artifacts with `_test_` or `_e2e_` for easy cleanup
-- Always clean up test files in fixture teardown (pre-built users persist across runs)
-- Use `try/finally` for cleanup in test bodies that create files
-- Only `TestRealUserCreation` in `test_real_user_integration.py` creates users dynamically (it tests the creation flow itself)
-- For two-user isolation tests, use both `ag3ntum_tester_a` and `ag3ntum_tester_b`
-
-### Writing Frontend Tests
-
-vitest + React Testing Library + MSW:
-```typescript
-// tests/web_terminal_console/unit/<Component>.test.tsx
-import { renderWithProviders } from '../utils/renderWithProviders';
-test('renders', () => {
-  renderWithProviders(<MyComponent />);
-  expect(screen.getByText('expected')).toBeInTheDocument();
-});
-```
-Setup: `setup.ts` (MSW, jest-dom, window mocks). Mocks: `mocks/handlers.ts`.
-
-### Test Output
-
-`logs/latest-test-results.log` (overwritten each run):
-```bash
-grep -A 10 "FAILED\|ERROR" logs/latest-test-results.log
-```
-
-### SSE Schema Validation
-
-Anthropic's SSE streaming format is used in two contexts:
-1. **Direct API calls** — `TraceProcessor` parses events from Claude Agent SDK
-2. **LLM Proxy** — Translator produces Anthropic-format events from OpenAI responses
-
-When Anthropic changes the SSE format (new event types, new fields, changed structure), both contexts break. Schema validation tests detect these changes early.
-
-**Files**:
-- `src/api/llm_proxy/schemas.py` — Pydantic models for all SSE event types (shared by both contexts)
-- `tests/backend/test_sse_schemas.py` — 59 tests validating schemas
-- `tests/backend/fixtures/anthropic_sse_samples.json` — Recorded real API events
-- `scripts/record_sse_samples.py` — Re-records fixtures from live API
-
-**What breaks when Anthropic changes format**:
-| Component | Location | Impact |
-|-----------|----------|--------|
-| TraceProcessor | `src/core/trace_processor.py` | Fails to parse new event types, misses usage stats, wrong status |
-| LLM Proxy Translator | `src/api/llm_proxy/translator.py` | Produces invalid events, SDK rejects responses |
-| Event Persistence | `src/services/event_service.py` | New fields not stored, lost in polling fallback |
-
-**Test categories and what failures indicate**:
-
-| Test Class | Failure Indicates |
-|------------|-------------------|
-| `TestEnums` | New/renamed stop reasons, content types, or delta types |
-| `TestContentBlocks` | Changed structure of text/tool_use/thinking blocks |
-| `TestDeltas` | Changed structure of text_delta/input_json_delta/thinking_delta |
-| `TestUsage` | New usage fields (tokens, caching, service tier) |
-| `TestSSEEvents` | Changed event payload structure |
-| `TestSSEParsing` | Changed SSE wire format (event:/data: lines) |
-| `TestSSEStreamValidation` | Changed event ordering requirements |
-| `TestToolUseStreamOrder` | Changed tool input streaming protocol |
-| `TestTranslatorOutput` | Our translator produces invalid events |
-| `TestRecordedAPIEvents` | Real API format differs from schemas |
-| `TestTraceProcessorEventCoverage` | TraceProcessor missing handler for new event/delta type |
-
-**Workflow when Claude Code updates and tests fail**:
-
-```bash
-# 1. Run tests to see what broke
-./run.sh test --subset "sse_schemas"
-
-# 2. Re-record fixtures from live API
-python3 scripts/record_sse_samples.py
-
-# 3. Run tests again — new failures show schema drift
-./run.sh test --subset "sse_schemas"
-
-# 4. Update schemas.py to match new API format
-# 5. Update translator.py if LLM proxy output format changed
-# 6. Update trace_processor.py if new event types need handling
-# 7. Run tests until green
-```
-
-**Recording script usage**:
-```bash
-# Record from API (uses ANTHROPIC_API_KEY from env or secrets.yaml)
-python3 scripts/record_sse_samples.py
-
-# Preview only (no API calls)
-python3 scripts/record_sse_samples.py --dry-run
-
-# Use specific model
-python3 scripts/record_sse_samples.py --model claude-sonnet-4-20250514
-```
-
-The script makes 3 API calls: text-only, single tool call, multiple tool calls. Output saved to `tests/backend/fixtures/anthropic_sse_samples.json`.
-
-**Known API fields** (discovered via recording):
-- `ping` event: keepalive during long streams
-- `cache_creation`: nested object with `ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`
-- `service_tier`, `inference_geo`: in usage object
-- `input_json_delta`: first delta can be empty string
+→ See [docs/testing-guide.md](docs/testing-guide.md) for writing backend/E2E/frontend tests, pre-built users, fixtures.
+→ See [docs/sse-schema-validation.md](docs/sse-schema-validation.md) for SSE schema test workflow.
 
 ---
 
@@ -487,39 +248,24 @@ The script makes 3 API calls: text-only, single tool call, multiple tool calls. 
 
 ## Configuration
 
-### Agent (`config/agent.yaml`)
+**CRITICAL**: Never delete, move, or overwrite `config/*.yaml` files. They are gitignored, instance-specific, and may contain credentials. Use temp dirs or mocks for testing.
+
 ```yaml
+# config/agent.yaml
 default_model: claude-sonnet-4-20250514
 max_turns: 100
 timeout_seconds: 1800
 role: default                     # from prompts/roles/
 ```
 
-### User Config
-- `user_requirements.txt` — pip packages for sandbox
-- `user_secrets.yaml` — per-user encrypted credentials
-- `subagents.yaml` — subagent models, tools, prompts
-- `llm-api-proxy.yaml` — custom LLM routing, **auto-routes** models via proxy (@`how-to-connect-custom-llm.md`)
-- `prompt-overrides.yaml` — allowlist for user-customizable prompts (execution, context, output, roles)
-
-### Users
-`./run.sh create-user` / `delete-user` / `cleanup-test-users`
-Stored: `data/ag3ntum.db` → `users` table, `linux_uid` for sandbox isolation.
-
-### External Mounts
-Two-part: Docker volumes (build-time) + symlink auth (session-level). Read @`external_mounts.md`.
-
-| Change | Command |
-|--------|---------|
-| Add/remove/change path | `./run.sh build` |
-| Change user auth list | New session only |
-
-### Secrets (`config/secrets.yaml`)
 ```yaml
+# config/secrets.yaml
 ANTHROPIC_API_KEY: "sk-ant-..."
 sandboxed_envs:               # Per-user, sandbox-only
   OPENAI_API_KEY: "sk-..."
 ```
+
+→ See [docs/configuration.md](docs/configuration.md) for validation tiers, auto-provisioning, user config, external mounts.
 
 ---
 
@@ -545,83 +291,13 @@ sandboxed_envs:               # Per-user, sandbox-only
 
 ## Diagnostics & Troubleshooting
 
-### Logs
-
 | Log | Content |
 |-----|---------|
 | `logs/backend.log` | API server (10MB rotation, 5 backups) |
 | `logs/agent_cli.log` | CLI execution |
 | `logs/latest-test-results.log` | Last test run (overwritten) |
 
-```bash
-docker logs project-ag3ntum-api-1 --tail 100 -f     # Container stdout
-./run.sh shell && tail -f /logs/backend.log          # Inside container
-grep -i "denied\|blocked" logs/backend.log           # Security denials
-grep "ERROR\|Exception" logs/backend.log             # Errors
-```
-
-**Loggers**: `src.api` | `src.services` | `src.core` | `src.db` | `ag3ntum` | `tools.ag3ntum` | `uvicorn` | `fastapi`
-
-### Database
-
-`sqlite3 data/ag3ntum.db` — tables: `users`, `sessions`, `events`, `tokens`
-
-```sql
--- List recent sessions
-SELECT id, status, task, total_cost_usd FROM sessions ORDER BY created_at DESC LIMIT 10;
--- Check user UIDs (sandbox debug)
-SELECT username, linux_uid FROM users WHERE linux_uid BETWEEN 50000 AND 60000;
--- Count events for session
-SELECT COUNT(*) FROM events WHERE session_id = 'SESSION_ID';
--- Find terminal event
-SELECT event_type FROM events WHERE session_id = 'SESSION_ID'
-  AND event_type IN ('agent_complete', 'error', 'cancelled');
-```
-
-### Debug Agent Execution
-
-```bash
-./venv/bin/python scripts/ag3ntum_debug.py -r "task" --user "email" --password "pass"
-# -v  verbose (all events)
-# -s  security only (blocked ops)
-# -d  dump session files
-# -m/--model  override model (e.g., "openrouter:openai/gpt-5.2")
-```
-Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesystem uses username.
-
-### Troubleshooting
-
-**Session stuck in "running"**:
-1. Check process: `ps aux | grep session_id` inside container
-2. Check DB: `SELECT status, updated_at FROM sessions WHERE id = '...';`
-3. Fix: `./run.sh restart` — cleans stale sessions on startup
-
-**Events not appearing in UI**:
-1. Redis alive? `redis-cli ping` (inside container)
-2. Events persisted? `SELECT COUNT(*) FROM events WHERE session_id = '...';`
-3. Browser console → SSE connection errors?
-4. JWT token valid? Check expiry in browser DevTools.
-
-**Agent failing silently**:
-1. Check SDK log: `tail -50 users/USER/sessions/ID/agent.jsonl | grep -i error`
-2. Check backend: `grep -A5 "Exception\|Traceback" logs/backend.log | tail -30`
-
-**Container won't start**:
-1. Port conflict: `lsof -i :40080` / `lsof -i :50080`
-2. Stale containers: `./run.sh cleanup && ./run.sh build`
-3. Permission issue (Linux): `./run.sh build` re-runs chown
-
-**Tests failing unexpectedly**:
-1. Check `logs/latest-test-results.log` for full output
-2. Stale container? `./run.sh rebuild && ./run.sh test`
-3. Redis down? Tests need Redis: `docker ps | grep redis`
-4. Wrong platform binaries (UI tests)? `run.sh` auto-detects and reinstalls node_modules
-
-**SSE streaming broken**:
-1. Frontend falls back: SSE → backoff → polling (3+ fails) → SSE retry (60s)
-2. Check `ConnectionManager` state in React DevTools
-3. Check `/sessions/{id}/events` endpoint in Network tab
-4. Fallback endpoint: `/sessions/{id}/events/history` (polling)
+→ See [docs/troubleshooting.md](docs/troubleshooting.md) for DB queries, debug script, troubleshooting flowcharts.
 
 ---
 
@@ -629,27 +305,14 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 
 **Version source of truth**: `VERSION` file in project root (plain-text semver, e.g. `0.1.0`).
 
-**Branch model**:
-- `main` — active development (may be unstable)
-- `release` — stable releases only (protected branch)
+**Branch model**: `main` (active development) | `release` (stable, protected)
 
-**Release process**: See `docs/plans/release-workflow.md` for full details.
-1. Update `VERSION` with new semver number
-2. Update `CHANGELOG.md` with a `## [X.Y.Z] - YYYY-MM-DD` section
-3. Commit on `main`, create PR to `release`
-4. GitHub Actions gate checks VERSION + CHANGELOG were modified
-5. On merge, GitHub Actions auto-creates git tag `vX.Y.Z` + GitHub Release
+**Release process** (see `docs/plans/release-workflow.md`):
+1. Update `VERSION` + `CHANGELOG.md`
+2. PR to `release` → GitHub Actions gate checks
+3. On merge → auto-creates git tag `vX.Y.Z` + GitHub Release
 
-**Where version is used**:
-| Location | How |
-|----------|-----|
-| Health endpoint (`/api/v1/health`) | `_read_version()` reads `VERSION` at startup |
-| Docker image | `ARG APP_VERSION` build arg + label + `APP_VERSION` env var |
-| Image tag | `{version}-{timestamp}` (e.g. `0.1.0-20260213...`) |
-
-**GitHub Actions workflows**:
-- `.github/workflows/release-gate.yml` — PR check for `release` branch
-- `.github/workflows/release.yml` — auto-tag + GitHub Release on merge to `release`
+**Where version is used**: Health endpoint (`/api/v1/health`), Docker image labels/tags, `APP_VERSION` env var.
 
 ---
 
@@ -680,5 +343,6 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 23. **TodoWrite/TodoRead excluded from turn count** — `TraceProcessor` no longer counts TodoWrite/TodoRead tool calls as agent turns (they are planning tools). Tracked separately via `todo_tool_count`.
 24. **Agent self-assessment for session status** — `determine_session_status()` in `agent_core.py` reads structured `request_status` headers from agent output. Agent's own status (COMPLETE/PARTIAL/FAILED) is primary; defaults to COMPLETE if no header found.
 25. **Security refusals show "failed" status** — When the agent correctly refuses a malicious/disallowed request, session status is "failed" because the agent self-assesses as unable to complete the task. This is expected behavior. To distinguish security refusals from actual failures, check the agent's response content for refusal language. A dedicated "refused" status is a future enhancement.
+26. **NEVER delete `config/*.yaml` files** — They are gitignored, instance-specific, and may contain credentials. `run.sh` auto-provisions safe configs from `.example` templates on build, but `secrets.yaml` requires manual creation. Deleting configs during development/testing/debugging is forbidden — use temp dirs or mocks instead.
 
 **Study `requirements.txt` before new features** — use existing packages.

@@ -13,6 +13,17 @@ fi
 # Fix ownership (running as root, target user is ag3ntum_api 45045)
 chown -R 45045:45045 /src/web_terminal_client/node_modules
 
+# Copy Vite/vitest configs to a writable directory so Vite can create its
+# temp files (.timestamp-*.mjs) there. Source tree is mounted read-only.
+# A node_modules symlink lets the ESM resolver find packages from this location.
+# Port-qualified path supports multiple instances on the same host.
+VITE_CONFIG_DIR="/tmp/vite-${AG3NTUM_WEB_PORT:-50080}"
+mkdir -p "$VITE_CONFIG_DIR"
+cp /src/web_terminal_client/vite.config.mjs "$VITE_CONFIG_DIR/"
+cp /src/web_terminal_client/vitest.config.mjs "$VITE_CONFIG_DIR/"
+ln -sf /src/web_terminal_client/node_modules "$VITE_CONFIG_DIR/node_modules"
+chown -R 45045:45045 "$VITE_CONFIG_DIR"
+
 # Check if node_modules needs (re)installation
 # Reinstall if: missing, empty, or missing platform-specific rollup binary
 NEEDS_INSTALL=0

@@ -5,7 +5,6 @@ Handles JWT token generation and validation with per-user secrets.
 """
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional
 
 import jwt
@@ -281,68 +280,6 @@ class AuthService:
             select(User).where(User.id == user_id)
         )
         return result.scalar_one_or_none()
-
-    async def create_user(
-        self,
-        db: AsyncSession,
-        username: str,
-        email: str,
-        password: str,
-        role: str = "user",
-    ) -> tuple[User, str, int]:
-        """
-        Create a new user and return token.
-
-        Args:
-            db: Database session.
-            username: Unique username.
-            email: Unique email address.
-            password: Plain text password (will be hashed).
-            role: User role (default: "user").
-
-        Returns:
-            Tuple of (User, token, expires_in_seconds).
-
-        Raises:
-            ValueError: If username or email already exists.
-        """
-        import secrets
-        import uuid
-
-        import bcrypt
-
-        # Check if username or email already exists
-        existing = await db.execute(
-            select(User).where(
-                (User.username == username) | (User.email == email)
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise ValueError("Username or email already exists")
-
-        # Generate password hash and JWT secret
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        jwt_secret = secrets.token_urlsafe(32)
-
-        # Create user
-        user = User(
-            id=str(uuid.uuid4()),
-            username=username,
-            email=email,
-            password_hash=password_hash,
-            role=role,
-            jwt_secret=jwt_secret,
-            linux_uid=None,
-            is_active=True,
-        )
-
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-
-        # Generate token
-        token, expires_in = self.generate_token(user.id, user.jwt_secret, user.token_version)
-        return user, token, expires_in
 
     async def revoke_tokens(self, db: AsyncSession, user_id: str) -> None:
         """
