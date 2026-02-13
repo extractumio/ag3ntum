@@ -9,6 +9,7 @@ import React, { useRef } from 'react';
 import type { ToolCallView, SubagentView, TodoItem, ResultStatus } from '../../types/conversation';
 import {
   stripResumeContext,
+  stripSystemReminders,
   normalizeStatus,
   getStatusLabel,
   isMeaningfulError
@@ -88,8 +89,8 @@ export function AgentMessageBlock({
   onSubmitAnswer,
 }: AgentMessageBlockProps): JSX.Element {
   const contentRef = useRef<HTMLDivElement>(null);
-  // Strip resume-context tags (LLM-only content, not for display)
-  const displayContent = stripResumeContext(content);
+  // Strip LLM-only tags (resume-context, system-reminder) from display
+  const displayContent = stripSystemReminders(stripResumeContext(content));
   const statusClass = status ? `agent-status-${status}` : '';
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';

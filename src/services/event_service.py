@@ -77,7 +77,7 @@ async def record_event(event: dict[str, Any]) -> bool:
         resume_id = payload.get("session_id")
         if isinstance(resume_id, str) and resume_id:
             try:
-                session_service.update_resume_id(session_id, resume_id)
+                await session_service.update_resume_id(session_id, resume_id)
             except Exception as e:
                 logger.warning(
                     f"Failed to update resume_id for {session_id}: {e}"

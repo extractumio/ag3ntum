@@ -94,6 +94,7 @@ Project/
 │   ├── subagents.yaml             # Subagent definitions
 │   ├── llm-api-proxy.yaml         # Custom LLM proxy routing
 │   ├── external-mounts.yaml       # Host folder access for agents
+│   ├── prompt-overrides.yaml      # Prompt override allowlist for users
 │   ├── user_requirements.txt      # User-installable pip packages
 │   ├── redis.conf
 │   ├── security/                  # 8 files
@@ -107,7 +108,7 @@ Project/
 │   │   └── seccomp-direct.json
 │   └── test/sudoers-test          # Test-only sudoers
 ├── src/
-│   ├── core/                      # Agent logic (35 files)
+│   ├── core/                      # Agent logic (40 files)
 │   │   └── tracers/               # 7 files: base, cli, backend, eventing, null, quiet
 │   ├── api/                       # FastAPI
 │   ├── services/                  # Business logic (18 files)
@@ -118,7 +119,14 @@ Project/
 │   └── web_terminal_client/       # React 18 + TS + Vite
 │       └── src/styles/            # 17 component-scoped CSS files
 ├── tools/ag3ntum/                 # 11 MCP tools
-├── prompts/                       # Jinja2 templates
+├── prompts/                       # Prompt templates (${VAR} + Jinja2)
+│   ├── system-prompts/            # 10 numbered .md system prompt modules
+│   ├── system-reminders/          # 43 .md contextual reminder templates
+│   ├── agent-prompts/             # Specialized agent mode prompts
+│   ├── modules/                   # Shared .md modules (security, tools, skills, core_principles)
+│   ├── subagents/                 # Subagent-specific templates (.md)
+│   ├── roles/                     # Role definitions (.md)
+│   └── user.md                    # User task prompt template
 ├── tests/
 │   ├── backend/ (29 files)        # API, services, routes
 │   │   └── redis/ (3 files)       # EventHub, streaming
@@ -195,6 +203,11 @@ Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.
 | `pattern_detector.py` | `PatternDetector` | Extracted from trace_processor; unproductive loop detection |
 | `tracer.py` | — | Thin re-export shim; actual implementations in `tracers/` package |
 | `tracers/` | `TracerBase`, `ExecutionTracer`, `BackendConsoleTracer`, `EventingTracer`, `NullTracer`, `QuietTracer` | Tracer implementations (7 files) |
+| `prompt_engine.py` | `PromptTemplateEngine`, `PromptContext` | ${VAR} syntax template engine (replaces Jinja2 for main prompts) |
+| `prompt_context.py` | `build_prompt_context()` | Context builder with tool names, env vars, flags, security strings |
+| `prompt_manager.py` | `PromptManager` | Singleton prompt loader, caching, user overrides, hot reload |
+| `system_reminders.py` | `ReminderType`, `get_reminder()` | 42 contextual reminders injected during agent conversations |
+| `structured_output.py` | `parse_structured_output()` | Parse structured response headers from agent output |
 | `trace_processor.py` | `TraceProcessor` | SDK message → events (delegates to circuit_breaker/pattern_detector) |
 
 ### API (`src/api/`)
@@ -267,7 +280,7 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 | 3 | Ag3ntum Tools | `tools/ag3ntum/*`, `core/path_validator.py` | File/cmd ops |
 | 4 | Command Filter | `core/command_security.py` | Bash cmds |
 | 5 | Middleware | `api/security_middleware.py` | HTTP |
-| 6 | Prompts | `prompts/modules/security.j2` | LLM |
+| 6 | Prompts | `prompts/modules/security.md`, `prompts/system-prompts/02-security-constraints.md` | LLM |
 
 - **Container seccomp**: `seccomp-container.json` applied at container level (replaces previous `seccomp:unconfined`). Per-session seccomp profiles (`seccomp-isolated.json`, `seccomp-direct.json`) layered on top.
 - **UID isolation**: Each user → unique UID (50000..60000, ISOLATED mode). OS-enforced via bwrap. `UIDSecurityConfig.__post_init__` validates absolute bounds (50000 min for isolated, 1000 min for direct). Path translation: @`sandbox_path_resolver.md`
@@ -292,7 +305,7 @@ All tests run **inside Docker** via `docker-compose.test.yml` (root → drops to
 
 | Suite | Location | Runner |
 |-------|----------|--------|
-| Backend | `tests/backend/` (28) | pytest |
+| Backend | `tests/backend/` (35) | pytest |
 | Redis | `tests/backend/redis/` (3) | pytest |
 | Core | `tests/core-tests/` | pytest |
 | Security | `tests/security/` (5) | pytest |
@@ -487,6 +500,7 @@ role: default                     # from prompts/roles/
 - `user_secrets.yaml` — per-user encrypted credentials
 - `subagents.yaml` — subagent models, tools, prompts
 - `llm-api-proxy.yaml` — custom LLM routing, **auto-routes** models via proxy (@`how-to-connect-custom-llm.md`)
+- `prompt-overrides.yaml` — allowlist for user-customizable prompts (execution, context, output, roles)
 
 ### Users
 `./run.sh create-user` / `delete-user` / `cleanup-test-users`
@@ -521,7 +535,7 @@ sandboxed_envs:               # Per-user, sandbox-only
 
 **Events**: Agent → Redis (real-time, ephemeral) → SSE | Agent → SQLite (persistent) → polling fallback
 
-**Prompts**: Jinja2 templates in `prompts/`. `{{ var }}`, `{% for %}`, `{% include %}`. Injected by `ClaudeAgent`.
+**Prompts**: Unified template system via `PromptTemplateEngine`. All prompts use `.md` format with `${VAR}` syntax and Jinja2-compatible directives (`{% include %}`, `{% if %}`, `{# comment #}`). Main system prompts in `prompts/system-prompts/` are auto-loaded alphabetically. Shared modules (`.md` in `prompts/modules/`) are included by subagent templates. `PromptManager` handles loading, caching, and user overrides. Core operating principles (`03-core-principles.md` + `modules/core_principles.md`) are injected into both main agent and all subagents.
 
 **MCP server**: Single `ag3ntum` server → `mcp__ag3ntum__ToolName`. Registered in `tools/ag3ntum/__init__.py`.
 
@@ -633,5 +647,9 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 18. **Auth rate limiting is Redis-based** — Login rate limits (5 failed/account/min, 20 failed/IP/min) stored in Redis. Fails open if Redis is unavailable (allows login rather than locking users out).
 19. **Tool `_*_impl()` functions** — MCP tools (bash/edit/glob/grep/ls/read) have extracted `_*_impl()` functions for testability without MCP wrapper. Test these directly instead of going through MCP.
 20. **`src/` is read-only in container** — Mounted with `:ro` flag. Agents cannot modify application source code at runtime.
+21. **Unified prompt template engine** — `PromptTemplateEngine` handles `${VAR}` syntax and Jinja2-compatible directives (`{% include %}`, `{% if %}`, `{# comment #}`). Include resolution is recursive with circular-include protection (max depth 5). All prompts (system prompts, modules, subagent templates) use `.md` format and are processed by the same engine. `base_dir` for include resolution is set to `PROMPTS_DIR` by `PromptManager`.
+22. **Prompt overrides are allowlisted** — Users can customize prompts only for files listed in `config/prompt-overrides.yaml`. Security prompts (02-security-constraints.md) and system reminders are NOT overridable. User overrides go in `users/{username}/.prompts/`.
+23. **TodoWrite/TodoRead excluded from turn count** — `TraceProcessor` no longer counts TodoWrite/TodoRead tool calls as agent turns (they are planning tools). Tracked separately via `todo_tool_count`.
+24. **Agent self-assessment for session status** — `determine_session_status()` in `agent_core.py` reads structured `request_status` headers from agent output. Agent's own status (COMPLETE/PARTIAL/FAILED) is primary; defaults to COMPLETE if no header found.
 
 **Study `requirements.txt` before new features** — use existing packages.

@@ -14,6 +14,7 @@ Security Philosophy:
 2. Fail-closed on any error
 3. Log all matches for audit trail
 4. Allow trusted skill scripts from designated directories
+5. Command-name patterns only match against command tokens, not quoted arguments
 """
 import logging
 import re
@@ -25,6 +26,27 @@ from typing import Literal, Optional
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Regex to detect patterns that target command names (start with command-position anchor).
+# These patterns should only match against command tokens, not inside quoted arguments.
+# Content patterns (paths like /proc/, /etc/shadow) should match anywhere.
+_COMMAND_POSITION_PREFIX = re.compile(
+    r'^\(\?:\^'       # Starts with (?:^  — command-position anchor
+)
+
+# Regex to strip contents of quoted strings for command-name matching.
+# Preserves quote delimiters but removes content to prevent false positives
+# from natural language words that happen to match command names.
+# Example: python3 script.py "show the top 3" → python3 script.py ""
+_QUOTED_CONTENT_RE = re.compile(
+    r"""'(?:[^'\\]|\\.)*'"""   # single-quoted strings
+    r"""|"(?:[^"\\]|\\.)*\""""  # double-quoted strings
+    , re.DOTALL
+)
+
+# Regex to split compound commands on shell operators.
+# Used by _is_trusted_skill_command to check each subcommand independently.
+_COMPOUND_SPLIT_RE = re.compile(r'\s*(?:&&|\|\||[;|])\s*')
 
 # Default path to security rules
 DEFAULT_RULES_PATH = Path(__file__).parent.parent.parent / "config" / "security" / "command-filtering.yaml"
@@ -43,46 +65,50 @@ TRUSTED_SKILL_PATHS = (
 TRUSTED_INTERPRETERS = ("python", "python3", "bash", "sh")
 
 
-def _is_trusted_skill_command(command: str) -> bool:
+def _strip_quoted_content(command: str) -> str:
     """
-    Check if a command is executing a trusted skill script.
+    Strip contents of quoted strings from a command, preserving delimiters.
 
-    Skill scripts are Python/bash files located in designated skill directories.
-    These scripts are mounted read-only in the sandbox and are trusted to execute
-    even if their arguments might match security filter patterns.
+    This prevents false positives where natural language words inside quoted
+    arguments match command-name patterns (e.g., "top" in "show the top 3").
+
+    SECURITY NOTE: Content patterns (paths like /proc/, /etc/shadow) are applied
+    against the FULL command and are NOT affected by this stripping.
+
+    Returns:
+        Command with quoted string contents replaced by empty quotes.
+    """
+    return _QUOTED_CONTENT_RE.sub('""', command)
+
+
+def _check_subcommand_is_trusted_skill(subcmd: str) -> bool:
+    """
+    Check if a single subcommand (no &&, ||, ;, |) runs a trusted skill script.
 
     Args:
-        command: The full command string to check.
+        subcmd: A single shell command (no compound operators).
 
     Returns:
         True if the command executes a script from a trusted skill path.
     """
     try:
-        # Parse command safely
-        parts = shlex.split(command)
+        parts = shlex.split(subcmd.strip())
         if not parts:
             return False
 
-        # Get the base command (first part)
         base_cmd = Path(parts[0]).name
 
-        # Check if it's a trusted interpreter
         if base_cmd not in TRUSTED_INTERPRETERS:
             return False
 
-        # Look for script path in arguments
-        for i, arg in enumerate(parts[1:], start=1):
-            # Skip flags/options
+        for arg in parts[1:]:
             if arg.startswith("-"):
                 continue
 
-            # Resolve the path to eliminate .. traversal attempts
             resolved_arg = str(Path(arg).resolve())
 
-            # Check if this argument is a path to a skill script
             for skill_path in TRUSTED_SKILL_PATHS:
                 if resolved_arg.startswith(skill_path):
-                    # Verify it looks like a script file
                     if resolved_arg.endswith((".py", ".sh", ".bash")):
                         logger.info(
                             f"CommandSecurityFilter: TRUSTED SKILL - "
@@ -95,10 +121,42 @@ def _is_trusted_skill_command(command: str) -> bool:
 
         return False
 
-    except ValueError as e:
-        # shlex.split failed - malformed command, don't trust it
-        logger.debug(f"CommandSecurityFilter: Could not parse command for skill check: {e}")
+    except ValueError:
         return False
+    except Exception:
+        return False
+
+
+def _is_trusted_skill_command(command: str) -> bool:
+    """
+    Check if a command is executing a trusted skill script.
+
+    Skill scripts are Python/bash files located in designated skill directories.
+    These scripts are mounted read-only in the sandbox and are trusted to execute
+    even if their arguments might match security filter patterns.
+
+    Handles compound commands: ``cd . && python3 /skills/my_skill/run.py "arg"``
+    is correctly identified as a trusted skill command by checking each subcommand.
+
+    Args:
+        command: The full command string to check.
+
+    Returns:
+        True if the command executes a script from a trusted skill path.
+    """
+    try:
+        # Split compound commands on &&, ||, ;, |
+        subcommands = _COMPOUND_SPLIT_RE.split(command)
+
+        for subcmd in subcommands:
+            subcmd = subcmd.strip()
+            if not subcmd:
+                continue
+            if _check_subcommand_is_trusted_skill(subcmd):
+                return True
+
+        return False
+
     except Exception as e:
         logger.warning(f"CommandSecurityFilter: Error in skill check: {e}")
         return False
@@ -112,15 +170,22 @@ class SecurityRule:
     exploit: str
     category: str
     compiled_pattern: re.Pattern = field(init=False, repr=False)
-    
+    is_command_pattern: bool = field(init=False, repr=False)
+
     def __post_init__(self) -> None:
-        """Compile the regex pattern."""
+        """Compile the regex pattern and classify as command-name vs content pattern."""
         try:
             self.compiled_pattern = re.compile(self.pattern, re.IGNORECASE)
         except re.error as e:
             logger.error(f"Invalid regex in rule: {self.pattern} - {e}")
             # Create a pattern that never matches as fallback
             self.compiled_pattern = re.compile(r"^\b$")
+
+        # Auto-classify: patterns starting with (?:^ are "command-position" patterns
+        # that target command names. These are matched against a version of the command
+        # with quoted string contents stripped to prevent false positives.
+        # Content patterns (e.g., /proc/1/, /etc/shadow) match the full raw command.
+        self.is_command_pattern = bool(_COMMAND_POSITION_PREFIX.match(self.pattern))
 
 
 @dataclass
@@ -296,16 +361,29 @@ class CommandSecurityFilter:
         # Skill scripts are located in read-only mounted directories and are trusted.
         # This check runs BEFORE pattern matching to prevent false positives from
         # skill arguments (e.g., prompts containing words like "at" or "kill").
+        # Now handles compound commands like: cd . && python3 /skills/script.py "arg"
         if _is_trusted_skill_command(command):
             return SecurityCheckResult(
                 allowed=True,
                 message="Trusted skill script execution allowed",
             )
 
-        # Check command against all rules
+        # Two-tier matching:
+        # 1. "Command patterns" (targeting command names like kill, top, sudo) are
+        #    matched against a STRIPPED version of the command where quoted string
+        #    contents are removed. This prevents false positives from natural language
+        #    words in arguments (e.g., "top" in "show the top 3 folders").
+        # 2. "Content patterns" (targeting paths like /proc/, /etc/shadow, or specific
+        #    strings like release_agent) are matched against the FULL raw command.
+        #    These indicate malicious intent regardless of quoting context.
+        stripped_command = _strip_quoted_content(command)
+
         for rule in self._rules:
             try:
-                if rule.compiled_pattern.search(command):
+                # Choose which version of the command to match against
+                match_target = stripped_command if rule.is_command_pattern else command
+
+                if rule.compiled_pattern.search(match_target):
                     # Found a match
                     if rule.action == "block":
                         message = (

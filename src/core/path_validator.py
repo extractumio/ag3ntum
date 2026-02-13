@@ -1310,6 +1310,82 @@ class Ag3ntumPathValidator:
 
         return best_match
 
+    def get_sandbox_root_entries(self) -> list[tuple[str, str, str]]:
+        """
+        Synthesize a virtual directory listing of the sandbox root (/).
+
+        Returns entries matching what the agent would see inside bwrap,
+        based on configured mounts. This avoids exposing Docker container
+        internals while giving the agent a useful view of available paths.
+
+        Returns:
+            List of (display_path, access_mode, description) tuples.
+            display_path: The path as the agent should see it (e.g., "/workspace")
+            access_mode: "rw" or "ro"
+            description: Human-readable description
+        """
+        entries: list[tuple[str, str, str]] = []
+
+        # Core paths (always present)
+        entries.append(("/workspace", "rw", "Session workspace (working directory)"))
+
+        if self.persistent:
+            entries.append(("/persistent", "rw", "Persistent storage (cross-session)"))
+
+        # User environment
+        # Venv is always configured in permissions.yaml session_mounts
+        entries.append(("/venv", "ro", "Python virtual environment"))
+
+        if self.global_skills:
+            entries.append(("/skills", "ro", "Global skills"))
+        if self.user_skills:
+            entries.append(("/user-skills", "ro", "User skills"))
+
+        # Original-path mounts (e.g., /var/log)
+        for orig_path in sorted(self.original_path_mounts_ro.keys()):
+            entries.append((orig_path, "ro", f"Mounted from host (read-only)"))
+        for orig_path in sorted(self.original_path_mounts_rw.keys()):
+            entries.append((orig_path, "rw", f"Mounted from host (read-write)"))
+
+        return entries
+
+    def find_virtual_children(self, parent_path: str) -> list[tuple[str, str, str]] | None:
+        """
+        Find virtual directory children for a path that is a parent of configured mounts.
+
+        For example, if /var/log is a configured original-path mount,
+        calling this with "/var" returns [("log", "ro", "Mounted from host")].
+
+        Args:
+            parent_path: Absolute path to check (e.g., "/var")
+
+        Returns:
+            List of (child_name, access_mode, description) if any mounts exist
+            under this path. None if no mounts are found under this path.
+        """
+        parent = parent_path.rstrip("/") + "/"
+        children: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+
+        for orig_path in self.original_path_mounts_ro:
+            if orig_path.startswith(parent):
+                # Extract the immediate child component
+                remainder = orig_path[len(parent):]
+                child_name = remainder.split("/")[0]
+                if child_name and child_name not in seen:
+                    seen.add(child_name)
+                    children.append((child_name, "ro", f"Contains mount: {orig_path}"))
+
+        for orig_path in self.original_path_mounts_rw:
+            if orig_path.startswith(parent):
+                remainder = orig_path[len(parent):]
+                child_name = remainder.split("/")[0]
+                if child_name and child_name not in seen:
+                    seen.add(child_name)
+                    children.append((child_name, "rw", f"Contains mount: {orig_path}"))
+
+        return children if children else None
+
     def _is_within_boundary(self, path: Path, boundary: Path) -> bool:
         """
         Check if a resolved path is within the given boundary.

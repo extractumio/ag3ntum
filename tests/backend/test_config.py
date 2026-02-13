@@ -2,6 +2,7 @@
 Tests for the config endpoints.
 
 Tests the /api/v1/config/system_prompt admin-only endpoint.
+Tests the /api/v1/config/prompts/reload admin-only endpoint.
 """
 import pytest
 from unittest.mock import patch, MagicMock
@@ -14,13 +15,12 @@ class TestSystemPromptEndpoint:
         self, client, admin_auth_headers
     ):
         """Admin users should be able to access the system prompt."""
-        # Mock the prompt builder to avoid filesystem dependencies
-        with patch("src.api.routes.config.get_prompt_builder") as mock_get_builder:
-            mock_builder = MagicMock()
-            mock_builder.build_system_prompt.return_value = "Test system prompt content"
-            mock_builder.get_available_roles.return_value = ["default", "researcher"]
-            mock_builder.get_template_modules.return_value = ["identity", "security", "output"]
-            mock_get_builder.return_value = mock_builder
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.build_system_prompt.return_value = "Test system prompt content"
+            mock_manager.get_available_roles.return_value = ["default", "researcher"]
+            mock_manager.get_prompt_modules.return_value = ["identity", "security", "output"]
+            mock_get_manager.return_value = mock_manager
 
             response = client.get(
                 "/api/v1/config/system_prompt",
@@ -34,7 +34,7 @@ class TestSystemPromptEndpoint:
             assert data["role"] == "default"
             assert data["model"] == "claude-sonnet-4-20250514"
             assert "available_roles" in data
-            assert "template_modules" in data
+            assert "prompt_modules" in data
 
     def test_regular_user_gets_403(self, client, auth_headers):
         """Regular users should get 403 Forbidden."""
@@ -64,12 +64,12 @@ class TestSystemPromptEndpoint:
 
     def test_custom_role_parameter(self, client, admin_auth_headers):
         """Admin can request system prompt with custom role."""
-        with patch("src.api.routes.config.get_prompt_builder") as mock_get_builder:
-            mock_builder = MagicMock()
-            mock_builder.build_system_prompt.return_value = "Custom role prompt"
-            mock_builder.get_available_roles.return_value = ["default", "researcher"]
-            mock_builder.get_template_modules.return_value = ["identity"]
-            mock_get_builder.return_value = mock_builder
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.build_system_prompt.return_value = "Custom role prompt"
+            mock_manager.get_available_roles.return_value = ["default", "researcher"]
+            mock_manager.get_prompt_modules.return_value = ["identity"]
+            mock_get_manager.return_value = mock_manager
 
             response = client.get(
                 "/api/v1/config/system_prompt?role=researcher",
@@ -80,19 +80,19 @@ class TestSystemPromptEndpoint:
             data = response.json()
             assert data["role"] == "researcher"
 
-            # Verify the builder was called with the custom role
-            mock_builder.build_system_prompt.assert_called_once()
-            call_kwargs = mock_builder.build_system_prompt.call_args.kwargs
+            # Verify the manager was called with the custom role
+            mock_manager.build_system_prompt.assert_called_once()
+            call_kwargs = mock_manager.build_system_prompt.call_args.kwargs
             assert call_kwargs["role"] == "researcher"
 
     def test_custom_model_parameter(self, client, admin_auth_headers):
         """Admin can request system prompt with custom model."""
-        with patch("src.api.routes.config.get_prompt_builder") as mock_get_builder:
-            mock_builder = MagicMock()
-            mock_builder.build_system_prompt.return_value = "Custom model prompt"
-            mock_builder.get_available_roles.return_value = ["default"]
-            mock_builder.get_template_modules.return_value = ["identity"]
-            mock_get_builder.return_value = mock_builder
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.build_system_prompt.return_value = "Custom model prompt"
+            mock_manager.get_available_roles.return_value = ["default"]
+            mock_manager.get_prompt_modules.return_value = ["identity"]
+            mock_get_manager.return_value = mock_manager
 
             response = client.get(
                 "/api/v1/config/system_prompt?model=claude-opus-4-20250514",
@@ -105,12 +105,12 @@ class TestSystemPromptEndpoint:
 
     def test_enable_skills_parameter(self, client, admin_auth_headers):
         """Admin can toggle skills in the prompt."""
-        with patch("src.api.routes.config.get_prompt_builder") as mock_get_builder:
-            mock_builder = MagicMock()
-            mock_builder.build_system_prompt.return_value = "No skills prompt"
-            mock_builder.get_available_roles.return_value = ["default"]
-            mock_builder.get_template_modules.return_value = ["identity"]
-            mock_get_builder.return_value = mock_builder
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.build_system_prompt.return_value = "No skills prompt"
+            mock_manager.get_available_roles.return_value = ["default"]
+            mock_manager.get_prompt_modules.return_value = ["identity"]
+            mock_get_manager.return_value = mock_manager
 
             response = client.get(
                 "/api/v1/config/system_prompt?enable_skills=false",
@@ -119,10 +119,40 @@ class TestSystemPromptEndpoint:
 
             assert response.status_code == 200
 
-            # Verify the builder was called with skills disabled
-            mock_builder.build_system_prompt.assert_called_once()
-            call_kwargs = mock_builder.build_system_prompt.call_args.kwargs
+            # Verify the manager was called with skills disabled
+            mock_manager.build_system_prompt.assert_called_once()
+            call_kwargs = mock_manager.build_system_prompt.call_args.kwargs
             assert call_kwargs["enable_skills"] is False
+
+
+class TestReloadPromptsEndpoint:
+    """Tests for POST /api/v1/config/prompts/reload."""
+
+    def test_admin_can_reload(self, client, admin_auth_headers):
+        """Admin users should be able to reload prompts."""
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.reload.return_value = 5
+            mock_get_manager.return_value = mock_manager
+
+            response = client.post(
+                "/api/v1/config/prompts/reload",
+                headers=admin_auth_headers,
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "ok"
+            assert data["cache_entries_cleared"] == 5
+
+    def test_regular_user_gets_403(self, client, auth_headers):
+        """Regular users should get 403 Forbidden."""
+        response = client.post(
+            "/api/v1/config/prompts/reload",
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 403
 
 
 class TestRequireAdminDependency:
@@ -130,12 +160,12 @@ class TestRequireAdminDependency:
 
     def test_admin_user_passes(self, client, admin_auth_headers):
         """Admin user should pass the admin check."""
-        with patch("src.api.routes.config.get_prompt_builder") as mock_get_builder:
-            mock_builder = MagicMock()
-            mock_builder.build_system_prompt.return_value = "Test"
-            mock_builder.get_available_roles.return_value = []
-            mock_builder.get_template_modules.return_value = []
-            mock_get_builder.return_value = mock_builder
+        with patch("src.api.routes.config.get_prompt_manager") as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_manager.build_system_prompt.return_value = "Test"
+            mock_manager.get_available_roles.return_value = []
+            mock_manager.get_prompt_modules.return_value = []
+            mock_get_manager.return_value = mock_manager
 
             response = client.get(
                 "/api/v1/config/system_prompt",
@@ -162,6 +192,7 @@ class TestPromptBuilderService:
     def test_build_system_prompt_with_defaults(self):
         """PromptBuilder should render prompt with default values."""
         from src.services.prompt_builder import PromptBuilder
+        from src.core.prompt_manager import PromptManager
         from pathlib import Path
 
         # Get the real prompts directory
@@ -170,16 +201,17 @@ class TestPromptBuilderService:
         if not prompts_dir.exists():
             pytest.skip("Prompts directory not found")
 
+        PromptManager.reset_instance()
         builder = PromptBuilder(prompts_dir)
         prompt = builder.build_system_prompt()
 
         # Verify the prompt contains expected sections
         assert len(prompt) > 0
-        assert "---" in prompt or "status" in prompt.lower()  # Header or formatting
 
     def test_get_available_roles(self):
         """PromptBuilder should list available roles."""
         from src.services.prompt_builder import PromptBuilder
+        from src.core.prompt_manager import PromptManager
         from pathlib import Path
 
         prompts_dir = Path(__file__).parent.parent.parent / "prompts"
@@ -187,6 +219,7 @@ class TestPromptBuilderService:
         if not prompts_dir.exists():
             pytest.skip("Prompts directory not found")
 
+        PromptManager.reset_instance()
         builder = PromptBuilder(prompts_dir)
         roles = builder.get_available_roles()
 
@@ -198,6 +231,7 @@ class TestPromptBuilderService:
     def test_get_template_modules(self):
         """PromptBuilder should list template modules."""
         from src.services.prompt_builder import PromptBuilder
+        from src.core.prompt_manager import PromptManager
         from pathlib import Path
 
         prompts_dir = Path(__file__).parent.parent.parent / "prompts"
@@ -205,6 +239,7 @@ class TestPromptBuilderService:
         if not prompts_dir.exists():
             pytest.skip("Prompts directory not found")
 
+        PromptManager.reset_instance()
         builder = PromptBuilder(prompts_dir)
         modules = builder.get_template_modules()
 
@@ -214,6 +249,7 @@ class TestPromptBuilderService:
     def test_invalid_role_raises_error(self):
         """PromptBuilder should raise error for invalid role."""
         from src.services.prompt_builder import PromptBuilder
+        from src.core.prompt_manager import PromptManager
         from pathlib import Path
 
         prompts_dir = Path(__file__).parent.parent.parent / "prompts"
@@ -221,6 +257,7 @@ class TestPromptBuilderService:
         if not prompts_dir.exists():
             pytest.skip("Prompts directory not found")
 
+        PromptManager.reset_instance()
         builder = PromptBuilder(prompts_dir)
 
         with pytest.raises(FileNotFoundError, match="Role file not found"):

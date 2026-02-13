@@ -382,6 +382,80 @@ class TestTraceProcessorToolErrorTracking:
         assert trace_processor.had_tool_errors() is True
 
 
+class TestTodoToolTurnExclusion:
+    """Tests for TodoWrite/TodoRead exclusion from turn counting.
+
+    Planning tools (TodoWrite, TodoRead) should not count as turns
+    in the metrics, since they are overhead not contributing to
+    the agent's actual work.
+    """
+
+    @pytest.fixture
+    def trace_processor(self) -> TraceProcessor:
+        """Create a TraceProcessor with a NullTracer for testing."""
+        return TraceProcessor(NullTracer())
+
+    @pytest.mark.unit
+    def test_todowrite_not_counted_as_turn(self, trace_processor: TraceProcessor) -> None:
+        """TodoWrite tool calls should not increment the turn count."""
+        from claude_agent_sdk.types import ToolUseBlock
+
+        block = ToolUseBlock(id="tw-1", name="TodoWrite", input={"todos": []})
+        trace_processor._process_content_block(block)
+
+        assert trace_processor._metrics_turns == 0
+        assert trace_processor.todo_tool_count == 1
+
+    @pytest.mark.unit
+    def test_todoread_not_counted_as_turn(self, trace_processor: TraceProcessor) -> None:
+        """TodoRead tool calls should not increment the turn count."""
+        from claude_agent_sdk.types import ToolUseBlock
+
+        block = ToolUseBlock(id="tr-1", name="TodoRead", input={})
+        trace_processor._process_content_block(block)
+
+        assert trace_processor._metrics_turns == 0
+        assert trace_processor.todo_tool_count == 1
+
+    @pytest.mark.unit
+    def test_regular_tools_counted_as_turns(self, trace_processor: TraceProcessor) -> None:
+        """Non-todo tools should still count as turns."""
+        from claude_agent_sdk.types import ToolUseBlock
+
+        block = ToolUseBlock(id="rw-1", name="Read", input={"path": "/workspace/file.py"})
+        trace_processor._process_content_block(block)
+
+        assert trace_processor._metrics_turns == 1
+        assert trace_processor.todo_tool_count == 0
+
+    @pytest.mark.unit
+    def test_mixed_tools_turn_count(self, trace_processor: TraceProcessor) -> None:
+        """Mixed tool calls: only non-todo tools count as turns."""
+        from claude_agent_sdk.types import ToolUseBlock
+
+        tools = [
+            ("t1", "Read", {"path": "/workspace/file.py"}),
+            ("t2", "TodoWrite", {"todos": []}),
+            ("t3", "Write", {"path": "/workspace/out.py", "content": "x"}),
+            ("t4", "TodoRead", {}),
+            ("t5", "Bash", {"command": "echo hello"}),
+            ("t6", "TodoWrite", {"todos": [{"content": "done", "status": "completed"}]}),
+        ]
+
+        for tool_id, name, tool_input in tools:
+            block = ToolUseBlock(id=tool_id, name=name, input=tool_input)
+            trace_processor._process_content_block(block)
+
+        # 3 real tools (Read, Write, Bash), 3 todo tools
+        assert trace_processor._metrics_turns == 3
+        assert trace_processor.todo_tool_count == 3
+
+    @pytest.mark.unit
+    def test_initial_todo_count_is_zero(self, trace_processor: TraceProcessor) -> None:
+        """Todo tool count starts at zero."""
+        assert trace_processor.todo_tool_count == 0
+
+
 class TestPathDisplayTransformation:
     """Tests for path display transformation in TraceProcessor.
 

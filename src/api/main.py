@@ -26,7 +26,7 @@ from ..services.session_service import InvalidSessionIdError, SessionNotFoundErr
 from ..core.logging_config import setup_backend_logging
 from ..core.subagent_manager import get_subagent_manager
 from ..db.database import init_db, DATABASE_PATH
-from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, queue_router, sessions_router, skills_router
+from .routes import auth_router, config_router, files_router, health_router, llm_proxy_router, llm_proxy_session_router, queue_router, sessions_router, skills_router
 from .waf_filter import validate_request_size
 from .security_middleware import (
     build_allowed_origins,
@@ -361,6 +361,7 @@ def create_app() -> FastAPI:
     app.include_router(files_router, prefix="/api/v1")
     app.include_router(queue_router, prefix="/api/v1")
     app.include_router(llm_proxy_router, prefix="/api")
+    app.include_router(llm_proxy_session_router, prefix="/api")
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(config_router, prefix="/api/v1")
 

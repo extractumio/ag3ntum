@@ -641,6 +641,36 @@ def create_subagent_stop_hook(
     return subagent_stop_hook
 
 
+def create_pre_compact_hook(
+    hook_logger: Optional[logging.Logger] = None,
+) -> HookCallback:
+    """
+    Create a PreCompact hook for compaction diagnostics.
+
+    Logs when context compaction is triggered, useful for monitoring
+    context window usage patterns.
+
+    Args:
+        hook_logger: Logger instance. Defaults to module logger.
+
+    Returns:
+        Async hook callback function.
+    """
+    _logger = hook_logger or logger
+
+    async def pre_compact_hook(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any
+    ) -> dict[str, Any]:
+        """PreCompact hook for compaction diagnostics."""
+        trigger = input_data.get("trigger", "unknown")
+        _logger.info(f"Context compaction triggered: trigger={trigger}")
+        return {"continue_": True}
+
+    return pre_compact_hook
+
+
 # =============================================================================
 # REMOVED SECURITY HOOKS (now handled by Ag3ntumPathValidator and bwrap)
 # =============================================================================

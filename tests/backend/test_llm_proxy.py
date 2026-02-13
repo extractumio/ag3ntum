@@ -360,6 +360,41 @@ class TestGetProxyBaseUrlForModel:
         # because SDK appends /v1/messages
         assert result.endswith("/api/llm-proxy")
 
+    def test_proxy_url_includes_session_id(self):
+        """Proxy URL should include session_id in path when provided."""
+        from src.core.agent_core import _get_proxy_base_url_for_model
+
+        mock_config = MagicMock()
+        mock_config.models = {
+            "test:model": MagicMock(provider="test-provider"),
+        }
+        mock_config.providers = {
+            "test-provider": MagicMock(type="openai-compatible"),
+        }
+
+        with patch("src.core.agent_core.load_llm_proxy_config", return_value=mock_config):
+            result = _get_proxy_base_url_for_model("test:model", session_id="abc-123")
+
+        assert result.endswith("/api/llm-proxy/s/abc-123")
+
+    def test_proxy_url_no_session_id_by_default(self):
+        """Proxy URL should not include session path when session_id is None."""
+        from src.core.agent_core import _get_proxy_base_url_for_model
+
+        mock_config = MagicMock()
+        mock_config.models = {
+            "test:model": MagicMock(provider="test-provider"),
+        }
+        mock_config.providers = {
+            "test-provider": MagicMock(type="openai-compatible"),
+        }
+
+        with patch("src.core.agent_core.load_llm_proxy_config", return_value=mock_config):
+            result = _get_proxy_base_url_for_model("test:model", session_id=None)
+
+        assert result.endswith("/api/llm-proxy")
+        assert "/s/" not in result
+
 
 class TestValidateResponse:
     """Tests for _validate_response() error message improvements."""
@@ -1818,6 +1853,114 @@ class TestProxyDebugMode:
 
         # Directory should not exist or be empty
         assert not test_debug_dir.exists() or len(list(test_debug_dir.iterdir())) == 0
+
+    def test_save_debug_file_with_session_id(self, tmp_path):
+        """_save_debug_file with session_id should save under session subdirectory."""
+        from src.api.routes.llm_proxy import _save_debug_file
+        import json
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+
+        with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+            _save_debug_file("test_file.json", {"key": "value"}, session_id="sess-abc-123")
+
+        session_dir = test_debug_dir / "sess-abc-123"
+        assert session_dir.exists()
+        saved_file = session_dir / "test_file.json"
+        assert saved_file.exists()
+
+        content = json.loads(saved_file.read_text())
+        assert content["key"] == "value"
+        assert "timestamp" in content
+
+    def test_save_debug_file_without_session_id_saves_flat(self, tmp_path):
+        """_save_debug_file without session_id should save in root debug dir."""
+        from src.api.routes.llm_proxy import _save_debug_file
+        import json
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+
+        with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+            _save_debug_file("test_file.json", {"key": "value"})
+
+        saved_file = test_debug_dir / "test_file.json"
+        assert saved_file.exists()
+        # Should NOT be in a subdirectory
+        assert not any(p.is_dir() for p in test_debug_dir.iterdir())
+
+    def test_cleanup_scoped_to_session_directory(self, tmp_path):
+        """Cleanup with session_id should only affect that session's directory."""
+        from src.api.routes.llm_proxy import _cleanup_debug_files, DEBUG_MAX_FILES
+        import time
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+        session_dir = test_debug_dir / "test-session"
+        session_dir.mkdir(parents=True)
+        other_dir = test_debug_dir / "other-session"
+        other_dir.mkdir(parents=True)
+
+        # Create files in both directories
+        for i in range(DEBUG_MAX_FILES + 5):
+            (session_dir / f"test_{i:04d}.json").write_text("{}")
+            time.sleep(0.001)
+        (other_dir / "keep_me.json").write_text("{}")
+
+        with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+            _cleanup_debug_files(session_id="test-session")
+
+        # Session directory should be cleaned up
+        remaining = list(session_dir.glob("*.json"))
+        assert len(remaining) <= DEBUG_MAX_FILES
+
+        # Other session directory should be untouched
+        assert (other_dir / "keep_me.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_proxy_openai_passes_session_id_to_debug(self, tmp_path):
+        """_proxy_openai should save debug files under session subdirectory."""
+        from src.api.routes.llm_proxy import _proxy_openai
+        import json
+
+        mock_provider = MagicMock()
+        mock_provider.base_url = "https://api.example.com/v1"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "test",
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        class MockClient:
+            async def post(self, *args, **kwargs):
+                return mock_response
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+
+        test_debug_dir = tmp_path / "llm_proxy_debug"
+
+        with patch("httpx.AsyncClient", return_value=MockClient()):
+            with patch("src.api.routes.llm_proxy._is_debug_enabled", return_value=True):
+                with patch("src.api.routes.llm_proxy.DEBUG_DIR", test_debug_dir):
+                    payload = {
+                        "model": "test:model",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                    }
+                    await _proxy_openai(
+                        payload, mock_provider, "test-key", "gpt-4",
+                        stream=False, session_id="my-session-42"
+                    )
+
+        session_dir = test_debug_dir / "my-session-42"
+        assert session_dir.exists()
+        in_files = list(session_dir.glob("in_*.json"))
+        out_files = list(session_dir.glob("out_*.json"))
+        assert len(in_files) == 1
+        assert len(out_files) == 1
 
 
 class TestNonStreamingUsageMapping:

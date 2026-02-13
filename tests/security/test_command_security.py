@@ -27,6 +27,7 @@ from src.core.command_security import (
     get_command_security_filter,
     check_command_security,
     _is_trusted_skill_command,
+    _strip_quoted_content,
 )
 
 
@@ -569,6 +570,179 @@ class TestTrustedSkillBypass:
     def test_no_arguments_blocked(self) -> None:
         """A bare interpreter should not be trusted."""
         assert not _is_trusted_skill_command("python3")
+
+    def test_compound_cd_and_skill(self) -> None:
+        """Compound 'cd . && python3 /skills/...' should be trusted."""
+        assert _is_trusted_skill_command(
+            "cd . && python3 /skills/create_image/image_gen.py \"Create top 3\""
+        )
+
+    def test_compound_cd_and_user_skill(self) -> None:
+        """Compound 'cd dir && bash /user-skills/...' should be trusted."""
+        assert _is_trusted_skill_command(
+            "cd /workspace && bash /user-skills/my_skill/run.sh --verbose"
+        )
+
+    def test_compound_semicolon_skill(self) -> None:
+        """Compound 'echo hi; python3 /skills/...' should be trusted."""
+        assert _is_trusted_skill_command(
+            "echo starting; python3 /skills/deep-research/run.py"
+        )
+
+    def test_compound_pipe_not_trusted(self) -> None:
+        """Pipe to skill script is NOT a skill execution."""
+        assert not _is_trusted_skill_command(
+            "echo data | python3 /tmp/evil.py"
+        )
+
+    def test_compound_with_traversal_blocked(self) -> None:
+        """Compound command with path traversal should NOT be trusted."""
+        assert not _is_trusted_skill_command(
+            "cd . && python3 /skills/../tmp/evil.py"
+        )
+
+
+# =============================================================================
+# Test: False Positive Prevention
+# =============================================================================
+
+class TestFalsePositivePrevention:
+    """Test that common words in quoted arguments don't trigger command-name blocks."""
+
+    @pytest.mark.parametrize("command", [
+        'python3 script.py "show the top 3 folders"',
+        'python3 scan.py "top results by count"',
+        "echo 'the top priority items'",
+        'python3 image_gen.py "Create infographic with top folders"',
+    ])
+    def test_top_in_quotes_not_blocked(
+        self, security_filter: CommandSecurityFilter, command: str
+    ) -> None:
+        """The word 'top' inside quoted arguments should NOT trigger the top block."""
+        result = security_filter.check_command(command)
+        assert result.allowed, f"Should NOT block: {command}"
+
+    @pytest.mark.parametrize("command", [
+        "top -bn1",
+        "  top",
+        "echo test; top -bn1",
+        "echo test && top",
+    ])
+    def test_actual_top_command_still_blocked(
+        self, security_filter: CommandSecurityFilter, command: str
+    ) -> None:
+        """The actual 'top' command should still be blocked."""
+        result = security_filter.check_command(command)
+        assert result.should_block, f"Should block: {command}"
+
+    @pytest.mark.parametrize("command", [
+        'python3 gen.py "kill the process of generating"',
+        'echo "do not kill this task"',
+        'python3 report.py "overkill approach"',
+    ])
+    def test_kill_in_quotes_not_blocked(
+        self, security_filter: CommandSecurityFilter, command: str
+    ) -> None:
+        """The word 'kill' inside quoted arguments should NOT trigger the kill block."""
+        result = security_filter.check_command(command)
+        assert result.allowed, f"Should NOT block: {command}"
+
+    @pytest.mark.parametrize("command", [
+        'python3 script.py "halt the execution"',
+        'python3 report.py "do not halt progress"',
+    ])
+    def test_halt_in_quotes_not_blocked(
+        self, security_filter: CommandSecurityFilter, command: str
+    ) -> None:
+        """The word 'halt' inside quoted arguments should NOT trigger the halt block."""
+        result = security_filter.check_command(command)
+        assert result.allowed, f"Should NOT block: {command}"
+
+    @pytest.mark.parametrize("command", [
+        'python3 script.py "ps: this is a note"',
+        'echo "ps output goes here"',
+    ])
+    def test_ps_in_quotes_not_blocked(
+        self, security_filter: CommandSecurityFilter, command: str
+    ) -> None:
+        """The word 'ps' inside quoted arguments should NOT trigger the ps block."""
+        result = security_filter.check_command(command)
+        assert result.allowed, f"Should NOT block: {command}"
+
+    def test_content_pattern_still_matches_in_quotes(
+        self, security_filter: CommandSecurityFilter
+    ) -> None:
+        """Content patterns like /proc/1/ should still match inside quotes."""
+        result = security_filter.check_command('cat "/proc/1/cmdline"')
+        assert result.should_block, "Should block /proc/1/ even in quotes"
+
+    def test_content_pattern_etc_shadow_in_quotes(
+        self, security_filter: CommandSecurityFilter
+    ) -> None:
+        """Content patterns like /etc/shadow should still match inside quotes."""
+        result = security_filter.check_command('cat "/etc/shadow"')
+        assert result.should_block, "Should block /etc/shadow even in quotes"
+
+
+# =============================================================================
+# Test: Quote Stripping Helper
+# =============================================================================
+
+class TestStripQuotedContent:
+    """Test the _strip_quoted_content helper function."""
+
+    def test_single_quotes_stripped(self) -> None:
+        assert _strip_quoted_content("echo 'hello world'") == 'echo ""'
+
+    def test_double_quotes_stripped(self) -> None:
+        assert _strip_quoted_content('echo "hello world"') == 'echo ""'
+
+    def test_mixed_quotes(self) -> None:
+        result = _strip_quoted_content("""echo "hello" 'world'""")
+        assert result == 'echo "" ""'
+
+    def test_no_quotes_unchanged(self) -> None:
+        assert _strip_quoted_content("ls -la /tmp") == "ls -la /tmp"
+
+    def test_escaped_quote_inside(self) -> None:
+        result = _strip_quoted_content(r'echo "hello \"world\""')
+        assert result == 'echo ""'
+
+    def test_empty_quotes_preserved(self) -> None:
+        assert _strip_quoted_content('echo ""') == 'echo ""'
+
+    def test_command_tokens_preserved(self) -> None:
+        result = _strip_quoted_content('cd . && python3 script.py "the top 3"')
+        assert "cd" in result
+        assert "python3" in result
+        assert "top" not in result
+
+
+# =============================================================================
+# Test: Compound Skill Commands with Security Filter
+# =============================================================================
+
+class TestCompoundSkillIntegration:
+    """End-to-end tests for compound commands with skill scripts."""
+
+    def test_cd_and_skill_with_top_in_args(
+        self, security_filter: CommandSecurityFilter
+    ) -> None:
+        """cd . && python3 /skills/script.py 'show top 3' should be allowed."""
+        result = security_filter.check_command(
+            "cd . && python3 /skills/create_image/image_gen.py "
+            '"Create infographic of top 3 folders"'
+        )
+        assert result.allowed, "Trusted skill with 'top' in args should be allowed"
+
+    def test_skill_with_kill_in_args(
+        self, security_filter: CommandSecurityFilter
+    ) -> None:
+        """python3 /skills/script.py 'kill the process' should be allowed."""
+        result = security_filter.check_command(
+            'python3 /skills/debug/analyze.py "kill the stale connections"'
+        )
+        assert result.allowed, "Trusted skill with 'kill' in args should be allowed"
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -146,7 +147,7 @@ def openai_to_claude_response(
     usage = _map_openai_usage(payload.get("usage", {}))
 
     return {
-        "id": payload.get("id", "proxy-response"),
+        "id": payload.get("id") or f"msg_proxy_{uuid.uuid4().hex[:24]}",
         "type": "message",
         "role": "assistant",
         "model": model_name,
@@ -161,7 +162,7 @@ async def stream_openai_to_claude(
     response: httpx.Response,
     model_name: str,
 ) -> AsyncIterator[str]:
-    message_id = "proxy-stream"
+    message_id = f"msg_proxy_{uuid.uuid4().hex[:24]}"
     # OpenAI includes full usage in the final streaming chunk
     # (when stream_options.include_usage is set)
     last_usage: dict[str, Any] = {}

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import SESSIONS_DIR
 from ..core.sessions import SessionManager, generate_session_id, sudo_chown_recursive
+from ..db.database import AsyncSessionLocal
 from ..db.models import Session, User
 from ..db.retry import with_db_retry
 
@@ -368,6 +369,41 @@ class SessionService:
             raise
 
         return session
+
+    async def update_resume_id(
+        self,
+        session_id: str,
+        resume_id: str,
+    ) -> None:
+        """
+        Update the claude_session_id for a session.
+
+        Called from event_service when an agent_start event is received,
+        so it manages its own database session.
+
+        Args:
+            session_id: The ag3ntum session ID.
+            resume_id: The claude SDK session ID to store.
+        """
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Session).where(Session.id == session_id)
+                )
+                session = result.scalar_one_or_none()
+                if session:
+                    session.claude_session_id = resume_id
+                    session.updated_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    logger.debug(
+                        f"Updated claude_session_id for {session_id}: {resume_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"Cannot update resume_id: session {session_id} not found"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to update resume_id for {session_id}: {e}")
 
     async def delete_session(
         self,

@@ -623,6 +623,11 @@ export function stripResumeContext(text: string): string {
   return text.replace(/<resume-context>[\s\S]*?<\/resume-context>\s*/g, '').trim();
 }
 
+// Strip <system-reminder>...</system-reminder> from display (injected by prompt engine)
+export function stripSystemReminders(text: string): string {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g, '').trim();
+}
+
 // Copy to clipboard utilities
 export async function copyAsRichText(element: HTMLElement): Promise<boolean> {
   try {

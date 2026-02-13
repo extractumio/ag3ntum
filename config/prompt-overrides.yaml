@@ -1,0 +1,26 @@
+# Prompt Override Allowlist
+# Defines which prompts users can customize in their .prompts/ directory
+
+allowed_overrides:
+  # System prompts - limited customization
+  system-prompts:
+    - 03-execution.md          # Task execution guidance
+    - 04-context-management.md # Context management preferences
+    - 06-output.md             # Output formatting preferences
+    # Note: 02-security-constraints.md is NOT allowed
+
+  # Roles - users can create custom roles
+  roles:
+    - "*.md"                   # Any role file allowed
+
+  # Tool descriptions - NOT allowed (security)
+  tool-descriptions: []
+
+  # System reminders - NOT allowed (consistency)
+  system-reminders: []
+
+  # Agent prompts - NOT allowed (security)
+  agent-prompts: []
+
+# User override directory pattern
+user_override_path: "users/{username}/.prompts/"
