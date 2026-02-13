@@ -1008,10 +1008,13 @@ function do_cleanup() {
   echo "Removing project networks..."
   docker network ls --filter "name=${project_name}_" -q 2>/dev/null | xargs -r docker network rm 2>/dev/null || true
 
-  # Step 4: Remove ag3ntum images only if no other instances are running
-  local other_running
-  other_running=$(docker compose ls -q 2>/dev/null | grep -v "^${project_name}$" || true)
-  if [[ -z "${other_running}" ]]; then
+  # Step 4: Remove ag3ntum images only if no other ag3ntum instances are running
+  # After docker compose down above, our containers are stopped. Check if any
+  # still-running containers use ag3ntum images (= other worktree instances).
+  # This avoids false positives from unrelated compose projects (postgres, etc.).
+  local other_ag3ntum
+  other_ag3ntum=$(docker ps --format '{{.Image}}' 2>/dev/null | grep "^${IMAGE_PREFIX}:" || true)
+  if [[ -z "${other_ag3ntum}" ]]; then
     echo "No other instances running. Removing ${IMAGE_PREFIX} images..."
     local images
     images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" || true)
@@ -1028,7 +1031,7 @@ function do_cleanup() {
       echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
     fi
   else
-    echo "Other instances still running — preserving shared images."
+    echo "Other ag3ntum instances still running — preserving shared images."
   fi
 
   # Step 5: Remove generated files
