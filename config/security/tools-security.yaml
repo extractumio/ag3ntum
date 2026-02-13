@@ -17,6 +17,7 @@ path_validator:
   # Patterns blocked even within workspace (matched against relative paths)
   blocklist:
     - "*.env"
+    - ".env.*"
     - "*.key"
     - ".git/**"
     - "__pycache__/**"
@@ -25,7 +26,14 @@ path_validator:
     - "*.pem"
     - "*.p12"
     - "*.pfx"
-  
+
+  # Filenames exempt from blocklist (safe templates that should remain accessible)
+  blocklist_exemptions:
+    - ".env.example"
+    - ".env.sample"
+    - ".env.template"
+    - ".env.defaults"
+
   # If set, only these patterns are allowed (null = allow all not in blocklist)
   # allowlist:
   #   - "**/*.py"

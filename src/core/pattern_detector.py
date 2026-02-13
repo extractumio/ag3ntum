@@ -115,12 +115,17 @@ class PatternDetector:
             if len(set(recent_tools)) == 1:  # All same tool
                 # Don't trip for subagent tools (Task) as they may legitimately be called multiple times
                 if tool_name not in ("Task",):
-                    self.trip(
-                        f"Unproductive loop detected: '{tool_name}' called "
-                        f"{self._max_repetitive_calls} times consecutively without "
-                        f"other actions. This suggests the agent is stuck. "
-                        f"Consider using mcp__ag3ntum__AskUserQuestion to get user guidance."
-                    )
+                    # Check if inputs are also identical — parallel batch work
+                    # (same tool, different inputs) should not trip the detector
+                    recent_hashes = [t[1] for t in recent]
+                    if len(set(recent_hashes)) <= 1:
+                        # Genuine unproductive loop: same tool AND same input repeated
+                        self.trip(
+                            f"Unproductive loop detected: '{tool_name}' called "
+                            f"{self._max_repetitive_calls} times consecutively with "
+                            f"identical inputs. This suggests the agent is stuck. "
+                            f"Consider using mcp__ag3ntum__AskUserQuestion to get user guidance."
+                        )
 
     def check_todowrite_only_pattern(self, tool_name: str) -> None:
         """

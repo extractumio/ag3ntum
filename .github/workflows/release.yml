@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    branches: [release]
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract content between this version's heading and the next heading
+          BODY=$(awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+          # Write to file for multi-line support
+          echo "$BODY" > /tmp/release-body.md
+
+      - name: Create git tag
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes-file /tmp/release-body.md

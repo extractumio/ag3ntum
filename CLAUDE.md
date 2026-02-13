@@ -625,6 +625,34 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 
 ---
 
+## Versioning & Releases
+
+**Version source of truth**: `VERSION` file in project root (plain-text semver, e.g. `0.1.0`).
+
+**Branch model**:
+- `main` — active development (may be unstable)
+- `release` — stable releases only (protected branch)
+
+**Release process**: See `docs/plans/release-workflow.md` for full details.
+1. Update `VERSION` with new semver number
+2. Update `CHANGELOG.md` with a `## [X.Y.Z] - YYYY-MM-DD` section
+3. Commit on `main`, create PR to `release`
+4. GitHub Actions gate checks VERSION + CHANGELOG were modified
+5. On merge, GitHub Actions auto-creates git tag `vX.Y.Z` + GitHub Release
+
+**Where version is used**:
+| Location | How |
+|----------|-----|
+| Health endpoint (`/api/v1/health`) | `_read_version()` reads `VERSION` at startup |
+| Docker image | `ARG APP_VERSION` build arg + label + `APP_VERSION` env var |
+| Image tag | `{version}-{timestamp}` (e.g. `0.1.0-20260213...`) |
+
+**GitHub Actions workflows**:
+- `.github/workflows/release-gate.yml` — PR check for `release` branch
+- `.github/workflows/release.yml` — auto-tag + GitHub Release on merge to `release`
+
+---
+
 ## Gotchas
 
 1. **Native tools BLOCKED** — `mcp__ag3ntum__*` only (`permissions.yaml` → `tools.disabled`)
@@ -651,5 +679,6 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 22. **Prompt overrides are allowlisted** — Users can customize prompts only for files listed in `config/prompt-overrides.yaml`. Security prompts (02-security-constraints.md) and system reminders are NOT overridable. User overrides go in `users/{username}/.prompts/`.
 23. **TodoWrite/TodoRead excluded from turn count** — `TraceProcessor` no longer counts TodoWrite/TodoRead tool calls as agent turns (they are planning tools). Tracked separately via `todo_tool_count`.
 24. **Agent self-assessment for session status** — `determine_session_status()` in `agent_core.py` reads structured `request_status` headers from agent output. Agent's own status (COMPLETE/PARTIAL/FAILED) is primary; defaults to COMPLETE if no header found.
+25. **Security refusals show "failed" status** — When the agent correctly refuses a malicious/disallowed request, session status is "failed" because the agent self-assesses as unable to complete the task. This is expected behavior. To distinguish security refusals from actual failures, check the agent's response content for refusal language. A dedicated "refused" status is a future enhancement.
 
 **Study `requirements.txt` before new features** — use existing packages.

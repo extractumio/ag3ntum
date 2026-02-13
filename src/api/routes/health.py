@@ -15,7 +15,24 @@ from ..models import ComponentHealth, ConfigResponse, DeepHealthResponse, Health
 
 router = APIRouter(tags=["health"])
 
-API_VERSION = "1.0.0"
+
+def _read_version() -> str:
+    """Read version from VERSION file at startup."""
+    import os
+    from pathlib import Path
+
+    root = os.environ.get("AG3NTUM_ROOT")
+    if root:
+        version_file = Path(root) / "VERSION"
+    else:
+        version_file = Path(__file__).parent.parent.parent.parent / "VERSION"
+    try:
+        return version_file.read_text().strip()
+    except FileNotFoundError:
+        return "dev"
+
+
+API_VERSION = _read_version()
 
 
 @router.get("/health", response_model=HealthResponse)

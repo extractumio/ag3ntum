@@ -73,9 +73,18 @@ logger = logging.getLogger(__name__)
 
 # Default blocklist patterns for sensitive files (matched against relative paths)
 DEFAULT_BLOCKLIST: list[str] = [
-    "*.env", "*.key", ".git/**", "__pycache__/**", "*.pyc",
+    "*.env", ".env.*",  # .env, production.env, .env.local, .env.development, etc.
+    "*.key", ".git/**", "__pycache__/**", "*.pyc",
     ".secrets/**", "*.pem", "*.p12", "*.pfx",
     "**/node_modules/**",  # Prevent massive directory traversal
+]
+
+# Exemptions from blocklist — safe template/documentation files that should remain accessible
+DEFAULT_BLOCKLIST_EXEMPTIONS: list[str] = [
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.defaults",
 ]
 
 # Default read-only path prefixes (relative to workspace)
@@ -338,6 +347,10 @@ class PathValidatorConfig(BaseModel):
     blocklist: list[str] = Field(
         default_factory=lambda: DEFAULT_BLOCKLIST.copy(),
         description="Glob patterns to block even within workspace",
+    )
+    blocklist_exemptions: list[str] = Field(
+        default_factory=lambda: DEFAULT_BLOCKLIST_EXEMPTIONS.copy(),
+        description="Filename patterns exempt from blocklist (e.g., .env.example)",
     )
     allowlist: list[str] | None = Field(
         default=None, description="If set, only these patterns are allowed"
@@ -804,18 +817,26 @@ class Ag3ntumPathValidator:
             in_original_ro or in_original_rw
         )
         if should_check_blocklist:
-            for pattern in self.config.blocklist:
-                if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-                    normalized.name, pattern
-                ):
-                    self._log_blocked(
-                        path, operation, f"Matches blocklist pattern: {pattern}"
-                    )
-                    raise PathValidationError(
-                        f"Path blocked by policy: {path}",
-                        path=path,
-                        reason=f"BLOCKLIST: Matches pattern: {pattern}",
-                    )
+            # Check exemptions first — safe template files bypass the blocklist
+            filename = normalized.name
+            is_exempt = any(
+                fnmatch.fnmatch(filename, exempt)
+                for exempt in self.config.blocklist_exemptions
+            )
+
+            if not is_exempt:
+                for pattern in self.config.blocklist:
+                    if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
+                        filename, pattern
+                    ):
+                        self._log_blocked(
+                            path, operation, f"Matches blocklist pattern: {pattern}"
+                        )
+                        raise PathValidationError(
+                            f"Path blocked by policy: {path}",
+                            path=path,
+                            reason=f"BLOCKLIST: Matches pattern: {pattern}",
+                        )
 
         # Step 5: Check allowlist (if configured, only for workspace paths)
         if in_workspace and self.config.allowlist is not None:

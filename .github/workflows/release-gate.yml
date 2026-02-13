@@ -1,0 +1,35 @@
+name: Release Gate
+
+on:
+  pull_request:
+    branches: [release]
+
+jobs:
+  check-release-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check VERSION was updated
+        run: |
+          if ! git diff origin/release...HEAD --name-only | grep -q '^VERSION$'; then
+            echo "::error::VERSION file was not modified. Update it with the new version number."
+            exit 1
+          fi
+
+      - name: Check CHANGELOG was updated
+        run: |
+          if ! git diff origin/release...HEAD --name-only | grep -q '^CHANGELOG.md$'; then
+            echo "::error::CHANGELOG.md was not modified. Document the changes for this release."
+            exit 1
+          fi
+
+      - name: Check version appears in CHANGELOG
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          if ! grep -q "## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md does not contain a section for version ${VERSION}. Add: ## [${VERSION}] - $(date +%Y-%m-%d)"
+            exit 1
+          fi
