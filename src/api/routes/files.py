@@ -555,7 +555,7 @@ def _load_mount_host_paths(
     """
     import yaml
     if manifest_path is None:
-        manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+        manifest_path = Path("/auto-generated/auto-generated-mounts.yaml")
     result: dict[str, str] = {}
     try:
         if manifest_path.exists():

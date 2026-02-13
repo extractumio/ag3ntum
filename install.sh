@@ -210,6 +210,36 @@ check_port_available() {
     fi
 }
 
+# Reclaim ownership of files left by a previous build using Docker (no sudo needed).
+# Container entrypoint chowns data dirs and secrets to UID 45045. On Linux, re-running
+# the installer without this would fail on file writes. Uses Docker to fix ownership.
+# macOS/Windows use Docker Desktop which handles permissions transparently.
+reclaim_previous_build_ownership() {
+    local os_type
+    os_type="$(uname -s)"
+
+    # Only needed on Linux, and only as a non-root user
+    if [[ "${os_type}" != "Linux" ]] || [[ "$(id -u)" == "0" ]]; then
+        return 0
+    fi
+
+    local needs_reclaim=0
+
+    # Check config files (secrets.yaml gets chowned to 45045 by container entrypoint)
+    for f in config/*; do
+        if [[ -f "$f" ]] && [[ ! -w "$f" ]]; then
+            needs_reclaim=1
+            break
+        fi
+    done
+
+    if [[ "$needs_reclaim" == "1" ]]; then
+        print_info "Reclaiming config file ownership from previous build..."
+        docker run --rm -v "$(pwd)/config:/config" alpine chown -R "$(id -u):$(id -g)" /config
+        print_success "Ownership reclaimed"
+    fi
+}
+
 # =============================================================================
 # PREREQUISITE CHECKS
 # =============================================================================
@@ -577,28 +607,11 @@ anthropic_api_key: ${ANTHROPIC_API_KEY}
 fernet_key: ${fernet_key}
 EOF
 
-    # Secure the file - owned by API user (UID 45045) with mode 600
-    # On Linux, the API container runs as UID 45045 and needs to read this file
-    local os_type
-    os_type="$(uname -s)"
-
-    if [[ "${os_type}" == "Darwin" ]] || [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-        # macOS/Windows: Docker Desktop handles permissions - just secure the file
-        chmod 600 config/secrets.yaml
-    else
-        # Linux: Set ownership to API user (UID 45045) so container can read it
-        if [[ "$(id -u)" == "0" ]]; then
-            chown 45045:45045 config/secrets.yaml
-        else
-            sudo chown 45045:45045 config/secrets.yaml
-        fi
-        chmod 600 config/secrets.yaml
-    fi
-
     # Clear the variable from memory
     unset ANTHROPIC_API_KEY
 
-    print_success "secrets.yaml created (permissions: 600, owner: 45045)"
+    # Container entrypoint will chown 45045 + chmod 600 at startup
+    print_success "secrets.yaml created (container entrypoint will secure permissions)"
 }
 
 generate_api_yaml() {
@@ -821,6 +834,12 @@ generate_configuration() {
         exit 1
     fi
 
+    # Reclaim ownership of files left by a previous build.
+    # run.sh build chowns logs/, data/, users/ to UID 45045. install.sh itself
+    # chowns config/secrets.yaml to 45045. On re-install these files become
+    # unwritable by the current user. Reclaim everything we need to touch.
+    reclaim_previous_build_ownership
+
     # Generate all configuration files
     generate_secrets_yaml
     generate_api_yaml
@@ -879,8 +898,32 @@ run_build() {
     print_success "Build completed successfully"
 }
 
+wait_for_api() {
+    local max_wait=60
+    local interval=2
+    local elapsed=0
+    local health_url="http://localhost:${API_PORT:-40080}/api/v1/health"
+
+    print_info "Waiting for API to be ready..."
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if curl -sf "$health_url" >/dev/null 2>&1; then
+            print_success "API is ready"
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    print_warning "API health check timed out after ${max_wait}s (continuing anyway)"
+    return 0
+}
+
 create_admin_user() {
     print_step "Creating Admin User"
+
+    # Wait for API to be fully initialized (DB migrations, user sync, etc.)
+    # before attempting to create a user via docker exec
+    wait_for_api
 
     print_info "Creating user: $ADMIN_USERNAME ($ADMIN_EMAIL)"
 
