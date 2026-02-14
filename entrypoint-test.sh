@@ -214,9 +214,9 @@ for username, email, linux_uid in test_users:
     jwt_secret = secrets.token_urlsafe(32)
 
     conn.execute(
-        '''INSERT INTO users (id, username, email, password_hash, role, jwt_secret, linux_uid, is_active, queue_priority, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (user_id, username, email, password_hash, 'user', jwt_secret, linux_uid, 1, 0, now, now)
+        '''INSERT INTO users (id, username, email, password_hash, role, jwt_secret, linux_uid, is_active, queue_priority, token_version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (user_id, username, email, password_hash, 'user', jwt_secret, linux_uid, 1, 0, 0, now, now)
     )
     created += 1
 

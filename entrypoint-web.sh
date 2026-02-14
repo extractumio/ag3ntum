@@ -49,7 +49,8 @@ if [ "$NEEDS_INSTALL" = "1" ]; then
     # Clear node_modules contents (can't remove the directory itself if it's a volume mount)
     rm -rf /app/node_modules/* /app/node_modules/.[!.]* 2>/dev/null || true
     # Run npm as ag3ntum_api from /app/ (--no-package-lock avoids writing to the bind-mounted source tree)
-    cd /app && setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- npm install --no-fund --no-audit --no-package-lock
+    # Subshell prevents 'cd /app' from leaking into the parent — vite needs cwd to stay at working_dir
+    (cd /app && setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- npm install --no-fund --no-audit --no-package-lock)
     echo "Frontend dependencies installed."
 fi
 
