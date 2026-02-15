@@ -16,7 +16,7 @@ import {
 } from '../../utils';
 import { renderMarkdown } from '../../MarkdownRenderer';
 import { CopyButtons } from '../common';
-import { AgentSpinner, InlineStreamSpinner, TrailingWaitSpinner } from '../spinners';
+import { AgentSpinner, InlineStreamSpinner, TrailingActivitySpinner } from '../spinners';
 import { ToolCallBlock } from './ToolCallBlock';
 import { SubagentBlock } from './SubagentBlock';
 import { AskUserQuestionBlock } from './AskUserQuestionBlock';
@@ -215,7 +215,12 @@ export function AgentMessageBlock({
               <>
                 {renderMarkdown(displayContent)}
                 {showInlineSpinner && <InlineStreamSpinner />}
-                {showTrailingWait && <TrailingWaitSpinner />}
+                {showTrailingWait && (
+                  <TrailingActivitySpinner
+                    toolName={runningToolName}
+                    subagents={subagents}
+                  />
+                )}
               </>
             ) : null}
             {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && (

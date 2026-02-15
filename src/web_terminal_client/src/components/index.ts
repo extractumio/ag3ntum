@@ -16,6 +16,7 @@ export {
   AgentSpinner,
   InlineStreamSpinner,
   TrailingWaitSpinner,
+  TrailingActivitySpinner,
   StatusSpinner,
   PulsingCircleSpinner,
 } from './spinners';
