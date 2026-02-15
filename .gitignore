@@ -17,9 +17,11 @@ config/external-mounts.yaml
 config/llm-api-proxy.yaml
 
 # Auto-generated files (created by run.sh)
-data/auto-generated/
+auto-generated/
 
-docs/
+docs/plans/
+
+.pytest_cache/
 
 # Python
 __pycache__/
@@ -55,6 +57,7 @@ coverage/
 *.db
 # Auto-generated
 docker-compose.override.yml
+.test.lock
 
 users/
 

@@ -33,8 +33,8 @@ CONFIG_REGISTRY=(
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
-# Safely remove a file that may be owned by root (from a previous container build).
-# Uses sudo only on Linux and only when the file exists and is not owned by the current user.
+# Safely remove a file that may be owned by container UID (from a previous build).
+# Uses Docker to remove files that the host user cannot — no sudo needed.
 function safe_remove_file() {
   local file="$1"
   [[ ! -e "${file}" ]] && return 0
@@ -44,29 +44,23 @@ function safe_remove_file() {
     return 0
   fi
 
-  # On Linux, fall back to sudo for container-owned files
-  local os_type
-  os_type="$(uname -s)"
-  if [[ "${os_type}" == "Linux" ]]; then
-    sudo rm -f "$(pwd)/${file}" 2>/dev/null || {
-      echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
-      return 0
-    }
-  else
-    echo "Warning: Cannot remove ${file}. Check file permissions."
+  # Fall back to Docker for container-owned files (no sudo needed)
+  local dir
+  dir="$(dirname "${file}")"
+  local base
+  base="$(basename "${file}")"
+  docker run --rm -v "$(pwd)/${dir}:/work" alpine rm -f "/work/${base}" 2>/dev/null || {
+    echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
     return 0
-  fi
+  }
 }
 
-# Directories that container needs to WRITE to (need ownership fix on Linux)
-# Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
+# Directories that container needs to WRITE to (ownership managed by container entrypoint)
+# Note: node_modules uses a named Docker volume at /app/node_modules (outside /src:ro mount)
 WRITABLE_DIRS=("logs" "data" "users")
 
-# Directories that need to exist but should stay user-owned (for script to write, container reads)
-SCRIPT_DIRS=("data/auto-generated")
-
 # Directories that container only READS from (just need to exist)
-READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests")
+READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests" "auto-generated")
 
 function show_usage() {
   cat <<EOF
@@ -168,136 +162,19 @@ CLI Hints:
 EOF
 }
 
-# Check if user has privileges to set directory ownership (Linux only)
-# Called early to fail fast with a clear message
-function check_privileges() {
-  local os_type
-  os_type="$(uname -s)"
-
-  # macOS - Docker Desktop handles permissions automatically
-  if [[ "${os_type}" == "Darwin" ]]; then
-    return 0
-  fi
-
-  # Windows environments (Git Bash, MINGW, Cygwin) - Docker Desktop handles permissions
-  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-    return 0
-  fi
-
-  # At this point we're on Linux (native or WSL)
-  # Running as root - all good
-  if [[ "$(id -u)" == "0" ]]; then
-    return 0
-  fi
-
-  # Check if sudo is available and user has passwordless sudo (or cached credentials)
-  if ! command -v sudo &>/dev/null; then
-    echo ""
-    echo "ERROR: This script requires root privileges to set directory ownership."
-    echo ""
-    echo "The container runs as UID ${CONTAINER_UID} and needs write access to data directories."
-    echo "Please run as root or install sudo:"
-    echo ""
-    echo "  sudo ./run.sh $*"
-    echo ""
-    exit 1
-  fi
-
-  # Test if sudo chown works (using actual command that will be needed)
-  # This allows specific sudoers rules for chown without requiring general sudo access
-  local test_dir="$(pwd)/${WRITABLE_DIRS[0]}"
-  mkdir -p "${test_dir}" 2>/dev/null || true
-
-  if ! sudo -n chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
-    echo ""
-    echo "NOTE: This script requires sudo privileges to set directory ownership."
-    echo "You may be prompted for your password."
-    echo ""
-    # Try sudo with prompt - if it fails, user doesn't have sudo access
-    if ! sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
-      echo ""
-      echo "ERROR: Cannot obtain sudo privileges for chown."
-      echo "Please run as root or add to /etc/sudoers.d/ag3ntum:"
-      echo ""
-      echo "  ${USER} ALL=(ALL) NOPASSWD: /usr/bin/chown -R ${CONTAINER_UID}\\:${CONTAINER_UID} $(pwd)/*"
-      echo ""
-      exit 1
-    fi
-  fi
-
-  return 0
-}
-
-# Setup directories with proper ownership for container user
-# Container runs as ag3ntum_api (UID 45045) - see Dockerfile
+# Setup directories — just ensure they exist.
+# Permissions are managed by the container entrypoint (runs as root before dropping to 45045).
 function setup_directories() {
   echo "=== Setting up directories ==="
 
-  # Check privileges early - fail fast with clear message
-  check_privileges
-
-  # Create all required directories
-  # On Linux, parent dirs may be owned by container UID from previous runs, so use sudo if needed
-  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}" "${SCRIPT_DIRS[@]}"; do
+  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
     if [[ ! -d "${dir}" ]]; then
       echo "  Creating ${dir}/"
-      mkdir -p "${dir}" 2>/dev/null || sudo mkdir -p "$(pwd)/${dir}"
+      mkdir -p "${dir}"
     fi
   done
 
-  # On macOS and Windows, Docker Desktop handles file permissions automatically
-  # via its virtualization layer - no ownership changes needed
-  local os_type
-  os_type="$(uname -s)"
-
-  if [[ "${os_type}" == "Darwin" ]]; then
-    echo "  macOS: Docker Desktop handles permissions automatically"
-    echo "  Directories ready"
-    return
-  fi
-
-  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-    echo "  Windows: Docker Desktop handles permissions automatically"
-    echo "  Directories ready"
-    return
-  fi
-
-  # On Linux (native or WSL), set ownership of writable directories to container user (UID 45045)
-  echo "  Linux: Setting ownership to UID ${CONTAINER_UID} for writable directories"
-
-  for dir in "${WRITABLE_DIRS[@]}"; do
-    local current_uid
-    current_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
-
-    if [[ "${current_uid}" != "${CONTAINER_UID}" ]]; then
-      if [[ "$(id -u)" == "0" ]]; then
-        # Running as root - can chown directly
-        echo "  Setting ownership: ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
-      else
-        # Running as regular user - need sudo (already verified in check_privileges)
-        # Use full path for sudoers rule matching
-        echo "  Setting ownership (sudo): ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${dir}"
-      fi
-    fi
-  done
-
-  # SCRIPT_DIRS should be user-owned (script writes, container reads)
-  # This MUST happen AFTER the WRITABLE_DIRS loop above, because chown -R on parent
-  # dirs (like "data") would otherwise overwrite these subdirectories
-  for dir in "${SCRIPT_DIRS[@]}"; do
-    if [[ -d "${dir}" ]]; then
-      local owner_uid
-      owner_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
-      if [[ "${owner_uid}" != "$(id -u)" ]]; then
-        echo "  Fixing ownership (sudo): ${dir}/ -> $(id -u):$(id -g)"
-        sudo chown -R "$(id -u):$(id -g)" "$(pwd)/${dir}"
-      fi
-    fi
-  done
-
-  echo "  Directories ready"
+  echo "  Directories ready (permissions managed by container entrypoint)"
 }
 
 # Validate config files from CONFIG_REGISTRY.
@@ -678,16 +555,11 @@ function render_ui_config() {
   PROTOCOL="$(read_config_value 'server.protocol' 'http')"
 
   local target="src/web_terminal_client/public/config.yaml"
-  local target_dir
-  target_dir="$(dirname "${target}")"
 
   # Remove existing file first (may be owned by container user from previous build)
   safe_remove_file "${target}"
 
-  # On Linux, the parent directory may be owned by container UID (45045) from a
-  # previous build. Write to a temp file and sudo-move if not writable.
-  if [[ -w "${target_dir}" ]]; then
-    cat > "${target}" <<EOF
+  cat > "${target}" <<EOF
 server:
   port: ${WEB_PORT}
   host: "0.0.0.0"
@@ -701,27 +573,6 @@ ui:
   max_output_lines: 1000
   auto_scroll: true
 EOF
-  else
-    local tmpfile
-    tmpfile="$(mktemp)"
-    cat > "${tmpfile}" <<EOF
-server:
-  port: ${WEB_PORT}
-  host: "0.0.0.0"
-
-api:
-  # API URL derived from server.hostname and server.protocol in api.yaml
-  # Frontend will replace "localhost" with browser hostname if accessed remotely
-  base_url: "${PROTOCOL}://${HOSTNAME}:${API_PORT}"
-
-ui:
-  max_output_lines: 1000
-  auto_scroll: true
-EOF
-    sudo mv "${tmpfile}" "$(pwd)/${target}"
-    sudo chown "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${target}"
-    sudo chmod 644 "$(pwd)/${target}"
-  fi
 
   echo "  Frontend config: ${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 }
@@ -729,10 +580,10 @@ EOF
 function generate_compose_override() {
   # Generate docker-compose.override.yml with extra mounts if any were specified
   local override_file="docker-compose.override.yml"
-  local manifest_file="data/auto-generated/auto-generated-mounts.yaml"
+  local manifest_file="auto-generated/auto-generated-mounts.yaml"
 
-  # Ensure the auto-generated directory exists (may need sudo on Linux after setup_directories)
-  mkdir -p "data/auto-generated" 2>/dev/null || sudo mkdir -p "data/auto-generated" 2>/dev/null || true
+  # Ensure the auto-generated directory exists
+  mkdir -p "auto-generated" 2>/dev/null || true
 
   # Remove existing generated files (may be owned by root from previous container build)
   safe_remove_file "${override_file}"
@@ -1008,6 +859,34 @@ function do_cleanup() {
   echo "Removing project networks..."
   docker network ls --filter "name=${project_name}_" -q 2>/dev/null | xargs -r docker network rm 2>/dev/null || true
 
+  # Step 3.5: Reclaim ownership of container-owned directories (no sudo needed)
+  local os_type
+  os_type="$(uname -s)"
+  if [[ "${os_type}" == "Linux" ]] && [[ "$(id -u)" != "0" ]]; then
+    echo "Reclaiming directory ownership..."
+    local me
+    me="$(id -u):$(id -g)"
+    # Use any available ag3ntum image (still exists at this point, before image removal)
+    local reclaim_image
+    reclaim_image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" | head -1)
+    if [[ -z "${reclaim_image}" ]]; then
+      reclaim_image="alpine"
+    fi
+    local mount_args=""
+    for dir in logs data users; do
+      if [[ -d "$dir" ]]; then
+        mount_args="${mount_args} -v $(pwd)/${dir}:/${dir}"
+      fi
+    done
+    if [[ -n "${mount_args}" ]]; then
+      docker run --rm ${mount_args} "${reclaim_image}" chown -R "${me}" /logs /data /users 2>/dev/null || true
+    fi
+    # Also reclaim config/secrets.yaml
+    if [[ -f "config/secrets.yaml" ]] && [[ ! -w "config/secrets.yaml" ]]; then
+      docker run --rm -v "$(pwd)/config:/config" "${reclaim_image}" chown "${me}" /config/secrets.yaml 2>/dev/null || true
+    fi
+  fi
+
   # Step 4: Remove ag3ntum images only if no other ag3ntum instances are running
   # After docker compose down above, our containers are stopped. Check if any
   # still-running containers use ag3ntum images (= other worktree instances).
@@ -1022,6 +901,25 @@ function do_cleanup() {
       echo "  Removing: ${images}"
       echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
     fi
+
+    # Remove third-party images pulled by this compose file (e.g. redis)
+    # only if no other containers still reference them
+    local compose_images
+    compose_images=$(docker compose config --images 2>/dev/null || true)
+    for img in ${compose_images}; do
+      # Skip ag3ntum images — already handled above
+      [[ "${img}" == "${IMAGE_PREFIX}:"* ]] && continue
+      if docker images --format '{{.Repository}}:{{.Tag}}' | grep -qF "${img}"; then
+        local users
+        users=$(docker ps -a --filter "ancestor=${img}" -q 2>/dev/null || true)
+        if [[ -z "${users}" ]]; then
+          echo "  Removing ${img}..."
+          docker rmi "${img}" 2>/dev/null || true
+        else
+          echo "  Preserving ${img} — still used by other containers."
+        fi
+      fi
+    done
 
     # Also remove any dangling images
     local dangling
@@ -1133,6 +1031,13 @@ function create_user() {
     --email="$EMAIL" \
     --password="$PASSWORD" \
     $ADMIN
+
+  # Restart API so the process inherits the new user's group (Gotcha #12).
+  # Without this, session directory access fails with PermissionError because
+  # setpriv --init-groups only reads /etc/group at process start.
+  echo ""
+  echo "Restarting API to activate user access..."
+  docker compose restart ag3ntum-api
 }
 
 # Function to delete a user
@@ -1214,11 +1119,11 @@ run_ui_tests() {
   # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux)
   echo "Checking node_modules platform compatibility..."
   NEEDS_REINSTALL=$(docker compose exec -T ag3ntum-web sh -c '
-    if [ ! -d /src/web_terminal_client/node_modules ]; then
+    if [ ! -d /app/node_modules ]; then
       echo "missing"
-    elif [ ! -d /src/web_terminal_client/node_modules/@rollup ]; then
+    elif [ ! -d /app/node_modules/@rollup ]; then
       echo "missing_rollup"
-    elif ! ls /src/web_terminal_client/node_modules/@rollup/rollup-linux-* >/dev/null 2>&1; then
+    elif ! ls /app/node_modules/@rollup/rollup-linux-* >/dev/null 2>&1; then
       echo "wrong_platform"
     else
       echo "ok"
@@ -1228,8 +1133,8 @@ run_ui_tests() {
   if [[ "${NEEDS_REINSTALL}" != "ok" ]]; then
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
     docker compose exec -T ag3ntum-web sh -c '
-      cd /src/web_terminal_client && \
-      rm -rf node_modules && \
+      cd /app && \
+      rm -rf node_modules/* node_modules/.[!.]* 2>/dev/null; \
       npm install --no-fund --no-audit --no-package-lock
     '
   fi
@@ -1237,7 +1142,7 @@ run_ui_tests() {
   # Run vite build first to catch Babel transpilation errors
   # (Vitest uses esbuild which is more permissive than Babel)
   echo "Running vite build to verify transpilation..."
-  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npx vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
+  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
     echo ""
     echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
     return 1
@@ -1247,13 +1152,42 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && npx vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
+  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
   return $?
 }
 
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests ==="
+
+  # Prevent concurrent test runs — two ./run.sh test invocations sharing the
+  # same container race on container lifecycle (test mode → production restore).
+  # When one finishes and restores the container, it kills the other mid-flight.
+  TEST_LOCK_FILE="${ROOT_DIR}/.test.lock"
+
+  # Try to acquire lock (atomic via mkdir — works across Linux and macOS)
+  cleanup_test_lock() {
+    rm -f "${TEST_LOCK_FILE}" 2>/dev/null || true
+  }
+
+  if [[ -f "${TEST_LOCK_FILE}" ]]; then
+    LOCK_PID=$(cat "${TEST_LOCK_FILE}" 2>/dev/null || echo "")
+    if [[ -n "${LOCK_PID}" ]] && kill -0 "${LOCK_PID}" 2>/dev/null; then
+      echo "Error: Another test run is already in progress (PID ${LOCK_PID})."
+      echo "If this is stale, remove ${TEST_LOCK_FILE} and retry."
+      exit 1
+    else
+      # Stale lock from a crashed run — clean it up
+      if [[ -n "${LOCK_PID}" ]]; then
+        echo "Removing stale test lock (PID ${LOCK_PID} is not running)."
+      fi
+      cleanup_test_lock
+    fi
+  fi
+
+  # Write our PID to the lock file
+  echo $$ > "${TEST_LOCK_FILE}"
+  trap cleanup_test_lock EXIT
 
   # Set up test logging - output goes to both console and log file
   TEST_LOG_FILE="logs/latest-test-results.log"

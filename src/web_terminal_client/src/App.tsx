@@ -1923,8 +1923,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
         </div>
         <div className="header-stats">
           <span>Messages: <strong>{conversation.length}</strong></span>
+          <span className="header-stats-separator">│</span>
           <span>Duration: <strong>{sessionDuration}</strong></span>
+          <span className="header-stats-separator">│</span>
           <span>Tools: <strong>{totalToolCalls}</strong></span>
+          <span className="header-stats-separator">│</span>
           <span className="header-status">
             <span className="status-complete">✓ {headerStats.complete}</span>
             <span className="status-partial">◐ {headerStats.partial}</span>

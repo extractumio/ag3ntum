@@ -65,13 +65,13 @@ RUN echo '# User management - create/modify/delete sandbox users' > /etc/sudoers
     echo '# Restricted userdel - only session users (user_ prefix) can be deleted' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel user_*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r user_*' >> /etc/sudoers.d/ag3ntum && \
+    echo '# groupdel for cleanup after userdel (stale group entries prevent user recreation)' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/groupdel *' >> /etc/sudoers.d/ag3ntum && \
     echo '# File ownership - restricted to /users/ tree only' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chgrp -R ag3ntum /users/*' >> /etc/sudoers.d/ag3ntum && \
-    echo '# chown for web container node_modules (Docker named volume ownership fix)' >> /etc/sudoers.d/ag3ntum && \
-    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /src/web_terminal_client/*' >> /etc/sudoers.d/ag3ntum && \
     echo '# bwrap - required for sandbox execution, run as root only' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/bwrap *' >> /etc/sudoers.d/ag3ntum && \
     echo '# chmod - restricted to safe modes only (no 777/world-writable)' >> /etc/sudoers.d/ag3ntum && \
@@ -115,8 +115,10 @@ COPY entrypoint-api.sh /entrypoint-api.sh
 RUN chmod +x /entrypoint-web.sh /entrypoint-api.sh
 
 # Create runtime directories and set ownership of application directories to ag3ntum_api
-RUN mkdir -p /data /sessions \
-    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts \
+# /app/node_modules is the web frontend's dependency directory, kept outside
+# the read-only /src bind mount to avoid Docker overlay2 mount conflicts.
+RUN mkdir -p /data /sessions /app/node_modules \
+    && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts /app \
     && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /entrypoint-api.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
 
 ENV APP_VERSION=${APP_VERSION}
@@ -129,6 +131,7 @@ ENV PYTHONUNBUFFERED=1
 # DIRECT: UIDs map to host UIDs (1000-65533), simpler for dev
 # Set via docker-compose environment or CLI: -e AG3NTUM_UID_MODE=direct
 ENV AG3NTUM_UID_MODE=isolated
+ENV PATH="/app/node_modules/.bin:${PATH}"
 
 # NOTE: No USER directive here. The container starts as root so that
 # entrypoint-api.sh can sync Linux users and group memberships before

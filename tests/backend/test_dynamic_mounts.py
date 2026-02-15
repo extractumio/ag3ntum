@@ -256,7 +256,7 @@ class TestDynamicMountService:
         }
 
     def test_feature_disabled(self) -> None:
-        """Requests rejected when feature is disabled."""
+        """Requests rejected when feature is disabled with actionable message."""
         config = {"dynamic": {"enabled": False}}
         service = DynamicMountService(config)
 
@@ -265,6 +265,8 @@ class TestDynamicMountService:
 
         assert result.is_valid is False
         assert result.denial_code == "FEATURE_DISABLED"
+        assert "external-mounts.yaml" in result.error
+        assert "browser" in result.error.lower()
 
     def test_base_not_found(self) -> None:
         """Unknown base rejected."""
@@ -657,6 +659,7 @@ class TestDynamicMountsAPIRun:
         """Create a mock mount service that rejects mounts."""
         service = MagicMock()
         service.enabled = True
+        service.bases = {}  # No bases — unknown base lookups return None
 
         # Create a validation result that fails
         validation = MagicMock()
@@ -899,6 +902,102 @@ class TestDynamicMountsAPIRun:
         assert response.status_code == 201
         # Verify that validate was called (mount was processed)
         service.validate_mount_request.assert_called_once()
+
+    @pytest.mark.unit
+    def test_run_task_error_shows_host_path_not_alias(
+        self,
+        client,
+        auth_headers: dict,
+    ) -> None:
+        """Error message shows host path instead of internal alias."""
+        service = MagicMock()
+        service.enabled = True
+
+        # Create a mock base with host_path
+        mock_base = MagicMock()
+        mock_base.host_path = "/var/log"
+        service.bases = {"logs": mock_base}
+
+        # Validation fails (e.g., feature disabled after mounts were stored)
+        validation = MagicMock()
+        validation.is_valid = False
+        validation.error = "Dynamic mounts feature is disabled. Clear your browser's mount selections or enable dynamic mounts in external-mounts.yaml"
+        validation.denial_code = "FEATURE_DISABLED"
+        service.validate_mount_request.return_value = validation
+
+        with patch(
+            "src.services.mount_service.get_dynamic_mount_service",
+            return_value=service,
+        ):
+            response = client.post(
+                "/api/v1/sessions/run",
+                headers=auth_headers,
+                json={
+                    "task": "Test error path display",
+                    "dynamic_mounts": [
+                        {
+                            "base": "logs",
+                            "alias": "var-log",
+                            "mode": "ro",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 400
+        data = response.json()
+        detail = data["detail"]
+        # Error should show the host path, not the alias
+        assert "/var/log" in detail
+        assert "var-log" not in detail or "/var/log" in detail
+        # Should contain the actionable error message
+        assert "disabled" in detail.lower()
+
+    @pytest.mark.unit
+    def test_run_task_error_shows_host_path_with_subpath(
+        self,
+        client,
+        auth_headers: dict,
+    ) -> None:
+        """Error message shows host path + subpath for mount with subpath."""
+        service = MagicMock()
+        service.enabled = True
+
+        mock_base = MagicMock()
+        mock_base.host_path = "/var/log"
+        service.bases = {"logs": mock_base}
+
+        validation = MagicMock()
+        validation.is_valid = False
+        validation.error = "Subpath is blocked"
+        validation.denial_code = "BLOCKED_BY_BASE"
+        service.validate_mount_request.return_value = validation
+
+        with patch(
+            "src.services.mount_service.get_dynamic_mount_service",
+            return_value=service,
+        ):
+            response = client.post(
+                "/api/v1/sessions/run",
+                headers=auth_headers,
+                json={
+                    "task": "Test error subpath display",
+                    "dynamic_mounts": [
+                        {
+                            "base": "logs",
+                            "subpath": "audit",
+                            "alias": "logs-audit",
+                            "mode": "ro",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 400
+        data = response.json()
+        detail = data["detail"]
+        # Should show /var/log/audit, not logs-audit
+        assert "/var/log/audit" in detail
 
     @pytest.mark.unit
     def test_run_task_auto_alias_with_subpath(

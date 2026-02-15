@@ -476,7 +476,17 @@ class UserService:
             )
         except subprocess.CalledProcessError as e:
             if e.returncode == 9:
-                logger.warning(f"Linux user {username} already exists. Proceeding with directory setup.")
+                # useradd returns 9 when the username is found in /etc/passwd,
+                # /etc/shadow, or /etc/group. Verify the user actually exists
+                # in /etc/passwd (required for usermod/chown to work).
+                check = subprocess.run(
+                    ["getent", "passwd", username],
+                    capture_output=True,
+                )
+                if check.returncode == 0:
+                    logger.warning(f"Linux user {username} already exists. Proceeding with directory setup.")
+                else:
+                    self._cleanup_stale_user_entries(username, home_dir, uid)
             else:
                 logger.error(f"Failed to create Linux user {username}: {e.stderr.decode()}")
                 raise ValueError(f"Failed to create Linux user: {e.stderr.decode()}")
@@ -755,6 +765,53 @@ class UserService:
             # Don't raise - secrets creation is not critical for user creation
             # User can create it manually if needed
 
+    def _cleanup_stale_user_entries(self, username: str, home_dir: Path, uid: int) -> None:
+        """Clean up stale /etc/shadow or /etc/group entries and retry useradd.
+
+        Called when useradd returns code 9 but the user doesn't exist in /etc/passwd.
+        This happens when userdel partially succeeded or when ag3ntum_api is a
+        supplementary member of the user's group (userdel won't remove the group).
+        """
+        logger.warning(
+            f"useradd returned 9 for {username} but user not in /etc/passwd. "
+            "Cleaning up stale entries and retrying."
+        )
+        # Remove stale group and shadow entries
+        subprocess.run(["sudo", "groupdel", username], capture_output=True)
+        subprocess.run(
+            ["sudo", "sed", "-i", f"/^{username}:/d", "/etc/shadow"],
+            capture_output=True,
+        )
+
+        # Retry useradd
+        base_cmd = ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
+                     "-u", str(uid)]
+        retry = subprocess.run(base_cmd + [username], capture_output=True)
+
+        # If the group still exists (groupdel failed), adopt it with -g
+        if retry.returncode != 0:
+            retry_err = retry.stderr.decode()
+            if "group" in retry_err.lower() and "exists" in retry_err.lower():
+                logger.info(f"Group {username} still exists after cleanup, retrying useradd with -g")
+                gid_check = subprocess.run(
+                    ["getent", "group", username], capture_output=True, text=True,
+                )
+                if gid_check.returncode == 0:
+                    existing_gid = gid_check.stdout.strip().split(":")[2]
+                    retry = subprocess.run(
+                        base_cmd + ["-g", existing_gid, username],
+                        capture_output=True,
+                    )
+
+        if retry.returncode != 0:
+            logger.error(
+                f"Retry useradd failed for {username} (code {retry.returncode}): "
+                f"{retry.stderr.decode()}"
+            )
+            raise ValueError(f"Failed to create Linux user after cleanup: {retry.stderr.decode()}")
+
+        logger.info(f"Created Linux user {username} after cleaning up stale entries")
+
     def _setup_group_permissions(self, home_dir: Path, uid: int, username: str) -> None:
         """
         Set up group-based permissions for API access to user directories.
@@ -775,7 +832,17 @@ class UserService:
         primary security gate. Group permissions are defense-in-depth.
         Cross-user isolation: each user has unique primary GID. ag3ntum_api is in
         all user groups but PathValidator prevents cross-user file access.
+
+        Important: File permission operations (chgrp/chmod) are separated from user
+        group operations (usermod) so that directory permissions are always set even
+        if usermod fails (e.g., stale user entries after delete/recreate). Without
+        this separation, a usermod failure would leave the home directory at 700
+        (owner-only), preventing the API from accessing it and blocking login.
         """
+        # Phase 1: User group membership (may fail if Linux user is in bad state)
+        # These failures are non-fatal — file permissions below are more important
+        # for basic API access (login validation, session directory creation).
+        usermod_ok = True
         try:
             # Add user to ag3ntum group
             subprocess.run(
@@ -784,7 +851,11 @@ class UserService:
                 capture_output=True,
             )
             logger.info(f"Added {username} to ag3ntum group")
+        except subprocess.CalledProcessError as e:
+            usermod_ok = False
+            logger.warning(f"Failed to add {username} to ag3ntum group: {e.stderr.decode()}")
 
+        try:
             # Add ag3ntum_api to sandbox user's primary group (shared GID)
             # This allows the API process to access session files with 660/770 perms
             # instead of the more permissive 666/777. Cross-user isolation is enforced
@@ -795,7 +866,13 @@ class UserService:
                 capture_output=True,
             )
             logger.info(f"Added ag3ntum_api to {username}'s group (GID {uid})")
+        except subprocess.CalledProcessError as e:
+            usermod_ok = False
+            logger.warning(f"Failed to add ag3ntum_api to {username}'s group: {e.stderr.decode()}")
 
+        # Phase 2: File permissions (must succeed for login/API access)
+        # These run regardless of whether usermod succeeded above.
+        try:
             # Set group ownership to ag3ntum for key directories
             subprocess.run(
                 ["sudo", "chgrp", "ag3ntum", str(home_dir)],
@@ -864,11 +941,19 @@ class UserService:
                     capture_output=True,
                 )
 
-            logger.info(f"Set up group-based permissions for {username}")
+            logger.info(f"Set up file permissions for {username}")
 
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to set group permissions for {username}: {e.stderr.decode()}")
-            # Don't raise - continue with whatever permissions we have
+            logger.warning(f"Failed to set file permissions for {username}: {e.stderr.decode()}")
+
+        if usermod_ok:
+            logger.info(f"Set up group-based permissions for {username}")
+        else:
+            logger.warning(
+                f"Group membership setup incomplete for {username}. "
+                "File permissions are set but user group operations failed. "
+                "A container restart (./run.sh restart) may be needed."
+            )
 
     async def delete_user(
         self,
@@ -947,7 +1032,16 @@ class UserService:
         return True
 
     def _delete_linux_user(self, username: str) -> None:
-        """Delete Linux user account."""
+        """
+        Delete Linux user account and clean up associated system entries.
+
+        Runs userdel to remove the user from /etc/passwd and /etc/shadow,
+        then attempts groupdel to remove the user's primary group from
+        /etc/group. The group cleanup prevents stale entries that cause
+        useradd to return code 9 ("username already in use") when the user
+        is recreated — useradd checks /etc/shadow and /etc/group in addition
+        to /etc/passwd.
+        """
         try:
             subprocess.run(
                 ["sudo", "userdel", username],
@@ -962,6 +1056,21 @@ class UserService:
             else:
                 logger.warning(f"Failed to delete Linux user {username}: {e.stderr.decode()}")
                 raise
+
+        # Clean up the user's primary group if it still exists.
+        # userdel only removes the group if no other user has it as primary
+        # and no other users are members. A leftover group entry can cause
+        # useradd to return code 9 on recreate.
+        try:
+            subprocess.run(
+                ["sudo", "groupdel", username],
+                check=True,
+                capture_output=True,
+            )
+            logger.debug(f"Deleted group {username}")
+        except subprocess.CalledProcessError:
+            # Group doesn't exist or has other members — either is fine
+            pass
 
     def cleanup_test_users(self, pattern: str = "testuser_") -> int:
         """

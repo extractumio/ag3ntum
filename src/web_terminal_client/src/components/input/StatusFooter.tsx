@@ -5,7 +5,6 @@
  * Extracted from App.tsx for better modularity.
  */
 
-import React from 'react';
 import { formatDuration } from '../../utils';
 import { useElapsedTime } from '../../hooks';
 import { StatusSpinner } from '../spinners';
@@ -68,21 +67,29 @@ export function StatusFooter({
             <>
               <StatusSpinner /> Running...{elapsedTime && ` (${elapsedTime})`}
             </>
+          ) : statusLabel === 'Idle' ? (
+            '\u25CF Idle'
+          ) : statusLabel === 'Cancelled' || statusLabel === 'Failed' ? (
+            `\u2717 ${statusLabel}`
           ) : (
-            <>
-              {statusLabel === 'Idle' && '\u25CF Idle'}
-              {statusLabel === 'Cancelled' && '\u2717 Cancelled'}
-              {statusLabel === 'Failed' && '\u2717 Failed'}
-              {statusLabel !== 'Idle' && statusLabel !== 'Cancelled' && statusLabel !== 'Failed' && statusLabel}
-            </>
+            statusLabel
           )}
         </span>
       </div>
       <div className="status-right">
-        <span className="status-metric">Turns: <strong>{stats.turns}</strong></span>
-        <span className="status-metric">Tokens: <strong>{stats.tokensIn}</strong> in / <strong>{stats.tokensOut}</strong> out</span>
+        <span className="status-metric">
+          <span className="metric-label">Turns:</span>
+          <span className="metric-value"><strong>{stats.turns}</strong></span>
+        </span>
+        <span className="status-metric">
+          <span className="metric-label">Tokens:</span>
+          <span className="metric-value"><strong>{stats.tokensIn}</strong> in / <strong>{stats.tokensOut}</strong> out</span>
+        </span>
         <span className="status-metric cost">${stats.cost.toFixed(4)}</span>
-        <span className="status-metric">{formatDuration(stats.durationMs)}</span>
+        <span className="status-metric">
+          <span className="metric-label">Duration:</span>
+          <span className="metric-value">{formatDuration(stats.durationMs)}</span>
+        </span>
       </div>
     </div>
   );

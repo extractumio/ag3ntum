@@ -31,15 +31,18 @@ MIN_DOCKER_VERSION="20.10"
 SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 # Colors (ANSI escape codes)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m' # No Color
+# Use $'...' syntax so escape sequences are interpreted at assignment time.
+# Single quotes ('\033[...') store the literal backslash sequence, which
+# only works with echo -e or printf — plain echo leaves them unrendered.
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+WHITE=$'\033[0;37m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m' # No Color
 
 # Configuration defaults
 DEFAULT_API_PORT="40080"
@@ -207,6 +210,36 @@ check_port_available() {
     else
         # Cannot check, assume available
         return 0
+    fi
+}
+
+# Reclaim ownership of files left by a previous build using Docker (no sudo needed).
+# Container entrypoint chowns data dirs and secrets to UID 45045. On Linux, re-running
+# the installer without this would fail on file writes. Uses Docker to fix ownership.
+# macOS/Windows use Docker Desktop which handles permissions transparently.
+reclaim_previous_build_ownership() {
+    local os_type
+    os_type="$(uname -s)"
+
+    # Only needed on Linux, and only as a non-root user
+    if [[ "${os_type}" != "Linux" ]] || [[ "$(id -u)" == "0" ]]; then
+        return 0
+    fi
+
+    local needs_reclaim=0
+
+    # Check config files (secrets.yaml gets chowned to 45045 by container entrypoint)
+    for f in config/*; do
+        if [[ -f "$f" ]] && [[ ! -w "$f" ]]; then
+            needs_reclaim=1
+            break
+        fi
+    done
+
+    if [[ "$needs_reclaim" == "1" ]]; then
+        print_info "Reclaiming config file ownership from previous build..."
+        docker run --rm -v "$(pwd)/config:/config" alpine chown -R "$(id -u):$(id -g)" /config
+        print_success "Ownership reclaimed"
     fi
 }
 
@@ -577,28 +610,11 @@ anthropic_api_key: ${ANTHROPIC_API_KEY}
 fernet_key: ${fernet_key}
 EOF
 
-    # Secure the file - owned by API user (UID 45045) with mode 600
-    # On Linux, the API container runs as UID 45045 and needs to read this file
-    local os_type
-    os_type="$(uname -s)"
-
-    if [[ "${os_type}" == "Darwin" ]] || [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-        # macOS/Windows: Docker Desktop handles permissions - just secure the file
-        chmod 600 config/secrets.yaml
-    else
-        # Linux: Set ownership to API user (UID 45045) so container can read it
-        if [[ "$(id -u)" == "0" ]]; then
-            chown 45045:45045 config/secrets.yaml
-        else
-            sudo chown 45045:45045 config/secrets.yaml
-        fi
-        chmod 600 config/secrets.yaml
-    fi
-
     # Clear the variable from memory
     unset ANTHROPIC_API_KEY
 
-    print_success "secrets.yaml created (permissions: 600, owner: 45045)"
+    # Container entrypoint will chown 45045 + chmod 600 at startup
+    print_success "secrets.yaml created (container entrypoint will secure permissions)"
 }
 
 generate_api_yaml() {
@@ -821,6 +837,12 @@ generate_configuration() {
         exit 1
     fi
 
+    # Reclaim ownership of files left by a previous build.
+    # run.sh build chowns logs/, data/, users/ to UID 45045. install.sh itself
+    # chowns config/secrets.yaml to 45045. On re-install these files become
+    # unwritable by the current user. Reclaim everything we need to touch.
+    reclaim_previous_build_ownership
+
     # Generate all configuration files
     generate_secrets_yaml
     generate_api_yaml
@@ -879,23 +901,146 @@ run_build() {
     print_success "Build completed successfully"
 }
 
+wait_for_api() {
+    local max_wait=60
+    local interval=2
+    local elapsed=0
+    local health_url="http://localhost:${API_PORT:-40080}/api/v1/health"
+
+    print_info "Waiting for API to be ready..."
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if curl -sf "$health_url" >/dev/null 2>&1; then
+            print_success "API is ready"
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    print_warning "API health check timed out after ${max_wait}s (continuing anyway)"
+    return 0
+}
+
 create_admin_user() {
     print_step "Creating Admin User"
 
+    # Wait for API to be fully initialized (DB migrations, user sync, etc.)
+    # before attempting to create a user via docker exec
+    wait_for_api
+
     print_info "Creating user: $ADMIN_USERNAME ($ADMIN_EMAIL)"
 
-    if ! ./run.sh create-user \
+    # Attempt to create the user, capturing output to detect "already exists"
+    local create_output
+    create_output=$(mktemp)
+
+    if ./run.sh create-user \
         --username="$ADMIN_USERNAME" \
         --email="$ADMIN_EMAIL" \
         --password="$ADMIN_PASSWORD" \
-        --admin; then
+        --admin > "$create_output" 2>&1; then
+        cat "$create_output"
+        rm -f "$create_output"
+        print_success "Admin user created"
+    elif grep -qi "already exists" "$create_output"; then
+        # User or Linux account already exists — ask whether to replace or keep
+        rm -f "$create_output"
+        echo ""
+        print_warning "User '$ADMIN_USERNAME' already exists."
+        echo ""
+        echo "  ${BOLD}Replace${NC} — Delete and recreate with the new credentials you just entered."
+        echo "  ${BOLD}Keep${NC}    — Keep the existing account (login with your previous password)."
+        echo ""
+
+        if prompt_yesno "Replace existing user with new credentials?" "n"; then
+            print_info "Replacing user (delete + recreate in single transaction)..."
+
+            # Use a single Python process to delete-if-exists then create.
+            # This avoids the race condition / DB mismatch that occurs when
+            # delete_user.py and create_user.py run as separate processes
+            # while the API server also holds the database open.
+            # Credentials are passed via env vars to avoid shell injection from
+            # special characters in passwords.
+            if ! docker compose exec -T -u root \
+                -e "_INSTALL_USERNAME=$ADMIN_USERNAME" \
+                -e "_INSTALL_EMAIL=$ADMIN_EMAIL" \
+                -e "_INSTALL_PASSWORD=$ADMIN_PASSWORD" \
+                ag3ntum-api \
+                python3 -c '
+import asyncio, sys, os
+sys.path.insert(0, "/")
+os.environ.setdefault("AG3NTUM_ROOT", "/")
+
+from src.db.database import AsyncSessionLocal, init_db, engine
+from src.db import models
+from src.services.user_service import user_service
+from sqlalchemy import select
+
+username = os.environ["_INSTALL_USERNAME"]
+email = os.environ["_INSTALL_EMAIL"]
+password = os.environ["_INSTALL_PASSWORD"]
+
+async def replace_user():
+    await init_db()
+    # Step 1: Delete any DB records that would conflict (by username OR email,
+    # matching the same uniqueness check that create_user uses).
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(models.User).where(
+                (models.User.username == username) | (models.User.email == email)
+            )
+        )
+        conflicts = result.scalars().all()
+        if conflicts:
+            for row in conflicts:
+                print(f"Deleting conflicting user: {row.username} ({row.email})")
+                await user_service.delete_user(db=db, username=row.username, delete_linux_user=True)
+        else:
+            print("No conflicting DB records (Linux user may exist, proceeding).")
+
+    # Step 2: Create fresh
+    async with AsyncSessionLocal() as db:
+        user = await user_service.create_user(
+            db=db,
+            username=username,
+            email=email,
+            password=password,
+            role="admin",
+        )
+        print(f"User created: {user.username} (UID {user.linux_uid})")
+
+    await engine.dispose()
+
+asyncio.run(replace_user())
+'; then
+                print_error "Failed to replace admin user"
+                echo ""
+                echo "Try manually:"
+                echo "  ${CYAN}./run.sh delete-user --username=$ADMIN_USERNAME --force${NC}"
+                echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
+                exit 1
+            fi
+            print_success "Admin user replaced successfully"
+        else
+            print_success "Keeping existing admin user '$ADMIN_USERNAME'"
+            print_info "Login with your previous credentials"
+            ADMIN_EMAIL="(previous email)"
+        fi
+    else
+        # Some other failure
+        cat "$create_output"
+        rm -f "$create_output"
         print_warning "Failed to create admin user automatically"
         echo ""
         echo "You can create it manually:"
         echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
-    else
-        print_success "Admin user created"
     fi
+
+    # Restart API so the process inherits the new user's group (Gotcha #12).
+    # Without this, session directory access fails with PermissionError.
+    print_info "Restarting API to activate user access..."
+    docker compose restart ag3ntum-api 2>/dev/null || true
+    wait_for_api
 
     # Clear password from memory
     unset ADMIN_PASSWORD

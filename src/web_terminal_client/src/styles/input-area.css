@@ -1004,7 +1004,18 @@
 }
 
 .status-metric {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0 var(--spacing-xs);
   color: var(--color-text-muted);
+}
+
+.metric-label {
+  white-space: nowrap;
+}
+
+.metric-value {
+  white-space: nowrap;
 }
 
 .status-metric strong {

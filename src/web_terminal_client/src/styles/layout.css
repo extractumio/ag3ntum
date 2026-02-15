@@ -280,8 +280,16 @@
   align-items: center;
 }
 
+.header-stats > span {
+  white-space: nowrap;
+}
+
 .header-stats strong {
   color: var(--color-text-bright);
+}
+
+.header-stats-separator {
+  color: var(--color-border);
 }
 
 .header-status {

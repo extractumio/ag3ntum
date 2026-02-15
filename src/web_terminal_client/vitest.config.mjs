@@ -4,12 +4,11 @@ import react from '@vitejs/plugin-react';
 // Use absolute paths so this config works when copied to /tmp/ at container startup
 // (source tree is mounted read-only, Vite needs a writable dir for its temp config files)
 const projectRoot = process.env.AG3NTUM_ROOT || '/';
-const webClientDir = '/src/web_terminal_client';
-const nodeModulesPath = `${webClientDir}/node_modules`;
+const nodeModulesPath = '/app/node_modules';
 
 export default defineConfig({
   plugins: [react()],
-  cacheDir: `${nodeModulesPath}/.vite`,
+  cacheDir: '/app/node_modules/.vite',
   server: {
     fs: {
       allow: [projectRoot],
