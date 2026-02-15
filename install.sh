@@ -31,15 +31,18 @@ MIN_DOCKER_VERSION="20.10"
 SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 # Colors (ANSI escape codes)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m' # No Color
+# Use $'...' syntax so escape sequences are interpreted at assignment time.
+# Single quotes ('\033[...') store the literal backslash sequence, which
+# only works with echo -e or printf — plain echo leaves them unrendered.
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+WHITE=$'\033[0;37m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m' # No Color
 
 # Configuration defaults
 DEFAULT_API_PORT="40080"
