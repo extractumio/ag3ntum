@@ -1454,8 +1454,21 @@ class ClaudeAgent:
             # Create session directory
             self._session_manager.create_session_directory(session_context.session_id)
         else:
-            # Ensure session directory exists
-            self._session_manager.create_session_directory(session_context.session_id)
+            # Session directory was already created by session_service (backend path).
+            # After chown to sandbox user, API process may lack group access (770 perms)
+            # if the container hasn't restarted since user creation (Gotcha #12).
+            # The agent subprocess runs as sandbox user via bwrap and has full access.
+            try:
+                self._session_manager.create_session_directory(session_context.session_id)
+            except PermissionError:
+                session_dir = self._session_manager.get_session_dir(session_context.session_id)
+                if session_dir.exists():
+                    logger.debug(
+                        f"Session directory {session_dir} exists but API process "
+                        f"lacks group access (expected after user creation without restart)"
+                    )
+                else:
+                    raise
 
         # Extract resume_id from session_context for SDK resumption
         resume_id: Optional[str] = None

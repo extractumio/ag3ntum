@@ -486,9 +486,17 @@ async def run_task(
                     f"base={mount_req.base}, subpath={mount_req.subpath}, "
                     f"error={validation.error}, code={validation.denial_code}"
                 )
+                # Build user-friendly display path for error message
+                display_path = mount_req.alias  # fallback
+                base_obj = mount_service.bases.get(mount_req.base)
+                if base_obj:
+                    display_path = base_obj.host_path.replace("{username}", user.username)
+                    if mount_req.subpath:
+                        display_path = f"{display_path.rstrip('/')}/{mount_req.subpath}"
+
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid dynamic mount '{mount_req.alias}': {validation.error}",
+                    detail=f"Invalid dynamic mount '{display_path}': {validation.error}",
                 )
 
         # All mounts validated, store them

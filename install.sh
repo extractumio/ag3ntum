@@ -927,18 +927,117 @@ create_admin_user() {
 
     print_info "Creating user: $ADMIN_USERNAME ($ADMIN_EMAIL)"
 
-    if ! ./run.sh create-user \
+    # Attempt to create the user, capturing output to detect "already exists"
+    local create_output
+    create_output=$(mktemp)
+
+    if ./run.sh create-user \
         --username="$ADMIN_USERNAME" \
         --email="$ADMIN_EMAIL" \
         --password="$ADMIN_PASSWORD" \
-        --admin; then
+        --admin > "$create_output" 2>&1; then
+        cat "$create_output"
+        rm -f "$create_output"
+        print_success "Admin user created"
+    elif grep -qi "already exists" "$create_output"; then
+        # User or Linux account already exists — ask whether to replace or keep
+        rm -f "$create_output"
+        echo ""
+        print_warning "User '$ADMIN_USERNAME' already exists."
+        echo ""
+        echo "  ${BOLD}Replace${NC} — Delete and recreate with the new credentials you just entered."
+        echo "  ${BOLD}Keep${NC}    — Keep the existing account (login with your previous password)."
+        echo ""
+
+        if prompt_yesno "Replace existing user with new credentials?" "n"; then
+            print_info "Replacing user (delete + recreate in single transaction)..."
+
+            # Use a single Python process to delete-if-exists then create.
+            # This avoids the race condition / DB mismatch that occurs when
+            # delete_user.py and create_user.py run as separate processes
+            # while the API server also holds the database open.
+            # Credentials are passed via env vars to avoid shell injection from
+            # special characters in passwords.
+            if ! docker compose exec -T -u root \
+                -e "_INSTALL_USERNAME=$ADMIN_USERNAME" \
+                -e "_INSTALL_EMAIL=$ADMIN_EMAIL" \
+                -e "_INSTALL_PASSWORD=$ADMIN_PASSWORD" \
+                ag3ntum-api \
+                python3 -c '
+import asyncio, sys, os
+sys.path.insert(0, "/")
+os.environ.setdefault("AG3NTUM_ROOT", "/")
+
+from src.db.database import AsyncSessionLocal, init_db, engine
+from src.db import models
+from src.services.user_service import user_service
+from sqlalchemy import select
+
+username = os.environ["_INSTALL_USERNAME"]
+email = os.environ["_INSTALL_EMAIL"]
+password = os.environ["_INSTALL_PASSWORD"]
+
+async def replace_user():
+    await init_db()
+    # Step 1: Delete any DB records that would conflict (by username OR email,
+    # matching the same uniqueness check that create_user uses).
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(models.User).where(
+                (models.User.username == username) | (models.User.email == email)
+            )
+        )
+        conflicts = result.scalars().all()
+        if conflicts:
+            for row in conflicts:
+                print(f"Deleting conflicting user: {row.username} ({row.email})")
+                await user_service.delete_user(db=db, username=row.username, delete_linux_user=True)
+        else:
+            print("No conflicting DB records (Linux user may exist, proceeding).")
+
+    # Step 2: Create fresh
+    async with AsyncSessionLocal() as db:
+        user = await user_service.create_user(
+            db=db,
+            username=username,
+            email=email,
+            password=password,
+            role="admin",
+        )
+        print(f"User created: {user.username} (UID {user.linux_uid})")
+
+    await engine.dispose()
+
+asyncio.run(replace_user())
+'; then
+                print_error "Failed to replace admin user"
+                echo ""
+                echo "Try manually:"
+                echo "  ${CYAN}./run.sh delete-user --username=$ADMIN_USERNAME --force${NC}"
+                echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
+                exit 1
+            fi
+            print_success "Admin user replaced successfully"
+        else
+            print_success "Keeping existing admin user '$ADMIN_USERNAME'"
+            print_info "Login with your previous credentials"
+            ADMIN_EMAIL="(previous email)"
+        fi
+    else
+        # Some other failure
+        cat "$create_output"
+        rm -f "$create_output"
         print_warning "Failed to create admin user automatically"
         echo ""
         echo "You can create it manually:"
         echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
-    else
-        print_success "Admin user created"
     fi
+
+    # Restart API so the process inherits the new user's group (Gotcha #12).
+    # Without this, session directory access fails with PermissionError.
+    print_info "Restarting API to activate user access..."
+    docker compose restart ag3ntum-api 2>/dev/null || true
+    wait_for_api
 
     # Clear password from memory
     unset ADMIN_PASSWORD

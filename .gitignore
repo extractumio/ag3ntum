@@ -57,6 +57,7 @@ coverage/
 *.db
 # Auto-generated
 docker-compose.override.yml
+.test.lock
 
 users/
 

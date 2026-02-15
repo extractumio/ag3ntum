@@ -695,7 +695,7 @@ class DynamicMountService:
         if not self.enabled:
             return DynamicMountValidation(
                 is_valid=False,
-                error="Dynamic mounts feature is disabled",
+                error="Dynamic mounts feature is disabled. Clear your browser's mount selections or enable dynamic mounts in external-mounts.yaml",
                 denial_code="FEATURE_DISABLED"
             )
 

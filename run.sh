@@ -1031,6 +1031,13 @@ function create_user() {
     --email="$EMAIL" \
     --password="$PASSWORD" \
     $ADMIN
+
+  # Restart API so the process inherits the new user's group (Gotcha #12).
+  # Without this, session directory access fails with PermissionError because
+  # setpriv --init-groups only reads /etc/group at process start.
+  echo ""
+  echo "Restarting API to activate user access..."
+  docker compose restart ag3ntum-api
 }
 
 # Function to delete a user
@@ -1152,6 +1159,35 @@ run_ui_tests() {
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests ==="
+
+  # Prevent concurrent test runs — two ./run.sh test invocations sharing the
+  # same container race on container lifecycle (test mode → production restore).
+  # When one finishes and restores the container, it kills the other mid-flight.
+  TEST_LOCK_FILE="${ROOT_DIR}/.test.lock"
+
+  # Try to acquire lock (atomic via mkdir — works across Linux and macOS)
+  cleanup_test_lock() {
+    rm -f "${TEST_LOCK_FILE}" 2>/dev/null || true
+  }
+
+  if [[ -f "${TEST_LOCK_FILE}" ]]; then
+    LOCK_PID=$(cat "${TEST_LOCK_FILE}" 2>/dev/null || echo "")
+    if [[ -n "${LOCK_PID}" ]] && kill -0 "${LOCK_PID}" 2>/dev/null; then
+      echo "Error: Another test run is already in progress (PID ${LOCK_PID})."
+      echo "If this is stale, remove ${TEST_LOCK_FILE} and retry."
+      exit 1
+    else
+      # Stale lock from a crashed run — clean it up
+      if [[ -n "${LOCK_PID}" ]]; then
+        echo "Removing stale test lock (PID ${LOCK_PID} is not running)."
+      fi
+      cleanup_test_lock
+    fi
+  fi
+
+  # Write our PID to the lock file
+  echo $$ > "${TEST_LOCK_FILE}"
+  trap cleanup_test_lock EXIT
 
   # Set up test logging - output goes to both console and log file
   TEST_LOG_FILE="logs/latest-test-results.log"
