@@ -5,7 +5,7 @@
  * Extracted from App.tsx for better modularity.
  */
 
-import React, { useRef } from 'react';
+import { useRef } from 'react';
 import type { ToolCallView, SubagentView, TodoItem, ResultStatus } from '../../types/conversation';
 import {
   stripResumeContext,
@@ -95,7 +95,7 @@ export function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
-  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
+  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
 
   // Derive currently running tool (skip Think as it's not a user-visible tool)
   const runningTool = toolCalls.find(t => t.status === 'running' && t.tool !== 'Think');
@@ -228,7 +228,7 @@ export function AgentMessageBlock({
                 <AgentSpinner toolName={runningToolName} />
                 {sessionRunning && runningSubagents.length > 0 && (
                   <div className="running-agents-status">
-                    {subagents.filter(s => s.status === 'running').map(sub => (
+                    {runningSubagents.map(sub => (
                       <div key={sub.id} className="running-agent-line">
                         <span className="subagent-dot subagent-dot-running">◆</span>
                         <span className="running-agent-name">{sub.name}</span>

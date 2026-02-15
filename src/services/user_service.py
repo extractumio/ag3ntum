@@ -486,57 +486,7 @@ class UserService:
                 if check.returncode == 0:
                     logger.warning(f"Linux user {username} already exists. Proceeding with directory setup.")
                 else:
-                    # Stale entry in /etc/shadow or /etc/group but user not in /etc/passwd.
-                    # Clean up and retry. This happens when userdel partially succeeded
-                    # or was interrupted during a previous delete/recreate cycle.
-                    # Also happens when ag3ntum_api is a supplementary member of the
-                    # user's group — userdel won't remove the group in that case.
-                    logger.warning(
-                        f"useradd returned 9 for {username} but user not in /etc/passwd. "
-                        "Cleaning up stale entries and retrying."
-                    )
-                    # Remove stale group entry (may fail if sudoers doesn't allow groupdel)
-                    subprocess.run(
-                        ["sudo", "groupdel", username],
-                        capture_output=True,
-                    )
-                    # Remove stale shadow entry (if any)
-                    subprocess.run(
-                        ["sudo", "sed", "-i", f"/^{username}:/d", "/etc/shadow"],
-                        capture_output=True,
-                    )
-                    # Retry useradd — if group still exists (groupdel failed/not permitted),
-                    # use -g flag to adopt the existing group instead of creating a new one
-                    retry_cmd = ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
-                                 "-u", str(uid), username]
-                    retry = subprocess.run(retry_cmd, capture_output=True)
-                    if retry.returncode != 0:
-                        # Check if failure is specifically about the group existing
-                        retry_err = retry.stderr.decode()
-                        if "group" in retry_err.lower() and "exists" in retry_err.lower():
-                            # Group still exists — retry with -g to use existing group
-                            logger.info(
-                                f"Group {username} still exists after cleanup, retrying useradd with -g"
-                            )
-                            # Look up the existing GID
-                            gid_check = subprocess.run(
-                                ["getent", "group", username],
-                                capture_output=True, text=True,
-                            )
-                            if gid_check.returncode == 0:
-                                existing_gid = gid_check.stdout.strip().split(":")[2]
-                                retry = subprocess.run(
-                                    ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
-                                     "-u", str(uid), "-g", existing_gid, username],
-                                    capture_output=True,
-                                )
-                        if retry.returncode != 0:
-                            logger.error(
-                                f"Retry useradd failed for {username} (code {retry.returncode}): "
-                                f"{retry.stderr.decode()}"
-                            )
-                            raise ValueError(f"Failed to create Linux user after cleanup: {retry.stderr.decode()}")
-                    logger.info(f"Created Linux user {username} after cleaning up stale entries")
+                    self._cleanup_stale_user_entries(username, home_dir, uid)
             else:
                 logger.error(f"Failed to create Linux user {username}: {e.stderr.decode()}")
                 raise ValueError(f"Failed to create Linux user: {e.stderr.decode()}")
@@ -814,6 +764,53 @@ class UserService:
             logger.error(f"Failed to create secrets for {username}: {e}")
             # Don't raise - secrets creation is not critical for user creation
             # User can create it manually if needed
+
+    def _cleanup_stale_user_entries(self, username: str, home_dir: Path, uid: int) -> None:
+        """Clean up stale /etc/shadow or /etc/group entries and retry useradd.
+
+        Called when useradd returns code 9 but the user doesn't exist in /etc/passwd.
+        This happens when userdel partially succeeded or when ag3ntum_api is a
+        supplementary member of the user's group (userdel won't remove the group).
+        """
+        logger.warning(
+            f"useradd returned 9 for {username} but user not in /etc/passwd. "
+            "Cleaning up stale entries and retrying."
+        )
+        # Remove stale group and shadow entries
+        subprocess.run(["sudo", "groupdel", username], capture_output=True)
+        subprocess.run(
+            ["sudo", "sed", "-i", f"/^{username}:/d", "/etc/shadow"],
+            capture_output=True,
+        )
+
+        # Retry useradd
+        base_cmd = ["sudo", "useradd", "-M", "-d", str(home_dir), "-s", "/bin/bash",
+                     "-u", str(uid)]
+        retry = subprocess.run(base_cmd + [username], capture_output=True)
+
+        # If the group still exists (groupdel failed), adopt it with -g
+        if retry.returncode != 0:
+            retry_err = retry.stderr.decode()
+            if "group" in retry_err.lower() and "exists" in retry_err.lower():
+                logger.info(f"Group {username} still exists after cleanup, retrying useradd with -g")
+                gid_check = subprocess.run(
+                    ["getent", "group", username], capture_output=True, text=True,
+                )
+                if gid_check.returncode == 0:
+                    existing_gid = gid_check.stdout.strip().split(":")[2]
+                    retry = subprocess.run(
+                        base_cmd + ["-g", existing_gid, username],
+                        capture_output=True,
+                    )
+
+        if retry.returncode != 0:
+            logger.error(
+                f"Retry useradd failed for {username} (code {retry.returncode}): "
+                f"{retry.stderr.decode()}"
+            )
+            raise ValueError(f"Failed to create Linux user after cleanup: {retry.stderr.decode()}")
+
+        logger.info(f"Created Linux user {username} after cleaning up stale entries")
 
     def _setup_group_permissions(self, home_dir: Path, uid: int, username: str) -> None:
         """

@@ -4,7 +4,6 @@
  * Loading/progress indicator components extracted from App.tsx.
  */
 
-import React from 'react';
 import { SPINNER_FRAMES } from '../../constants';
 import { useSpinnerFrame } from '../../hooks';
 import type { SubagentView } from '../../types/conversation';
@@ -23,11 +22,6 @@ export function AgentSpinner({ toolName }: { toolName?: string | null }): JSX.El
 export function InlineStreamSpinner(): JSX.Element {
   const frame = useSpinnerFrame();
   return <span className="inline-stream-spinner">{SPINNER_FRAMES[frame]}</span>;
-}
-
-export function TrailingWaitSpinner(): JSX.Element {
-  const frame = useSpinnerFrame();
-  return <span className="trailing-wait-spinner">{SPINNER_FRAMES[frame]}</span>;
 }
 
 export function StatusSpinner(): JSX.Element {

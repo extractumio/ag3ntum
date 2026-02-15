@@ -5,7 +5,6 @@
  * Extracted from App.tsx for better modularity.
  */
 
-import React from 'react';
 import { formatDuration } from '../../utils';
 import { useElapsedTime } from '../../hooks';
 import { StatusSpinner } from '../spinners';
@@ -68,13 +67,12 @@ export function StatusFooter({
             <>
               <StatusSpinner /> Running...{elapsedTime && ` (${elapsedTime})`}
             </>
+          ) : statusLabel === 'Idle' ? (
+            '\u25CF Idle'
+          ) : statusLabel === 'Cancelled' || statusLabel === 'Failed' ? (
+            `\u2717 ${statusLabel}`
           ) : (
-            <>
-              {statusLabel === 'Idle' && '\u25CF Idle'}
-              {statusLabel === 'Cancelled' && '\u2717 Cancelled'}
-              {statusLabel === 'Failed' && '\u2717 Failed'}
-              {statusLabel !== 'Idle' && statusLabel !== 'Cancelled' && statusLabel !== 'Failed' && statusLabel}
-            </>
+            statusLabel
           )}
         </span>
       </div>
