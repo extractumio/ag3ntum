@@ -33,7 +33,7 @@ export function ToolCallBlock({
   // Status icon: pulsing circle while running, checkmark/cross when done
   // For Think tool, use brain emoji when complete
   const statusIcon =
-    tool.status === 'complete' ? (isThinkingTool ? '🧠' : '✓') :
+    tool.status === 'complete' ? (isThinkingTool ? '⬡' : '✓') :
     tool.status === 'failed' ? '✗' : null;
 
   const statusClass =

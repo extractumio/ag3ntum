@@ -65,6 +65,8 @@ RUN echo '# User management - create/modify/delete sandbox users' > /etc/sudoers
     echo '# Restricted userdel - only session users (user_ prefix) can be deleted' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel user_*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r user_*' >> /etc/sudoers.d/ag3ntum && \
+    echo '# groupdel for cleanup after userdel (stale group entries prevent user recreation)' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/groupdel *' >> /etc/sudoers.d/ag3ntum && \
     echo '# File ownership - restricted to /users/ tree only' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *\:* /users/*' >> /etc/sudoers.d/ag3ntum && \

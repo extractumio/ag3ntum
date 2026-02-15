@@ -97,6 +97,13 @@ export function AgentMessageBlock({
   const statusLabel = getStatusLabel(normalizedStatus);
   const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
 
+  // Derive currently running tool (skip Think as it's not a user-visible tool)
+  const runningTool = toolCalls.find(t => t.status === 'running' && t.tool !== 'Think');
+  const runningToolName = runningTool?.tool.replace(/^mcp__ag3ntum__/, '') || null;
+
+  // Running subagents for status display
+  const runningSubagents = subagents.filter(s => s.status === 'running');
+
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
   // Show trailing wait spinner when message content is complete but session is still running
@@ -138,6 +145,16 @@ export function AgentMessageBlock({
         <span className={`message-icon ${getIconStatusClass()}`}>◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
+        {subagents.length > 0 && (
+          <span className="subagent-status-dots">
+            {subagents.map(sub => (
+              <span key={sub.id} className={`subagent-dot subagent-dot-${sub.status}`}
+                    title={`${sub.name}: ${sub.status}`}>
+                ◆
+              </span>
+            ))}
+          </span>
+        )}
         {/* Message stats badges */}
         {(otherToolCalls.length > 0 || subagents.length > 0 || (files && files.length > 0)) && (
           <div className="message-stats">
@@ -201,7 +218,29 @@ export function AgentMessageBlock({
                 {showTrailingWait && <TrailingWaitSpinner />}
               </>
             ) : null}
-            {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && <AgentSpinner />}
+            {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && (
+              <>
+                <AgentSpinner toolName={runningToolName} />
+                {sessionRunning && runningSubagents.length > 0 && (
+                  <div className="running-agents-status">
+                    {subagents.filter(s => s.status === 'running').map(sub => (
+                      <div key={sub.id} className="running-agent-line">
+                        <span className="subagent-dot subagent-dot-running">◆</span>
+                        <span className="running-agent-name">{sub.name}</span>
+                        <InlineStreamSpinner />
+                      </div>
+                    ))}
+                    {subagents.filter(s => s.status !== 'running').map(sub => (
+                      <div key={sub.id} className="running-agent-line">
+                        <span className={`subagent-dot subagent-dot-${sub.status}`}>◆</span>
+                        <span className="running-agent-name">{sub.name}</span>
+                        <span className="running-agent-done">{sub.status === 'complete' ? '✓' : '✗'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
             {!displayContent && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}

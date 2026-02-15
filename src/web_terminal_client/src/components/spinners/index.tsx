@@ -8,13 +8,13 @@ import React from 'react';
 import { SPINNER_FRAMES } from '../../constants';
 import { useSpinnerFrame } from '../../hooks';
 
-export function AgentSpinner(): JSX.Element {
+export function AgentSpinner({ toolName }: { toolName?: string | null }): JSX.Element {
   const frame = useSpinnerFrame();
 
   return (
     <span className="agent-spinner">
       <span className="agent-spinner-char">{SPINNER_FRAMES[frame]}</span>
-      <span className="agent-spinner-label">processing...</span>
+      <span className="agent-spinner-label">{toolName || 'processing...'}</span>
     </span>
   );
 }

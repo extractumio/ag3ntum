@@ -552,6 +552,61 @@
   font-size: inherit;
 }
 
+/* =============================================================================
+ * SUBAGENT STATUS DOTS (in message header)
+ * ============================================================================= */
+
+.subagent-status-dots {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: var(--spacing-sm);
+}
+
+.subagent-dot {
+  font-size: var(--font-sm);
+}
+
+.subagent-dot-running {
+  color: var(--color-violet);
+  animation: pulsing-circle-pulse 1.5s ease-in-out infinite;
+}
+
+.subagent-dot-complete {
+  color: var(--color-success);
+}
+
+.subagent-dot-failed {
+  color: var(--color-error);
+}
+
+/* =============================================================================
+ * RUNNING AGENTS STATUS (below spinner)
+ * ============================================================================= */
+
+.running-agents-status {
+  margin-top: var(--spacing-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2xs);
+}
+
+.running-agent-line {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--font-sm);
+  padding-left: var(--spacing-md);
+}
+
+.running-agent-name {
+  color: var(--color-text-muted);
+}
+
+.running-agent-done {
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+
 /* Pulsing circle spinner for structured elements */
 .pulsing-circle-spinner {
   display: inline-block;
