@@ -4,10 +4,15 @@
 # https://github.com/extractumio/ag3ntum
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/release/install.sh | bash
 #
 # Or download and run:
 #   chmod +x install.sh && ./install.sh
+#
+# Options:
+#   --dev          Development mode (Vite dev server, clones 'main' branch)
+#   --branch B     Clone specific branch (default: 'release')
+#   --help         Show help
 #
 # This script:
 #   1. Checks prerequisites (Docker, Git)
@@ -26,6 +31,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/extractumio/ag3ntum.git"
 MIN_DOCKER_VERSION="20.10"
+DEFAULT_BRANCH="release"
 
 # Braille spinner frames (same as web terminal)
 SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -448,13 +454,13 @@ setup_repository() {
     fi
 
     # Clone the repository
-    print_info "Cloning Ag3ntum repository..."
+    print_info "Cloning Ag3ntum repository (branch: ${AG3NTUM_BRANCH})..."
 
     # Clone with progress indicator
     local clone_output
     clone_output=$(mktemp)
 
-    (git clone --depth 1 "$REPO_URL" ag3ntum > "$clone_output" 2>&1) &
+    (git clone --depth 1 --branch "$AG3NTUM_BRANCH" "$REPO_URL" ag3ntum > "$clone_output" 2>&1) &
     local clone_pid=$!
 
     if ! spinner $clone_pid "Cloning repository"; then
@@ -550,7 +556,7 @@ gather_configuration() {
         print_warning "Invalid port number (must be 1024-65535)"
     done
 
-    # Web UI port
+    # Web UI port (used in both prod and dev modes)
     while true; do
         prompt_text "Web UI port" "$DEFAULT_WEB_PORT" WEB_PORT
         if validate_port "$WEB_PORT"; then
@@ -884,12 +890,19 @@ run_build() {
     print_info "This may take 5-10 minutes on first build..."
     echo ""
 
-    # Export port variables for run.sh to read from config
+    # Export port variables and mode for run.sh
     export AG3NTUM_API_PORT="$API_PORT"
     export AG3NTUM_WEB_PORT="$WEB_PORT"
+    export AG3NTUM_MODE="$AG3NTUM_MODE"
+
+    # Build command: add --dev flag if in dev mode
+    local build_flags="--no-cache"
+    if [[ "$AG3NTUM_MODE" == "dev" ]]; then
+        build_flags="--no-cache --dev"
+    fi
 
     # Run the build with output (use 'build' not 'rebuild' to preserve generated config)
-    if ! ./run.sh build --no-cache; then
+    if ! ./run.sh build ${build_flags}; then
         print_error "Build failed"
         echo ""
         echo "Check the output above for errors."
@@ -1081,11 +1094,16 @@ EOF
     echo ""
 
     local protocol="http"
-    local web_url="${protocol}://${SERVER_HOSTNAME}:${WEB_PORT}"
     local api_url="${protocol}://${SERVER_HOSTNAME}:${API_PORT}"
+    local web_url="${protocol}://${SERVER_HOSTNAME}:${WEB_PORT}"
 
     printf "${BOLD}Web Interface:${NC}  ${CYAN}%s${NC}\n" "$web_url"
     printf "${BOLD}API Endpoint:${NC}   ${CYAN}%s/api/v1${NC}\n" "$api_url"
+    if [[ "$AG3NTUM_MODE" == "dev" ]]; then
+        print_dim "  (Dev mode: Vite dev server with HMR)"
+    else
+        print_dim "  (Prod mode: pre-built static bundle)"
+    fi
     echo ""
     printf "${BOLD}Login with:${NC}\n"
     printf "  Email:    ${WHITE}%s${NC}\n" "$ADMIN_EMAIL"
@@ -1126,7 +1144,56 @@ trap cleanup_on_exit EXIT INT TERM
 # MAIN
 # =============================================================================
 
+show_install_usage() {
+    echo "Ag3ntum Installer"
+    echo ""
+    echo "Usage: install.sh [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --dev          Development mode (Vite dev server, clones 'main' branch)"
+    echo "  --branch B     Clone specific branch (default: '${DEFAULT_BRANCH}')"
+    echo "  --help, -h     Show this help"
+    echo ""
+    echo "Default: production mode from '${DEFAULT_BRANCH}' branch"
+    echo ""
+    echo "Examples:"
+    echo "  install.sh                  # Production from 'release' branch"
+    echo "  install.sh --dev            # Development from 'main' branch"
+    echo "  install.sh --branch main    # Production from 'main' branch"
+}
+
 main() {
+    # Parse arguments
+    AG3NTUM_BRANCH="${DEFAULT_BRANCH}"
+    AG3NTUM_MODE="prod"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dev)
+                AG3NTUM_MODE="dev"
+                AG3NTUM_BRANCH="main"
+                shift
+                ;;
+            --branch)
+                AG3NTUM_BRANCH="${2:?'--branch requires a value'}"
+                shift 2
+                ;;
+            --branch=*)
+                AG3NTUM_BRANCH="${1#*=}"
+                shift
+                ;;
+            --help|-h)
+                show_install_usage
+                exit 0
+                ;;
+            *)
+                print_error "Unknown argument: $1"
+                show_install_usage
+                exit 1
+                ;;
+        esac
+    done
+
     # Show welcome banner
     show_banner
 
@@ -1134,6 +1201,7 @@ main() {
     detect_os
 
     print_dim "Detected OS: $DETECTED_OS"
+    print_dim "Mode: ${AG3NTUM_MODE} | Branch: ${AG3NTUM_BRANCH}"
     echo ""
 
     # Check prerequisites

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { sharedResolve } from './vite.shared.mjs';
 
 export default defineConfig({
   plugins: [react()],
@@ -9,6 +10,7 @@ export default defineConfig({
     // Write build output outside source tree (source dir is read-only to the container)
     outDir: '/tmp/web_dist',
   },
+  resolve: { ...sharedResolve },
   server: {
     port: Number(process.env.AG3NTUM_WEB_PORT ?? process.env.VITE_DEV_PORT ?? 50080),
     host: '0.0.0.0',

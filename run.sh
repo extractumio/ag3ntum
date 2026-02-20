@@ -83,12 +83,17 @@ UID Security Modes:
   See docs/UID-SECURITY.md for details
 
 Options:
+  --dev                 Development mode (Vite dev server with HMR on separate port)
   --mount-rw=PATH:NAME  Mount host PATH as read-write (accessible at ./external/rw/NAME)
   --mount-rw=PATH       Mount host PATH as read-write (name defaults to basename)
   --mount-ro=PATH:NAME  Mount host PATH as read-only (accessible at ./external/ro/NAME)
   --mount-ro=PATH       Mount host PATH as read-only (name defaults to basename)
   --no-cache            Force rebuild without Docker cache (for build/rebuild)
   --help                Show this help message
+
+Deployment Modes:
+  prod (default)  Web container serves pre-built static bundle (fast startup)
+  dev (--dev)     Web container runs Vite dev server with HMR (hot-reload)
 
 Test Options (for 'test' command):
   (no args)               Run ALL tests (backend + security + E2E + UI)
@@ -474,6 +479,10 @@ while [[ $# -gt 0 ]]; do
       MOUNTS_RO+=("$validated")
       shift
       ;;
+    --dev)
+      AG3NTUM_MODE="dev"
+      shift
+      ;;
     --no-cache)
       NO_CACHE="--no-cache"
       shift
@@ -494,6 +503,36 @@ if [[ -z "${ACTION}" ]]; then
   show_usage
   exit 1
 fi
+
+# =============================================================================
+# Mode Detection (prod vs dev)
+# =============================================================================
+# Priority: CLI --dev flag > AG3NTUM_MODE env var > .env file > default (prod)
+#
+# Both modes serve Web UI on WEB_PORT (50080) and API on API_PORT (40080).
+#
+# prod (default): Web container serves pre-built static bundle (fast startup,
+#                 no node_modules, no npm install).
+# dev:            Web container runs Vite dev server with HMR and hot-reload.
+if [[ -z "${AG3NTUM_MODE:-}" ]]; then
+  if [[ -f .env ]] && grep -q '^AG3NTUM_MODE=' .env; then
+    AG3NTUM_MODE="$(grep '^AG3NTUM_MODE=' .env | cut -d= -f2)"
+  else
+    AG3NTUM_MODE="prod"
+  fi
+fi
+
+# Compose command varies by mode
+if [[ "${AG3NTUM_MODE}" == "dev" ]]; then
+  COMPOSE_CMD="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
+else
+  COMPOSE_CMD="docker compose"
+fi
+
+# Compose command that always includes the web service with dev overlay (for UI tests).
+# In prod mode, docker-compose.yml already includes the web service, but UI tests need
+# the dev overlay for node_modules volume and Vite dev server.
+COMPOSE_WITH_WEB="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
 
 function read_config_value() {
   local key="$1"
@@ -826,13 +865,15 @@ EOF
 function check_services() {
   local missing=0
   local running
-  running="$(docker compose ps --status running --services || true)"
-  for svc in ag3ntum-api ag3ntum-web; do
-    if ! grep -q "${svc}" <<<"${running}"; then
-      echo "Service not running: ${svc}"
-      missing=1
-    fi
-  done
+  running="$(${COMPOSE_CMD} ps --status running --services || true)"
+  if ! grep -q "ag3ntum-api" <<<"${running}"; then
+    echo "Service not running: ag3ntum-api"
+    missing=1
+  fi
+  if ! grep -q "ag3ntum-web" <<<"${running}"; then
+    echo "Service not running: ag3ntum-web"
+    missing=1
+  fi
   return "${missing}"
 }
 
@@ -848,8 +889,9 @@ function do_cleanup() {
   echo "=== Starting cleanup for instance: ${project_name} ==="
 
   # Step 1: Stop and remove project containers (scoped by COMPOSE_PROJECT_NAME in .env)
+  # Use --remove-orphans to also clean up dev-mode web containers when in prod mode
   echo "Stopping containers..."
-  docker compose down --remove-orphans --timeout 10 2>/dev/null || true
+  ${COMPOSE_CMD} down --remove-orphans --timeout 10 2>/dev/null || true
 
   # Step 2: Remove project-specific volumes
   echo "Removing project volumes..."
@@ -868,7 +910,7 @@ function do_cleanup() {
     me="$(id -u):$(id -g)"
     # Use any available ag3ntum image (still exists at this point, before image removal)
     local reclaim_image
-    reclaim_image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" | head -1)
+    reclaim_image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" | head -1 || true)
     if [[ -z "${reclaim_image}" ]]; then
       reclaim_image="alpine"
     fi
@@ -905,7 +947,7 @@ function do_cleanup() {
     # Remove third-party images pulled by this compose file (e.g. redis)
     # only if no other containers still reference them
     local compose_images
-    compose_images=$(docker compose config --images 2>/dev/null || true)
+    compose_images=$(${COMPOSE_CMD} config --images 2>/dev/null || true)
     for img in ${compose_images}; do
       # Skip ag3ntum images — already handled above
       [[ "${img}" == "${IMAGE_PREFIX}:"* ]] && continue
@@ -962,24 +1004,23 @@ function do_cleanup() {
 }
 
 function do_restart() {
-  echo "=== Restarting containers to reload code ==="
-  
-  # Restart API container (where Python code runs)
+  echo "=== Restarting containers to reload code (mode: ${AG3NTUM_MODE}) ==="
+
+  # Restart both containers
   echo "Restarting ag3ntum-api..."
-  docker compose restart ag3ntum-api
-  
-  # Optionally restart web if needed
+  ${COMPOSE_CMD} restart ag3ntum-api
+
   echo "Restarting ag3ntum-web..."
-  docker compose restart ag3ntum-web
-  
+  ${COMPOSE_CMD} restart ag3ntum-web
+
   # Wait for services to be healthy
   sleep 2
-  
+
   if check_services; then
     echo "=== Restart complete - services running ==="
   else
     echo "=== WARNING: Some services may not be running ==="
-    docker compose ps
+    ${COMPOSE_CMD} ps
   fi
 }
 
@@ -1011,7 +1052,7 @@ function create_user() {
   fi
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1019,13 +1060,13 @@ function create_user() {
 
   # Get current UID mode from container
   local uid_mode
-  uid_mode=$(docker compose exec -T ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
+  uid_mode=$(${COMPOSE_CMD} exec -T ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
 
   echo "=== Creating user: $USERNAME ==="
   echo "  UID Security Mode: ${uid_mode:-isolated}"
 
   # Run create_user.py inside container as root (avoids sudo prompts)
-  docker compose exec -T -u root ag3ntum-api \
+  ${COMPOSE_CMD} exec -T -u root ag3ntum-api \
     python3 src/cli/create_user.py \
     --username="$USERNAME" \
     --email="$EMAIL" \
@@ -1037,7 +1078,7 @@ function create_user() {
   # setpriv --init-groups only reads /etc/group at process start.
   echo ""
   echo "Restarting API to activate user access..."
-  docker compose restart ag3ntum-api
+  ${COMPOSE_CMD} restart ag3ntum-api
 }
 
 # Function to delete a user
@@ -1068,7 +1109,7 @@ function delete_user() {
   fi
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1081,7 +1122,7 @@ function delete_user() {
   fi
 
   # Run delete_user.py inside container as root (needs elevated permissions)
-  docker compose exec -T -u root ag3ntum-api \
+  ${COMPOSE_CMD} exec -T -u root ag3ntum-api \
     python3 src/cli/delete_user.py \
     --username="$USERNAME" \
     $FORCE
@@ -1103,22 +1144,45 @@ fi
 run_ui_tests() {
   echo "=== Running UI/React tests ==="
 
-  # Ensure ag3ntum-web container is running (test setup may have stopped it)
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
-    echo "Starting ag3ntum-web container..."
-    docker compose up -d ag3ntum-web
-    sleep 2
-    if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+  # UI tests always need the web container in dev mode (with node_modules).
+  # COMPOSE_WITH_WEB includes docker-compose.dev.yml for Vite + node_modules.
+  # Always call up -d: if web is running in prod mode (from ./run.sh build),
+  # compose detects the config change and recreates it with the dev overlay.
+  echo "Ensuring ag3ntum-web container is running (dev mode)..."
+  ${COMPOSE_WITH_WEB} up -d ag3ntum-web
+
+  # Wait for entrypoint to complete (npm install + vite startup).
+  # The entrypoint installs packages as ag3ntum_api (UID 45045). We must NOT
+  # exec npm commands as root while it's running — that creates root-owned
+  # /tmp/.npm cache files that cause EACCES on the next entrypoint npm install.
+  echo "Waiting for Vite dev server to be ready..."
+  local attempts=0
+  local max_attempts=60
+  while [[ $attempts -lt $max_attempts ]]; do
+    if ! ${COMPOSE_WITH_WEB} ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
       echo "Error: ag3ntum-web container failed to start."
-      echo "Check logs with: docker compose logs ag3ntum-web"
+      echo "Check logs with: ${COMPOSE_WITH_WEB} logs ag3ntum-web"
       return 1
     fi
+    # Check if vite is ready by looking for "VITE.*ready" in container logs
+    if ${COMPOSE_WITH_WEB} logs ag3ntum-web 2>&1 | grep -q "VITE.*ready"; then
+      echo "  Vite dev server ready."
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  if [[ $attempts -ge $max_attempts ]]; then
+    echo "Error: Vite dev server did not start within ${max_attempts}s."
+    echo "Check logs with: ${COMPOSE_WITH_WEB} logs ag3ntum-web"
+    return 1
   fi
 
-  # Check if node_modules needs reinstalling (platform mismatch between host and container)
-  # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux)
+  # Check if node_modules needs reinstalling (platform mismatch between host and container).
+  # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux).
+  # Run as ag3ntum_api (45045) to match entrypoint's ownership of /tmp/.npm cache.
   echo "Checking node_modules platform compatibility..."
-  NEEDS_REINSTALL=$(docker compose exec -T ag3ntum-web sh -c '
+  NEEDS_REINSTALL=$(${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c '
     if [ ! -d /app/node_modules ]; then
       echo "missing"
     elif [ ! -d /app/node_modules/@rollup ]; then
@@ -1132,7 +1196,8 @@ run_ui_tests() {
 
   if [[ "${NEEDS_REINSTALL}" != "ok" ]]; then
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
-    docker compose exec -T ag3ntum-web sh -c '
+    ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c '
+      cp /src/web_terminal_client/package.json /app/package.json && \
       cd /app && \
       rm -rf node_modules/* node_modules/.[!.]* 2>/dev/null; \
       npm install --no-fund --no-audit --no-package-lock
@@ -1142,7 +1207,7 @@ run_ui_tests() {
   # Run vite build first to catch Babel transpilation errors
   # (Vitest uses esbuild which is more permissive than Babel)
   echo "Running vite build to verify transpilation..."
-  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
+  if ! ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c 'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
     echo ""
     echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
     return 1
@@ -1152,7 +1217,7 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
+  ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
   return $?
 }
 
@@ -1206,10 +1271,10 @@ if [[ "${ACTION}" == "test" ]]; then
       echo ""
     } > "$TEST_LOG_FILE"
     CAN_LOG=1
-  elif docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  elif ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     # logs/ directory is owned by container UID (45045). Use the running container
     # to create a world-writable log file so tee -a can append without sudo.
-    docker compose exec -T ag3ntum-api sh -c "
+    ${COMPOSE_CMD} exec -T ag3ntum-api sh -c "
       echo '========================================' > /logs/latest-test-results.log &&
       echo 'Test Run: $(date '+%Y-%m-%d %H:%M:%S')' >> /logs/latest-test-results.log &&
       echo '========================================' >> /logs/latest-test-results.log &&
@@ -1373,8 +1438,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1383,8 +1448,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short -m "e2e"
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1399,8 +1464,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1409,8 +1474,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1505,8 +1570,8 @@ if [[ "${ACTION}" == "test" ]]; then
 
       # Restore container to production mode
       echo ""
-      echo "Restoring container to production mode..."
-      docker compose up -d ag3ntum-api
+      echo "Restoring container to normal mode..."
+      ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       if [[ ${BACKEND_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo "" | tee -a "$TEST_LOG_FILE"
@@ -1615,8 +1680,8 @@ if [[ "${ACTION}" == "test" ]]; then
 
       # Restore container to production mode
       echo ""
-      echo "Restoring container to production mode..."
-      docker compose up -d ag3ntum-api
+      echo "Restoring container to normal mode..."
+      ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       # Exit with error if any test suite failed
       if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
@@ -1656,8 +1721,8 @@ if [[ "${ACTION}" == "test" ]]; then
 
   # Restore container to production mode (without test sudoers)
   echo ""
-  echo "Restoring container to production mode..."
-  docker compose up -d ag3ntum-api
+  echo "Restoring container to normal mode..."
+  ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
   exit ${TEST_EXIT_CODE}
 fi
@@ -1667,7 +1732,7 @@ if [[ "${ACTION}" == "shell" ]]; then
   echo "=== Opening shell in Docker container ==="
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1675,7 +1740,7 @@ if [[ "${ACTION}" == "shell" ]]; then
 
   # Shell requires TTY
   if [ -t 0 ]; then
-    docker compose exec ag3ntum-api /bin/bash
+    ${COMPOSE_CMD} exec ag3ntum-api /bin/bash
   else
     echo "Error: Shell requires an interactive terminal."
     exit 1
@@ -1707,7 +1772,7 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
   if [[ ! -f "docker-compose.test.yml" ]] || [[ ! -f "config/test/sudoers-test" ]]; then
     echo "Warning: Test configuration files not found, using standard compose."
     echo "Some cleanup operations may fail without test permissions."
-    COMPOSE_TEST="docker compose"
+    COMPOSE_TEST="${COMPOSE_CMD}"
     EXEC_OPTS="-T"  # No user override needed for standard compose
   fi
 
@@ -1729,8 +1794,8 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
 
   # Restore container to production mode
   echo ""
-  echo "Restoring container to production mode..."
-  docker compose up -d ag3ntum-api
+  echo "Restoring container to normal mode..."
+  ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
   exit 0
 fi
@@ -1779,7 +1844,7 @@ ROLLBACK_ENV=0
 cleanup() {
   if [[ "${ROLLBACK_ENV}" -eq 1 && -s "${BACKUP_ENV}" ]]; then
     cp "${BACKUP_ENV}" .env
-    docker compose up -d --remove-orphans || true
+    ${COMPOSE_CMD} up -d --remove-orphans || true
   fi
   rm -f "${BACKUP_ENV}"
 }
@@ -1802,12 +1867,13 @@ AG3NTUM_IMAGE_TAG=${IMAGE_TAG}
 AG3NTUM_API_PORT=${API_PORT}
 AG3NTUM_WEB_PORT=${WEB_PORT}
 AG3NTUM_REDIS_PORT=${REDIS_PORT}
+AG3NTUM_MODE=${AG3NTUM_MODE}
 COMPOSE_PROJECT_NAME=${PROJECT_NAME}
 EOF
 
-echo "Starting containers with tag ${IMAGE_TAG}..."
+echo "Starting containers with tag ${IMAGE_TAG} (mode: ${AG3NTUM_MODE})..."
 # Use --force-recreate to ensure fresh containers with new code
-docker compose up -d --remove-orphans --force-recreate
+${COMPOSE_CMD} up -d --remove-orphans --force-recreate
 
 if ! check_services; then
   echo "Deployment failed, rolling back."
@@ -1816,16 +1882,45 @@ fi
 
 ROLLBACK_ENV=0
 
+# Validate frontend build (catches module resolution failures early)
+echo ""
+if [[ "${AG3NTUM_MODE}" == "dev" ]]; then
+  # Dev mode: validate via web container's Vite build
+  if ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+    echo "Validating frontend build (dev mode)..."
+    if ${COMPOSE_CMD} exec -T ag3ntum-web sh -c \
+      'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs' \
+      >/dev/null 2>&1; then
+      echo "  Frontend build validation passed"
+    else
+      echo "  WARNING: Frontend build validation failed. Check web container logs."
+      echo "           ${COMPOSE_CMD} logs ag3ntum-web"
+    fi
+  fi
+else
+  # Prod mode: verify the static bundle exists in the web container
+  echo "Validating production frontend bundle..."
+  if ${COMPOSE_CMD} exec -T ag3ntum-web sh -c 'test -f /web_dist/index.html' 2>/dev/null; then
+    echo "  Production frontend bundle verified"
+  else
+    echo "  WARNING: Production frontend bundle missing. Check Dockerfile build stage."
+  fi
+fi
+
 # Verify fresh containers
 echo ""
 echo "=== Deployment Verification ==="
-echo "Instance:  ${PROJECT_NAME}"
-echo "Image tag: ${IMAGE_TAG}"
-echo "API Port:  ${API_PORT}"
-echo "Web Port:  ${WEB_PORT}"
+echo "Instance:   ${PROJECT_NAME}"
+echo "Mode:       ${AG3NTUM_MODE}"
+echo "Image tag:  ${IMAGE_TAG}"
+echo "Web Port:   ${WEB_PORT}"
+echo "API Port:   ${API_PORT}"
 echo "Redis Port: ${REDIS_PORT}"
 echo ""
 echo "Container status:"
-docker compose ps
+${COMPOSE_CMD} ps
+echo ""
+echo "Web UI:  http://localhost:${WEB_PORT}"
+echo "API:     http://localhost:${API_PORT}"
 echo ""
 echo "=== Deployment complete at $(date) ==="

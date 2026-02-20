@@ -45,7 +45,8 @@ When editing files, prefer the Write or Edit tool over bash sed commands. sed-ba
 ## Commands
 
 ```bash
-./run.sh build                         # Build image, start containers
+./run.sh build                         # Build image, start containers (prod mode)
+./run.sh build --dev                   # Build with Vite dev server (dev mode)
 ./run.sh restart                       # Restart (code/config changes)
 ./run.sh cleanup                       # Stop, remove containers/images
 ./run.sh rebuild                       # cleanup → build (full reset)
@@ -78,7 +79,9 @@ When editing files, prefer the Write or Edit tool over bash sed commands. sed-ba
 
 **Always use `./run.sh`** for building, testing, and running containers. Do not use raw docker/docker-compose commands unless explicitly asked.
 
-URLs after build: **Web UI** http://localhost:50080 | **API** http://localhost:40080
+**Deployment Modes** (both use two ports: **Web UI** http://localhost:50080 | **API** http://localhost:40080):
+- **Production (default)**: `./run.sh build` — Web container serves pre-built static bundle (fast startup, no npm install)
+- **Development**: `./run.sh build --dev` — Web container runs Vite dev server with HMR (hot-reload)
 
 Python 3.13+ | AGPL-3.0 | claude-agent-sdk 0.1.23 | Ubuntu 24.04 container
 
@@ -140,7 +143,8 @@ Project/
 ├── data/                          # SQLite DB, manifests
 ├── logs/                          # Runtime + test logs
 ├── users/                         # Per-user sessions
-├── docker-compose.yml             # api + web + redis
+├── docker-compose.yml             # api + web + redis (prod: static server)
+├── docker-compose.dev.yml         # Overrides web for Vite dev server
 ├── docker-compose.test.yml        # Test overlay
 ├── docker-compose.override.yml    # Auto-generated mounts
 ├── Dockerfile                     # Ubuntu 24.04
@@ -177,9 +181,11 @@ cp config/{agent,api,secrets}.yaml.example config/{agent,api,secrets}.yaml  # th
 | Code / config YAML | `./run.sh restart` |
 | Dockerfile / requirements.txt | `./run.sh build --no-cache` |
 | External mounts (add/remove/path) | `./run.sh build` |
+| Switch prod ↔ dev mode | `./run.sh build` or `./run.sh build --dev` |
+| Frontend code (prod mode) | `./run.sh build` (dev mode: automatic via HMR) |
 | Full reset | `./run.sh rebuild` |
 
-Services: `ag3ntum-api` (uvicorn) + `ag3ntum-web` (vite) + `redis` (7-alpine)
+Services: `ag3ntum-api` (uvicorn) + `ag3ntum-web` (prod: static server, dev: vite) + `redis` (7-alpine).
 Capabilities: SYS_ADMIN, SETUID, SETGID, CHOWN. CPU-specific numpy/pandas (SSE4.2 detection). ARM64 supported.
 
 ---
@@ -233,7 +239,16 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md`
 | Frontend | `tests/web_terminal_console/` (20+) | vitest |
 
 **Markers**: `unit`, `integration`, `slow`, `e2e`. `asyncio_mode = auto`.
-`@pytest.mark.e2e` / `@pytest.mark.slow` skipped by default. `./run.sh test` passes `--run-e2e`. `--quick` skips them.
+`@pytest.mark.e2e` / `@pytest.mark.slow` skipped by default. Only `./run.sh test --all` passes `--run-e2e` to include E2E tests. `--quick` skips both E2E and slow.
+
+**Running full test suite**: `./run.sh test --all` produces ~300K+ lines and takes ~10 minutes. Always redirect output to a file and run in background to avoid output buffer overflow:
+```bash
+nohup ./run.sh test --all > /tmp/test-all-output.log 2>&1 &
+# Check progress:
+tail -5 /tmp/test-all-output.log
+# Check final result:
+grep -E 'passed|failed|All tests' /tmp/test-all-output.log | tail -10
+```
 
 → See [docs/testing-guide.md](docs/testing-guide.md) for writing backend/E2E/frontend tests, pre-built users, fixtures.
 → See [docs/sse-schema-validation.md](docs/sse-schema-validation.md) for SSE schema test workflow.
@@ -331,7 +346,7 @@ sandboxed_envs:               # Per-user, sandbox-only
 11. **Entrypoints sync Linux users** — Container `/etc/passwd` is ephemeral. `entrypoint-api.sh` and `entrypoint-test.sh` call `scripts/sync_linux_users.py` to recreate accounts from DB on every start. Test entrypoint also creates fully-equipped `ag3ntum_tester_a` (59990) and `ag3ntum_tester_b` (59991) with DB entries, venvs, and shared GID memberships.
 12. **Supplementary groups are set at process start** — `setpriv --init-groups` reads `/etc/group` once when the API process launches. Dynamically adding users (and their groups) after startup does NOT update the running process's group list. Both `run.sh create-user` and `install.sh create_admin_user()` restart the API container after user creation to pick up the new group. `agent_core.py` has a defense-in-depth try/except for PermissionError on session directory access in case a restart is missed. Tests that need real user directories must use pre-built test users, not dynamic `UserService.create_user()`.
 13. **Always use `./run.sh test <flags>`** — Never run tests via raw `docker exec` or manual `docker compose exec`. The `run.sh` CLI handles: (a) starting the container with `docker-compose.test.yml` overlay (test entrypoint, test volumes), (b) running as `ag3ntum_api` user (not root), (c) restoring production mode after tests. Running `docker exec` directly runs as root, which causes false test results (e.g., security tests that check UID dropping will fail).
-14. **Container recreation for entrypoint changes** — `docker compose up -d` reuses existing containers if the image hasn't changed. After modifying `entrypoint-test.sh`, use `docker compose up -d --force-recreate ag3ntum-api` or `./run.sh rebuild` to ensure the new entrypoint runs.
+14. **Container recreation for entrypoint changes** — `docker compose up -d` reuses existing containers if the image hasn't changed. After modifying any `entrypoint-*.sh`, use `./run.sh rebuild` — entrypoints are baked into the image via `COPY`, not volume-mounted.
 15. **Test user UIDs at high end of range** — Pre-built test users use UIDs 59990/59991 (top of 50000–60000 isolated range). Dynamic users allocated sequentially from 50000. Always check `getent passwd` or `SELECT linux_uid FROM users` before assigning UIDs to avoid collisions with existing users.
 16. **LLM proxy auto-routing** — Models in `llm-api-proxy.yaml` are automatically routed via the internal proxy (`/api/llm-proxy`). The SDK's `ANTHROPIC_BASE_URL` is set dynamically. API keys can be in env vars OR `secrets.yaml` → `sandboxed_envs`.
 17. **Token revocation is server-side** — Logout now increments `token_version` on the User model, invalidating all outstanding JWTs. Not just client-side cookie clearing.
@@ -344,5 +359,10 @@ sandboxed_envs:               # Per-user, sandbox-only
 24. **Agent self-assessment for session status** — `determine_session_status()` in `agent_core.py` reads structured `request_status` headers from agent output. Agent's own status (COMPLETE/PARTIAL/FAILED) is primary; defaults to COMPLETE if no header found.
 25. **Security refusals show "failed" status** — When the agent correctly refuses a malicious/disallowed request, session status is "failed" because the agent self-assesses as unable to complete the task. This is expected behavior. To distinguish security refusals from actual failures, check the agent's response content for refusal language. A dedicated "refused" status is a future enhancement.
 26. **NEVER delete `config/*.yaml` files** — They are gitignored, instance-specific, and may contain credentials. `run.sh` auto-provisions safe configs from `.example` templates on build, but `secrets.yaml` requires manual creation. Deleting configs during development/testing/debugging is forbidden — use temp dirs or mocks instead.
+
+27. **Production vs dev mode** — Both modes serve Web UI on port 50080 and API on port 40080. `./run.sh build` (default) builds a static frontend bundle into the Docker image; the web container serves it via `uvicorn + starlette` (`src/web_frontend_server.py`). `./run.sh build --dev` runs a Vite dev server with HMR instead. Mode is persisted in `.env` as `AG3NTUM_MODE`. `install.sh` defaults to prod/release; use `install.sh --dev` for development.
+28. **Frontend builder stage in Dockerfile** — Multi-stage build: `node:20-slim` stage runs `npm install + vite build`, output copied to `/web_dist` in final image. The web container serves `/web_dist` in production mode. `entrypoint-web.sh` is mode-aware: prod skips npm install entirely (fast startup), dev installs dependencies and copies Vite configs.
+29. **Shared Vite config** — `vite.shared.mjs` exports resolve aliases shared between `vite.config.mjs` and `vitest.config.mjs`. `entrypoint-web.sh` copies all three to `/tmp/vite-*/`.
+30. **`docker compose exec` defaults to root** — The container's main process runs as UID 45045 (dropped via `setpriv` in entrypoint), but `docker compose exec` starts a new process as root. Always use `-u 45045:45045` when exec'ing npm/vite/node commands to avoid creating root-owned files (especially `/tmp/.npm` cache) that break subsequent entrypoint runs.
 
 **Study `requirements.txt` before new features** — use existing packages.
