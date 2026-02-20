@@ -36,6 +36,23 @@ role: default                     # from prompts/roles/
 
 ---
 
+## Deployment Mode (`AG3NTUM_MODE`)
+
+Controls whether the web container serves a pre-built static bundle (production) or runs a Vite dev server (development).
+
+| Value | Set by | Behavior |
+|-------|--------|----------|
+| `prod` (default) | `./run.sh build` | Static bundle from `/web_dist`, no npm install at runtime |
+| `dev` | `./run.sh build --dev` | Vite dev server with HMR, npm install on startup |
+
+Persisted in `.env` file as `AG3NTUM_MODE=prod` or `AG3NTUM_MODE=dev`. Survives `restart` calls.
+
+**Switching modes**: Run `./run.sh build --dev` or `./run.sh build` to switch. A `restart` does NOT change modes — it uses the persisted value.
+
+**`install.sh` defaults**: Production mode from `release` branch. Use `install.sh --dev` for development mode from `main` branch.
+
+---
+
 ## User Config
 
 - `user_requirements.txt` — pip packages for sandbox

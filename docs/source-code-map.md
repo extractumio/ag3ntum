@@ -71,6 +71,35 @@ Detailed file/class/purpose tables for all subsystems.
 
 ---
 
+## Production Frontend Server (`src/web_frontend_server.py`)
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `web_frontend_server.py` | `app` (Starlette) | Serves pre-built React bundle from `/web_dist` with SPA client-side routing fallback. Used in production mode only. |
+
+---
+
+## Docker Compose Files
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Main compose: api + web (prod static server) + redis |
+| `docker-compose.dev.yml` | Overrides web container for Vite dev server (HMR, npm install) |
+| `docker-compose.test.yml` | Test overlay (test entrypoint, test volumes) |
+| `docker-compose.override.yml` | Auto-generated external mounts |
+
+---
+
+## Vite Configuration (`src/web_terminal_client/`)
+
+| File | Purpose |
+|------|---------|
+| `vite.shared.mjs` | Shared resolve aliases (react, react-dom, etc.) for both build and test |
+| `vite.config.mjs` | Vite dev server + production build config (imports shared aliases) |
+| `vitest.config.mjs` | Vitest test config (imports shared aliases + test-only aliases) |
+
+---
+
 ## Web Terminal (`src/web_terminal_client/`)
 
 React 18.3 + TypeScript 5.6 + Vite 5.4. Full arch: @`../DOCUMENTS/TECHNICAL/web_terminal_client.md`

@@ -76,6 +76,21 @@ response = await client.post("/auth/token", json={
 
 ---
 
+## Frontend Test Infrastructure
+
+Frontend tests (`./run.sh test --ui`) always run in **dev mode** regardless of the current deployment mode. The test runner:
+
+1. Starts the web container with `docker-compose.dev.yml` overlay (Vite dev server + node_modules)
+2. Runs `npm install` if needed (copies `package.json` to `/app/` as safety net)
+3. Executes `vitest run` inside the container
+4. Restores the previous deployment mode (prod/dev) after tests complete
+
+This means UI tests work correctly even after a `./run.sh build` (production mode) — the test infrastructure automatically switches the web container to dev mode.
+
+**If UI tests fail with `ENOENT /app/package.json`**: The web container may be running in prod mode without node_modules. Run `./run.sh test --ui` again — it will recreate the container in dev mode.
+
+---
+
 ## Writing Frontend Tests
 
 vitest + React Testing Library + MSW:

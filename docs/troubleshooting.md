@@ -80,6 +80,13 @@ Read @`how-to-debug-agent-with-ag3ntum_debug.md`. Note: auth uses email, filesys
 3. Redis down? Tests need Redis: `docker ps | grep redis`
 4. Wrong platform binaries (UI tests)? `run.sh` auto-detects and reinstalls node_modules
 
+**Dev/Prod mode issues**:
+1. **503 "Frontend not built"**: Web container is in prod mode but `/web_dist` is missing or empty. Rebuild: `./run.sh build --no-cache`
+2. **Stale frontend after code changes**: In prod mode, frontend is baked into the Docker image. Must rebuild (`./run.sh build`) to pick up changes. In dev mode, Vite HMR handles this automatically.
+3. **Wrong mode after restart**: `./run.sh restart` preserves the current mode from `.env`. To switch modes, use `./run.sh build` (prod) or `./run.sh build --dev` (dev).
+4. **UI tests fail with ENOENT /app/package.json**: Web container is in prod mode (no node_modules). Run `./run.sh test --ui` — it auto-switches to dev mode for tests.
+5. **"Failed to resolve import" errors**: Check that `vite.shared.mjs` exists and is imported by both `vite.config.mjs` and `vitest.config.mjs`. Rebuild with `--no-cache` if the Docker image is stale.
+
 **SSE streaming broken**:
 1. Frontend falls back: SSE → backoff → polling (3+ fails) → SSE retry (60s)
 2. Check `ConnectionManager` state in React DevTools
