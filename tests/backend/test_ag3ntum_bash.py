@@ -33,6 +33,18 @@ from tools.ag3ntum.ag3ntum_bash.tool import (
 )
 
 
+@pytest.fixture
+def allow_all_filter():
+    """Create a security filter that allows everything."""
+    filter_mock = MagicMock()
+    result = MagicMock()
+    result.should_block = False
+    result.allowed = True
+    result.message = ""
+    filter_mock.check_command.return_value = result
+    return filter_mock
+
+
 class TestBashToolConstants:
     """Tests for tool constants and helpers."""
 
@@ -250,16 +262,6 @@ class TestBashToolExecution:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_successful_command_execution(self, workspace, allow_all_filter):
@@ -347,16 +349,6 @@ class TestBashToolPreviewModes:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_head_preview_mode(self, workspace, allow_all_filter):
@@ -437,16 +429,6 @@ class TestBashToolSandbox:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_sandbox_enabled_uses_bwrap(self, workspace, allow_all_filter):
@@ -536,16 +518,6 @@ class TestBashToolTimeout:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_timeout_exit_code_124(self, workspace, allow_all_filter):
@@ -615,16 +587,6 @@ class TestBashToolOutputDirectory:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_output_directory_created(self, workspace, allow_all_filter):
@@ -696,16 +658,6 @@ class TestBashToolExecutionFailure:
         workspace.mkdir()
         return workspace
 
-    @pytest.fixture
-    def allow_all_filter(self):
-        """Create a security filter that allows everything."""
-        filter_mock = MagicMock()
-        result = MagicMock()
-        result.should_block = False
-        result.allowed = True
-        result.message = ""
-        filter_mock.check_command.return_value = result
-        return filter_mock
 
     @pytest.mark.asyncio
     async def test_subprocess_creation_failure(self, workspace, allow_all_filter):

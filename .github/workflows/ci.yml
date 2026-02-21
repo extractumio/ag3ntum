@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, release]
+  push:
+    branches: [main]
+  workflow_dispatch:  # Manual trigger for docker-tests
+
+jobs:
+  # Job 1: Fast checks (GitHub-hosted, no Docker needed)
+  fast-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python lint dependencies
+        run: pip install flake8==7.3.0 bandit==1.8.3
+
+      - name: Flake8
+        run: flake8 src/ tools/ tests/ --config=.flake8
+
+      - name: Bandit (security lint)
+        run: bandit -r src/ tools/ -c bandit.yaml -ll -ii
+
+      - name: Frontend setup
+        working-directory: src/web_terminal_client
+        run: npm ci --legacy-peer-deps
+
+      - name: Frontend type check (tsc — informational)
+        working-directory: src/web_terminal_client
+        continue-on-error: true
+        run: npx tsc --noEmit -p tsconfig.lint.json
+
+      - name: Frontend lint (ESLint)
+        working-directory: src/web_terminal_client
+        run: npx eslint src/ --max-warnings 53
+
+      - name: Frontend tests with coverage
+        working-directory: src/web_terminal_client
+        run: npx vitest run --coverage
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: src/web_terminal_client/coverage/
+          retention-days: 14
+
+  # Job 2: Structural tests (GitHub-hosted, no Docker needed)
+  structural-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run structural tests
+        run: python -m pytest tests/structural/ -v --tb=long
+
+  # Job 3: Dependency audit (informational — non-blocking)
+  dependency-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.9.0
+
+      - name: Run dependency audit
+        run: pip-audit --requirement requirements-base.txt --desc
+
+  # Job 4: Docker-based tests (self-hosted runner at extractum VPS)
+  docker-tests:
+    runs-on: [self-hosted, linux, docker]
+    needs: [fast-checks, structural-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test containers
+        run: ./run.sh build
+
+      - name: Run backend tests
+        run: ./run.sh test --backend
+
+      - name: Run security tests
+        run: ./run.sh test --security
+
+      - name: Run core tests
+        run: ./run.sh test --subset "core-tests"
+
+      - name: Cleanup
+        if: always()
+        run: ./run.sh cleanup

@@ -31,13 +31,13 @@ class TestSessionRun:
 
         assert response.status_code == 201
         data = response.json()
-        
+
         # Validate response structure (TaskStartedResponse)
         assert "session_id" in data
         assert data["status"] == "running"
         assert data["message"] == "Task execution started"
         assert "resumed_from" in data  # Can be None
-        
+
         # Validate session_id format: YYYYMMDD_HHMMSS_uuid8
         session_id = data["session_id"]
         parts = session_id.split("_")
@@ -158,7 +158,7 @@ class TestSessionCreate:
 
         assert response.status_code == 201
         data = response.json()
-        
+
         # Validate full SessionResponse structure
         assert "id" in data
         assert data["status"] == "pending"
@@ -242,12 +242,12 @@ class TestSessionCreate:
         )
 
         data = response.json()
-        
+
         # Validate created_at is ISO format
         created_at = data["created_at"]
         assert "T" in created_at
         datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        
+
         # updated_at should also be valid
         updated_at = data["updated_at"]
         datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
@@ -276,7 +276,7 @@ class TestSessionList:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate SessionListResponse structure
         assert "sessions" in data
         assert isinstance(data["sessions"], list)
@@ -440,7 +440,7 @@ class TestSessionList:
 
         response = client.get("/api/v1/sessions", headers=auth_headers)
         data = response.json()
-        
+
         # Newest first
         assert data["sessions"][0]["task"] == "Task 2"
         assert data["sessions"][1]["task"] == "Task 1"
@@ -467,7 +467,7 @@ class TestSessionGet:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate full SessionResponse structure
         assert data["id"] == session_id
         assert "status" in data
@@ -567,7 +567,7 @@ class TestSessionTask:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate TaskStartedResponse structure
         assert data["status"] == "running"
         assert data["session_id"] == session_id
@@ -663,7 +663,7 @@ class TestSessionTask:
     ) -> None:
         """Returns 409 when task is already running."""
         session_id = created_session["id"]
-        
+
         # Mock the agent runner to say task is already running
         mock_agent_runner.is_running.return_value = True
 
@@ -708,7 +708,7 @@ class TestSessionCancel:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate CancelResponse structure
         assert data["session_id"] == session_id
         assert "status" in data
@@ -792,7 +792,7 @@ class TestSessionResult:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate ResultResponse structure
         assert data["session_id"] == session_id
         assert "status" in data
@@ -820,7 +820,7 @@ class TestSessionResult:
 
         data = response.json()
         metrics = data["metrics"]
-        
+
         # Validate ResultMetrics structure
         assert "duration_ms" in metrics
         assert "num_turns" in metrics
@@ -911,7 +911,7 @@ class TestSessionResumability:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # resumable field should be present (can be None for non-cancelled)
         assert "resumable" in data
 
@@ -989,33 +989,3 @@ class TestSessionStatusTransitions:
             json={}
         )
         assert start_response.json()["status"] == "running"
-
-
-class TestCancelledEventStructure:
-    """Tests for cancelled event structure in API responses."""
-
-    @pytest.mark.unit
-    def test_cancel_response_structure(
-        self,
-        client: TestClient,
-        auth_headers: dict,
-        created_session: dict
-    ) -> None:
-        """Cancel response has correct structure."""
-        session_id = created_session["id"]
-
-        response = client.post(
-            f"/api/v1/sessions/{session_id}/cancel",
-            headers=auth_headers
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        # Validate CancelResponse fields
-        assert "session_id" in data
-        assert "status" in data
-        assert "message" in data
-        assert data["session_id"] == session_id
-
-

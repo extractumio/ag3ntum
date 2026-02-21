@@ -75,7 +75,7 @@ if [ "$NEEDS_INSTALL" = "1" ]; then
     chown -R 45045:45045 /tmp/.npm 2>/dev/null || true
     # Run npm as ag3ntum_api from /app/ (--no-package-lock avoids writing to the bind-mounted source tree)
     # Subshell prevents 'cd /app' from leaking into the parent — vite needs cwd to stay at working_dir
-    (cd /app && setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- npm install --no-fund --no-audit --no-package-lock)
+    (cd /app && setpriv --reuid=45045 --regid=45045 --init-groups --inh-caps=+setgid --ambient-caps=+setgid -- npm install --no-fund --no-audit --no-package-lock --legacy-peer-deps)
     echo "Frontend dependencies installed."
 fi
 

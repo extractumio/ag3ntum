@@ -52,7 +52,10 @@ Design plans: `docs/plans/`
 
 - **Use Write/Edit tools** — never bash sed/awk. sed has corrupted files (App.tsx, shell scripts) requiring git restore.
 - **Update docs with code** — when implementing features or fixes, update relevant docs in `../DOCUMENTS/TECHNICAL/` or `docs/` in the same pass.
-- **Write tests with code** — always write/update tests alongside implementations. Do not wait to be asked.
+- **Test discipline** — (1) New features: write tests covering the new behavior. (2) Changed code: update existing tests to match, remove tests for deleted behavior. (3) After any test changes: review nearby tests for redundancy, staleness, or overlap — refactor or remove. Do not leave dead tests.
+- **Lint after every file change** — Python: `flake8 <file> --config=.flake8`. TypeScript/React: `cd src/web_terminal_client && npx eslint <file>` + `npx tsc --noEmit`. Fix errors before moving on.
+- **Run `./run.sh lint` before every commit** — not optional. Run it, fix failures, then commit. Full suite: flake8, bandit, mypy, ESLint, tsc, structural tests.
+- **Structural tests are guardrails** — if `tests/structural/` fails, read the error message — it explains the fix.
 - **Security errors are not retryable** — if a tool returns a security/permission error, do not retry the same operation. Diagnose the cause.
 - **Verify containers before testing** — before `./run.sh test` or `shell`, confirm containers are up with `docker compose ps`.
 - **Study `requirements.txt`** before adding dependencies — use existing packages, do not add redundant ones.
@@ -74,6 +77,7 @@ Design plans: `docs/plans/`
 ## Commands
 
 ```bash
+./run.sh setup                         # First run: creates .venv/, installs all dev tools + pre-commit
 ./run.sh build [--dev]                 # Build + start (--dev for Vite HMR)
 ./run.sh restart                       # Restart (code/config changes)
 ./run.sh cleanup | rebuild             # Stop+remove | cleanup→build
@@ -85,7 +89,11 @@ Design plans: `docs/plans/`
 ./run.sh test --sandboxing | --e2e     # Sandbox only | E2E only
 ./run.sh test --ui                     # Frontend vitest
 ./run.sh test --subset "pattern*"      # Pattern-match test files
+./run.sh lint                          # flake8 + bandit + mypy + eslint + tsc + structural tests
+./run.sh audit                         # pip-audit dependency vulnerability scan
 ```
+
+**New developer?** Run `./run.sh setup` then `./run.sh build`. That's it.
 
 **Always use `./run.sh`** — never raw docker/docker-compose unless explicitly asked.
 
@@ -136,6 +144,7 @@ Design plans: `docs/plans/`
 | Core | `tests/core-tests/` | pytest | Agent core, tracer, sandbox changes |
 | Security | `tests/security/` | pytest | Security, permission, filter changes |
 | Sandbox | `tests/sandbox/` | pytest | Bubblewrap, UID, path changes |
+| Structural | `tests/structural/` | pytest | Architecture, naming, doc quality (no Docker) |
 | E2E | `tests/backend/test_zzz_e2e_server.py` | pytest | Cross-cutting integration changes |
 | Frontend | `tests/web_terminal_console/` | vitest | React component, hook changes |
 

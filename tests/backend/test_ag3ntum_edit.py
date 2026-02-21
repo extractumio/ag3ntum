@@ -22,6 +22,17 @@ from tools.ag3ntum.ag3ntum_edit.tool import (
 )
 
 
+@pytest.fixture
+def mock_validator(tmp_path):
+    """Create a mock path validator."""
+    validator = MagicMock()
+    validated_result = MagicMock()
+    validated_result.normalized = tmp_path / "test.txt"
+    validated_result.is_readonly = False
+    validator.validate_path.return_value = validated_result
+    return validator
+
+
 class TestEditToolConstants:
     """Tests for tool constants."""
 
@@ -39,15 +50,6 @@ class TestEditToolConstants:
 class TestEditToolBasicEditing:
     """Tests for basic search/replace functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_simple_replacement(self, tmp_path, mock_validator):
@@ -133,15 +135,6 @@ class TestEditToolBasicEditing:
 class TestEditToolFileOwnership:
     """Tests for file ownership (chown to sandbox user)."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_chown_called_after_edit(self, tmp_path, mock_validator):
@@ -166,15 +159,6 @@ class TestEditToolFileOwnership:
 class TestEditToolPathValidation:
     """Tests for path validation and security."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_missing_file_path(self):
@@ -258,15 +242,6 @@ class TestEditToolPathValidation:
 class TestEditToolErrorHandling:
     """Tests for error handling."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_file_not_found(self, tmp_path, mock_validator):
@@ -378,15 +353,6 @@ class TestEditToolErrorHandling:
 class TestEditToolEdgeCases:
     """Edge case tests for the Edit tool."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_unicode_replacement(self, tmp_path, mock_validator):

@@ -67,11 +67,14 @@ function show_usage() {
 Usage: ./run.sh <command> [OPTIONS]
 
 Commands:
+  setup              Install dev tools (Python venv + Node deps + pre-commit hooks)
   build              Build and deploy the containers
   cleanup            Stop containers and remove images (full cleanup)
   restart            Restart containers to reload code (preserves data)
   rebuild            Full cleanup + build (equivalent to: cleanup && build)
   test               Run tests inside the Docker container
+  lint               Run linters (flake8, bandit, mypy, eslint, tsc, structural)
+  audit              Run dependency vulnerability scan (pip-audit)
   shell              Open a shell inside the API container
   create-user        Create a new user account (uses AG3NTUM_UID_MODE setting)
   delete-user        Delete a user account
@@ -421,7 +424,7 @@ NO_CACHE=""
 TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup|restart|rebuild|test|shell|create-user|delete-user|cleanup-test-users)
+    setup|build|cleanup|restart|rebuild|test|lint|audit|shell|create-user|delete-user|cleanup-test-users)
       ACTION="$1"
       shift
       # For test command, collect remaining args
@@ -1725,6 +1728,196 @@ if [[ "${ACTION}" == "test" ]]; then
   ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
   exit ${TEST_EXIT_CODE}
+fi
+
+# ---------------------------------------------------------------------------
+# Dev environment helper: activate .venv if it exists (for lint/audit/setup)
+# ---------------------------------------------------------------------------
+VENV_DIR="${ROOT_DIR}/.venv"
+
+activate_venv() {
+  if [[ -d "${VENV_DIR}" ]]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+    return 0
+  fi
+  return 1
+}
+
+# Handle setup action — install all dev tools (Python venv + Node + pre-commit)
+if [[ "${ACTION}" == "setup" ]]; then
+  echo "=== Setting up development environment ==="
+
+  # 1. Check prerequisites
+  if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 not found. Install Python 3.12+ first."
+    exit 1
+  fi
+  if ! command -v node &>/dev/null; then
+    echo "Error: node not found. Install Node.js 20+ first."
+    exit 1
+  fi
+
+  PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  NODE_VERSION=$(node --version)
+  echo "  Python: ${PYTHON_VERSION}"
+  echo "  Node:   ${NODE_VERSION}"
+
+  # 2. Create Python venv and install lint/audit tools
+  echo ""
+  echo "--- Python dev tools (.venv/) ---"
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "  Creating virtual environment..."
+    python3 -m venv "${VENV_DIR}"
+  else
+    echo "  Virtual environment already exists."
+  fi
+  source "${VENV_DIR}/bin/activate"
+
+  echo "  Installing Python dev tools..."
+  pip install --quiet --upgrade pip
+  pip install --quiet \
+    flake8==7.3.0 \
+    bandit==1.8.3 \
+    mypy==1.14.1 \
+    pip-audit==2.9.0 \
+    pytest==9.0.2
+  echo "  Installed: flake8, bandit, mypy, pip-audit, pytest"
+
+  # 3. Install pre-commit hooks
+  echo ""
+  echo "--- Pre-commit hooks ---"
+  pip install --quiet pre-commit
+  if [[ -f ".pre-commit-config.yaml" ]]; then
+    pre-commit install
+    echo "  Pre-commit hooks installed."
+  else
+    echo "  Warning: .pre-commit-config.yaml not found, skipping hooks."
+  fi
+
+  # 4. Install frontend dependencies
+  echo ""
+  echo "--- Frontend dependencies (npm ci) ---"
+  if [[ -f "src/web_terminal_client/package.json" ]]; then
+    (cd src/web_terminal_client && npm ci --legacy-peer-deps 2>&1 | tail -3)
+    echo "  Frontend dependencies installed."
+  else
+    echo "  Warning: src/web_terminal_client/package.json not found."
+  fi
+
+  echo ""
+  echo "=== Dev environment ready ==="
+  echo ""
+  echo "Commands available:"
+  echo "  ./run.sh lint    — run all linters"
+  echo "  ./run.sh audit   — check dependency vulnerabilities"
+  echo "  ./run.sh build   — build and start Docker containers"
+  echo "  ./run.sh test    — run tests (requires Docker)"
+  exit 0
+fi
+
+# Handle lint action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "lint" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first for full linting."
+    echo "         Falling back to system tools..."
+    echo ""
+  fi
+
+  echo "=== Running linters ==="
+  LINT_EXIT=0
+
+  # Python — flake8
+  echo ""
+  echo "--- flake8 (style) ---"
+  if command -v flake8 &>/dev/null; then
+    flake8 src/ tools/ tests/ --config=.flake8 || LINT_EXIT=1
+  else
+    echo "SKIPPED: flake8 not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — bandit (security)
+  echo ""
+  echo "--- bandit (security) ---"
+  if command -v bandit &>/dev/null; then
+    bandit -r src/ tools/ -c bandit.yaml -ll -ii || LINT_EXIT=1
+  else
+    echo "SKIPPED: bandit not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Structural tests
+  echo ""
+  echo "--- structural tests ---"
+  if command -v pytest &>/dev/null || python3 -m pytest --version &>/dev/null 2>&1; then
+    python3 -m pytest tests/structural/ -v --tb=long || LINT_EXIT=1
+  else
+    echo "SKIPPED: pytest not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — mypy (type checking, informational — not blocking until baseline established)
+  echo ""
+  echo "--- mypy (type checking — informational) ---"
+  if command -v mypy &>/dev/null; then
+    mypy src/core/ src/api/ src/services/ --config-file mypy.ini || echo "  (mypy found issues — informational, not blocking)"
+  else
+    echo "SKIPPED: mypy not found. Run: ./run.sh setup"
+  fi
+
+  # Frontend — TypeScript type check + ESLint
+  if [ -d "src/web_terminal_client/node_modules" ]; then
+    echo ""
+    echo "--- TypeScript (tsc --noEmit — informational) ---"
+    # Use tsconfig.lint.json — excludes test files (they need Docker node_modules)
+    # Informational until pre-existing type errors are cleaned up (20 errors in existing code)
+    (cd src/web_terminal_client && npx tsc --noEmit -p tsconfig.lint.json) || echo "  (tsc found type errors — informational, not blocking)"
+
+    echo ""
+    echo "--- ESLint (React/TypeScript) ---"
+    (cd src/web_terminal_client && npx eslint src/ --max-warnings 53) || LINT_EXIT=1
+  else
+    echo ""
+    echo "SKIPPED: Frontend linting (node_modules missing). Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${LINT_EXIT} -eq 0 ]]; then
+    echo "=== All lint checks passed ==="
+  else
+    echo "=== Some lint checks failed (exit code ${LINT_EXIT}) ==="
+  fi
+  exit ${LINT_EXIT}
+fi
+
+# Handle audit action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "audit" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first."
+    echo ""
+  fi
+
+  echo "=== Running dependency audit ==="
+  AUDIT_EXIT=0
+
+  if command -v pip-audit &>/dev/null; then
+    pip-audit --requirement requirements-base.txt --desc || AUDIT_EXIT=1
+  else
+    echo "SKIPPED: pip-audit not found. Run: ./run.sh setup"
+    AUDIT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${AUDIT_EXIT} -eq 0 ]]; then
+    echo "=== Dependency audit passed ==="
+  else
+    echo "=== Dependency audit found issues (exit code ${AUDIT_EXIT}) ==="
+  fi
+  exit ${AUDIT_EXIT}
 fi
 
 # Handle shell action

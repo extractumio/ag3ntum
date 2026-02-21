@@ -19,9 +19,16 @@ from fastapi import HTTPException
 from src.api.waf_filter import (
     MAX_TEXT_CONTENT_LENGTH,
     MAX_FILE_UPLOAD_SIZE,
+    MAX_FILES_PER_UPLOAD,
     MAX_REQUEST_BODY_SIZE,
+    MAX_TOTAL_UPLOAD_SIZE,
+    BLOCKED_EXTENSIONS,
+    ALLOWED_EXTENSIONS,
     truncate_text_content,
     validate_file_size,
+    validate_file_count,
+    validate_total_upload_size,
+    validate_file_extension,
     validate_request_body_size,
     validate_request_size,
     filter_request_data,
@@ -60,22 +67,19 @@ class TestTruncateTextContent:
         assert truncate_text_content(123) == 123  # type: ignore
         assert truncate_text_content([1, 2, 3]) == [1, 2, 3]  # type: ignore
 
-    def test_field_name_in_logging(self, caplog) -> None:
+    def test_field_name_in_logging(self) -> None:
         """Field name is included in log message."""
-        import logging
+        from unittest.mock import patch
 
-        # Need to configure the specific logger
-        logger = logging.getLogger("src.api.waf_filter")
-        logger.setLevel(logging.WARNING)
-        logger.addHandler(logging.StreamHandler())
-
-        with caplog.at_level(logging.WARNING, logger="src.api.waf_filter"):
+        with patch("src.api.waf_filter.logger") as mock_logger:
             long_text = "x" * (MAX_TEXT_CONTENT_LENGTH + 1)
             truncate_text_content(long_text, field_name="task")
 
-        # Check either caplog or that function ran without error
-        # The logging may go to stdout due to handler config
-        assert True  # Test validates function runs correctly
+        mock_logger.warning.assert_called_once()
+        log_msg = mock_logger.warning.call_args[0][0]
+        assert "task" in log_msg, (
+            f"Expected 'task' field name in log output, got: {log_msg}"
+        )
 
 
 class TestValidateFileSize:
@@ -524,3 +528,231 @@ class TestValidateRequestSizeBodyEnforcement:
             await wrapped()
 
         assert exc_info.value.status_code == 413
+
+
+# =============================================================================
+# Test: File Extension Validation
+# =============================================================================
+
+class TestFileExtensionValidation:
+    """Test validate_file_extension() with various filename patterns."""
+
+    def test_blocked_exe_extension(self) -> None:
+        """Files with .exe extension are blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("malware.exe")
+        assert exc_info.value.status_code == 400
+        assert ".exe" in exc_info.value.detail
+
+    def test_blocked_dll_extension(self) -> None:
+        """Files with .dll extension are blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("library.dll")
+        assert exc_info.value.status_code == 400
+
+    def test_blocked_sh_extension(self) -> None:
+        """Files with .sh extension are blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("script.sh")
+        assert exc_info.value.status_code == 400
+
+    def test_blocked_bat_extension(self) -> None:
+        """Files with .bat extension are blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("run.bat")
+        assert exc_info.value.status_code == 400
+
+    def test_blocked_so_extension(self) -> None:
+        """Files with .so extension are blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("libcrypto.so")
+        assert exc_info.value.status_code == 400
+
+    def test_double_extension_bypass_blocked(self) -> None:
+        """Double extension attack (malware.txt.exe) is blocked.
+
+        WAF uses rsplit('.', 1) to get the last extension, so .exe is detected.
+        """
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("malware.txt.exe")
+        assert exc_info.value.status_code == 400
+
+    def test_case_insensitive_exe(self) -> None:
+        """Uppercase .EXE extension is blocked (case-insensitive check)."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("malware.EXE")
+        assert exc_info.value.status_code == 400
+
+    def test_mixed_case_exe(self) -> None:
+        """Mixed-case .Exe extension is blocked."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_extension("malware.Exe")
+        assert exc_info.value.status_code == 400
+
+    def test_no_extension_passes(self) -> None:
+        """File without extension passes (no dot in filename)."""
+        # Should not raise
+        validate_file_extension("Makefile")
+
+    def test_dot_only_filename(self) -> None:
+        """Filename that is just a dot has empty extension - passes default blocklist."""
+        # "." has no extension part after rsplit(".", 1) -> ext = ""
+        # Empty string is not in BLOCKED_EXTENSIONS
+        validate_file_extension(".")
+
+    def test_allowed_txt_extension(self) -> None:
+        """Safe .txt extension passes."""
+        validate_file_extension("readme.txt")
+
+    def test_allowed_py_extension(self) -> None:
+        """Safe .py extension passes."""
+        validate_file_extension("main.py")
+
+    def test_allowed_json_extension(self) -> None:
+        """Safe .json extension passes."""
+        validate_file_extension("config.json")
+
+    def test_custom_blocked_set(self) -> None:
+        """Custom blocked set overrides defaults."""
+        # .py is not in default blocklist but we can custom-block it
+        with pytest.raises(HTTPException):
+            validate_file_extension("script.py", blocked={".py"})
+
+    def test_custom_allowed_set_restricts(self) -> None:
+        """When allowed set is non-empty, only those extensions pass."""
+        # .txt is allowed, .py is not
+        validate_file_extension("data.txt", blocked=set(), allowed={".txt"})
+        with pytest.raises(HTTPException):
+            validate_file_extension("main.py", blocked=set(), allowed={".txt"})
+
+    def test_all_default_blocked_extensions(self) -> None:
+        """Every extension in BLOCKED_EXTENSIONS is actually blocked."""
+        for ext in BLOCKED_EXTENSIONS:
+            with pytest.raises(HTTPException):
+                validate_file_extension(f"file{ext}")
+
+
+# =============================================================================
+# Test: File Count Validation
+# =============================================================================
+
+class TestFileCountValidation:
+    """Test validate_file_count() for upload file limits."""
+
+    def test_count_within_limit(self) -> None:
+        """File count within default limit passes."""
+        validate_file_count(1)
+        validate_file_count(MAX_FILES_PER_UPLOAD)
+
+    def test_count_exceeding_limit_raises_400(self) -> None:
+        """File count exceeding limit raises HTTP 400."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_file_count(MAX_FILES_PER_UPLOAD + 1)
+        assert exc_info.value.status_code == 400
+        assert "Too many files" in exc_info.value.detail
+
+    def test_zero_files_passes(self) -> None:
+        """Zero files passes validation."""
+        validate_file_count(0)
+
+    def test_custom_max_files(self) -> None:
+        """Custom max_files parameter is respected."""
+        validate_file_count(5, max_files=5)
+        with pytest.raises(HTTPException):
+            validate_file_count(6, max_files=5)
+
+    def test_exactly_at_limit(self) -> None:
+        """Exactly at the limit passes."""
+        validate_file_count(MAX_FILES_PER_UPLOAD)
+
+    def test_one_over_limit(self) -> None:
+        """One over the limit is rejected."""
+        with pytest.raises(HTTPException):
+            validate_file_count(MAX_FILES_PER_UPLOAD + 1)
+
+
+# =============================================================================
+# Test: Total Upload Size Validation
+# =============================================================================
+
+class TestTotalUploadSizeValidation:
+    """Test validate_total_upload_size() for aggregate upload limits."""
+
+    def test_size_within_limit(self) -> None:
+        """Total size within limit passes."""
+        validate_total_upload_size(1024)
+        validate_total_upload_size(MAX_TOTAL_UPLOAD_SIZE)
+
+    def test_size_exceeding_limit_raises_413(self) -> None:
+        """Total size exceeding limit raises HTTP 413."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_total_upload_size(MAX_TOTAL_UPLOAD_SIZE + 1)
+        assert exc_info.value.status_code == 413
+        assert "exceeds" in exc_info.value.detail.lower()
+
+    def test_zero_size_passes(self) -> None:
+        """Zero total size passes."""
+        validate_total_upload_size(0)
+
+    def test_custom_max_total(self) -> None:
+        """Custom max_total parameter is respected."""
+        validate_total_upload_size(100, max_total=100)
+        with pytest.raises(HTTPException):
+            validate_total_upload_size(101, max_total=100)
+
+    def test_exactly_at_limit(self) -> None:
+        """Exactly at the limit passes."""
+        validate_total_upload_size(MAX_TOTAL_UPLOAD_SIZE)
+
+
+# =============================================================================
+# Test: Injection Prevention (WAF is size-only, not content-filtering)
+# =============================================================================
+
+class TestInjectionPrevention:
+    """Verify WAF behavior with malicious content payloads.
+
+    IMPORTANT: The WAF module (waf_filter.py) is a SIZE-ONLY filter.
+    It does NOT perform content-based filtering (SQL injection, XSS, etc.).
+    Content filtering is delegated to other security layers:
+    - Layer 3: Ag3ntum Tools (path_validator.py) for file ops
+    - Layer 4: Command Filter (command_security.py) for bash commands
+    - Layer 6: Prompts (security.md) for LLM behavior
+
+    These tests confirm that malicious content WITHIN size limits passes
+    through the WAF, since the WAF's job is only to prevent DoS via
+    oversized payloads, not to sanitize content.
+    """
+
+    def test_sql_injection_within_size_passes(self) -> None:
+        """SQL injection payloads pass WAF if within size limits.
+
+        WAF does not do content filtering - that's handled by other layers.
+        """
+        data = {"task": "'; DROP TABLE users; --"}
+        result = filter_request_data(data)
+        assert result["task"] == "'; DROP TABLE users; --"
+
+    def test_xss_payload_within_size_passes(self) -> None:
+        """XSS payloads pass WAF if within size limits."""
+        data = {"message": '<script>alert("XSS")</script>'}
+        result = filter_request_data(data)
+        assert "<script>" in result["message"]
+
+    def test_crlf_injection_within_size_passes(self) -> None:
+        """CRLF injection payloads pass WAF if within size limits."""
+        data = {"content": "header\r\nX-Injected: true\r\n\r\nmalicious body"}
+        result = filter_request_data(data)
+        assert "\r\n" in result["content"]
+
+    def test_path_traversal_string_within_size_passes(self) -> None:
+        """Path traversal strings pass WAF (blocked by PathValidator layer)."""
+        data = {"text": "../../../etc/passwd"}
+        result = filter_request_data(data)
+        assert result["text"] == "../../../etc/passwd"
+
+    def test_command_injection_string_within_size_passes(self) -> None:
+        """Command injection strings pass WAF (blocked by CommandSecurity layer)."""
+        data = {"description": "; rm -rf / ; echo pwned"}
+        result = filter_request_data(data)
+        assert "rm -rf" in result["description"]

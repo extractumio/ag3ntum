@@ -1,0 +1,31 @@
+[flake8]
+max-line-length = 120
+# Globally ignored — too noisy on existing codebase or stylistic preference:
+# E501: line too long (handled by max-line-length)
+# W503: line break before binary operator (PEP 8 reversed this)
+# E203: whitespace before ':' (black-compatible)
+# W291/W293: trailing/blank-line whitespace (cosmetic)
+# W391: blank line at end of file (cosmetic)
+# E402: module-level import not at top (conditional imports)
+# E302/E303/E301: blank line expectations (cosmetic)
+# E305/E306: blank lines after/before definitions (cosmetic)
+# F401: unused imports (fix incrementally — too many in existing code)
+# F841: unused local variables (fix incrementally)
+# F541: f-string without placeholders (fix incrementally)
+# F811: redefinition of unused name (test fixtures)
+# E128: continuation line under-indented (style preference)
+# E261: spaces before inline comment (style preference)
+extend-ignore = E501,W503,E203,W291,W293,W391,E402,E302,E303,E301,E305,E306,F401,F841,F541,F811,E128,E261,E127,E712
+per-file-ignores =
+    __init__.py:F401
+    tests/*:E741
+    src/services/mount_service.py:F821
+exclude =
+    .git,
+    __pycache__,
+    node_modules,
+    .venv,
+    venv,
+    src/web_terminal_client
+statistics = true
+count = true

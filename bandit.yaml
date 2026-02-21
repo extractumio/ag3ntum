@@ -1,0 +1,10 @@
+skips:
+  - B101  # assert used in tests
+  - B103  # chmod permissions — intentional (shared GID 660/770 pattern)
+  - B104  # binding to 0.0.0.0 (expected in container)
+  - B108  # hardcoded /tmp — intentional (container tmpfs, not host /tmp)
+  - B324  # md5 — used for non-security hashing (pattern dedup, not crypto)
+
+targets:
+  - src/
+  - tools/
