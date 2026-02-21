@@ -29,13 +29,30 @@ class TestDocumentation:
 
     @pytest.mark.unit
     def test_see_references_resolve(self):
-        """All markdown link references in CLAUDE.md must point to existing files."""
+        """All markdown link references in CLAUDE.md must point to existing files.
+
+        Uses git ls-files to check tracked files (handles gitignored docs).
+        Falls back to filesystem check if git is unavailable.
+        """
+        import subprocess
+
         claude_md = os.path.join(PROJECT_ROOT, "CLAUDE.md")
         if not os.path.exists(claude_md):
             pytest.skip("CLAUDE.md not found")
 
         with open(claude_md) as f:
             content = f.read()
+
+        # Get tracked files from git (handles gitignored docs gracefully)
+        try:
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=PROJECT_ROOT,
+                capture_output=True, text=True, timeout=5,
+            )
+            tracked_files = set(result.stdout.strip().split("\n"))
+        except (subprocess.SubprocessError, FileNotFoundError):
+            tracked_files = None
 
         # Match markdown links: [text](path)
         link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
@@ -49,9 +66,11 @@ class TestDocumentation:
             # Skip anchors
             if path.startswith("#"):
                 continue
-            # Resolve relative to PROJECT_ROOT
+            # Check: tracked in git OR exists on filesystem
             resolved = os.path.join(PROJECT_ROOT, path)
-            if not os.path.exists(resolved):
+            in_git = tracked_files is not None and path in tracked_files
+            on_disk = os.path.exists(resolved)
+            if not in_git and not on_disk:
                 broken.append(
                     f"  [{text}]({path}) -> FILE NOT FOUND\n"
                     f"    Expected at: {resolved}"

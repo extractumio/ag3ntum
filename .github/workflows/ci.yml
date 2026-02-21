@@ -33,7 +33,7 @@ jobs:
 
       - name: Frontend setup
         working-directory: src/web_terminal_client
-        run: npm ci --legacy-peer-deps
+        run: npm install --no-fund --no-audit --legacy-peer-deps
 
       - name: Frontend type check (tsc — informational)
         working-directory: src/web_terminal_client
