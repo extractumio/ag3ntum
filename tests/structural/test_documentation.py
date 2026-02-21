@@ -43,9 +43,9 @@ class TestDocumentation:
         with open(claude_md) as f:
             content = f.read()
 
-        # Get tracked files and ignored paths from git
+        # Get tracked files from git
         tracked_files = None
-        ignored_paths: set[str] = set()
+        has_git = False
         try:
             result = subprocess.run(
                 ["git", "ls-files"],
@@ -53,16 +53,7 @@ class TestDocumentation:
                 capture_output=True, text=True, timeout=5,
             )
             tracked_files = set(result.stdout.strip().split("\n"))
-            # Also get gitignored paths so we can skip them
-            ign = subprocess.run(
-                ["git", "ls-files", "--others", "--ignored",
-                 "--exclude-standard", "--directory"],
-                cwd=PROJECT_ROOT,
-                capture_output=True, text=True, timeout=5,
-            )
-            ignored_paths = set(
-                p.rstrip("/") for p in ign.stdout.strip().split("\n") if p
-            )
+            has_git = True
         except (subprocess.SubprocessError, FileNotFoundError):
             pass
 
@@ -83,11 +74,14 @@ class TestDocumentation:
             in_git = tracked_files is not None and path in tracked_files
             on_disk = os.path.exists(resolved)
             # Skip gitignored paths (local-only docs)
-            in_ignored = any(
-                path.startswith(ip) for ip in ignored_paths
-            )
-            if in_ignored:
-                continue
+            if has_git and not in_git and not on_disk:
+                ign = subprocess.run(
+                    ["git", "check-ignore", "-q", path],
+                    cwd=PROJECT_ROOT,
+                    capture_output=True, timeout=5,
+                )
+                if ign.returncode == 0:
+                    continue  # path is gitignored, skip
             if not in_git and not on_disk:
                 broken.append(
                     f"  [{text}]({path}) -> FILE NOT FOUND\n"
