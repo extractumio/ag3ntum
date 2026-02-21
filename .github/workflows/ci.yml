@@ -90,7 +90,7 @@ jobs:
 
       - name: Create secrets config for CI
         run: |
-          echo "anthropic_api_key: ${ANTHROPIC_API_KEY:-sk-ant-api03-ci-placeholder-key-not-for-real-use}" > config/secrets.yaml
+          echo "anthropic_api_key: ${ANTHROPIC_API_KEY:-sk-ant-api03-ci-placeholder-key-00000000000000000000000000000000000000000000000000000000000000}" > config/secrets.yaml
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
