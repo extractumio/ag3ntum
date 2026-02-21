@@ -44,12 +44,9 @@ jobs:
         working-directory: src/web_terminal_client
         run: npx eslint src/ --max-warnings 53
 
-      - name: Frontend tests
-        env:
-          AG3NTUM_ROOT: ${{ github.workspace }}
-          NODE_PATH: ${{ github.workspace }}/src/web_terminal_client/node_modules
-        working-directory: src/web_terminal_client
-        run: npx vitest run
+      # NOTE: Frontend tests (vitest) run in the docker-tests job.
+      # The vitest config has Docker-specific paths (/app/, AG3NTUM_ROOT=/)
+      # that require the container environment.
 
   # Job 2: Structural tests (GitHub-hosted, no Docker needed)
   structural-tests:
@@ -102,6 +99,9 @@ jobs:
 
       - name: Run core tests
         run: ./run.sh test --subset "core-tests"
+
+      - name: Run frontend tests
+        run: ./run.sh test --ui
 
       - name: Cleanup
         if: always()
