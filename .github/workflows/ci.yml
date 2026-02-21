@@ -44,17 +44,9 @@ jobs:
         working-directory: src/web_terminal_client
         run: npx eslint src/ --max-warnings 53
 
-      - name: Frontend tests with coverage
+      - name: Frontend tests
         working-directory: src/web_terminal_client
-        run: npx vitest run --coverage
-
-      - name: Upload frontend coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-coverage
-          path: src/web_terminal_client/coverage/
-          retention-days: 14
+        run: npx vitest run
 
   # Job 2: Structural tests (GitHub-hosted, no Docker needed)
   structural-tests:

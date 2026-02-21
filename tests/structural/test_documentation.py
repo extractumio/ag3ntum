@@ -43,7 +43,9 @@ class TestDocumentation:
         with open(claude_md) as f:
             content = f.read()
 
-        # Get tracked files from git (handles gitignored docs gracefully)
+        # Get tracked files and ignored paths from git
+        tracked_files = None
+        ignored_paths: set[str] = set()
         try:
             result = subprocess.run(
                 ["git", "ls-files"],
@@ -51,8 +53,18 @@ class TestDocumentation:
                 capture_output=True, text=True, timeout=5,
             )
             tracked_files = set(result.stdout.strip().split("\n"))
+            # Also get gitignored paths so we can skip them
+            ign = subprocess.run(
+                ["git", "ls-files", "--others", "--ignored",
+                 "--exclude-standard", "--directory"],
+                cwd=PROJECT_ROOT,
+                capture_output=True, text=True, timeout=5,
+            )
+            ignored_paths = set(
+                p.rstrip("/") for p in ign.stdout.strip().split("\n") if p
+            )
         except (subprocess.SubprocessError, FileNotFoundError):
-            tracked_files = None
+            pass
 
         # Match markdown links: [text](path)
         link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
@@ -70,6 +82,12 @@ class TestDocumentation:
             resolved = os.path.join(PROJECT_ROOT, path)
             in_git = tracked_files is not None and path in tracked_files
             on_disk = os.path.exists(resolved)
+            # Skip gitignored paths (local-only docs)
+            in_ignored = any(
+                path.startswith(ip) for ip in ignored_paths
+            )
+            if in_ignored:
+                continue
             if not in_git and not on_disk:
                 broken.append(
                     f"  [{text}]({path}) -> FILE NOT FOUND\n"
