@@ -1497,8 +1497,12 @@ if [[ "${ACTION}" == "test" ]]; then
       name="${name#test_}"
       # Also strip ".py" suffix if present
       name="${name%.py}"
-      # Find matching test files in container
+      # Find matching test files by filename or directory name
       MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
+      # Also match directories containing the pattern (e.g., --subset "core-tests" matches /tests/core-tests/)
+      if [[ -z "${MATCHES}" ]]; then
+        MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -type d -name "*${name}*" -exec find {} -name "test_*.py" \; 2>/dev/null | sort -u)
+      fi
       if [[ -n "${MATCHES}" ]]; then
         while IFS= read -r file; do
           TEST_FILES+=("${file}")
