@@ -88,6 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Create minimal secrets for CI
+        run: cp config/secrets.yaml.example config/secrets.yaml
+
       - name: Build test containers
         run: ./run.sh build
 
