@@ -23,35 +23,43 @@ AGENT_DIR: Path = TESTS_DIR.parent.parent  # Root directory where src/ is locate
 SESSIONS_DIR: Path = AGENT_DIR / "sessions"
 
 
+def _is_real_api_key(key: str) -> bool:
+    """Return True only if the key looks like a real Anthropic API key."""
+    if not key or len(key) < 50:
+        return False
+    if "placeholder" in key or "REPLACE" in key or "000000" in key:
+        return False
+    return key.startswith("sk-ant-")
+
+
 def _check_api_key_available() -> bool:
     """
-    Check if ANTHROPIC_API_KEY is available from any source.
-    
-    Checks in order:
-    1. Environment variable ANTHROPIC_API_KEY
-    2. Environment variable CLOUDLINUX_ANTHROPIC_API_KEY
-    3. config/secrets.yaml file
+    Check if a real ANTHROPIC_API_KEY is available from any source.
+
+    Rejects placeholder/dummy keys used in CI environments.
     """
-    # Check environment variables first
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLOUDLINUX_ANTHROPIC_API_KEY"):
-        return True
-    
+    for env_var in ("ANTHROPIC_API_KEY", "CLOUDLINUX_ANTHROPIC_API_KEY"):
+        key = os.environ.get(env_var, "")
+        if _is_real_api_key(key):
+            return True
+
     # Check secrets.yaml (both in Docker /config and local config/)
     secrets_paths = [
         Path("/config/secrets.yaml"),  # Docker mount
         AGENT_DIR / "config" / "secrets.yaml",  # Local development
     ]
-    
+
     for secrets_path in secrets_paths:
         if secrets_path.exists():
             try:
                 with open(secrets_path) as f:
                     secrets = yaml.safe_load(f) or {}
-                if secrets.get("anthropic_api_key"):
+                key = secrets.get("anthropic_api_key", "")
+                if _is_real_api_key(key):
                     return True
             except (yaml.YAMLError, OSError):
                 pass
-    
+
     return False
 
 
@@ -74,21 +82,21 @@ def user_profile() -> Path:
 def find_latest_session_dir() -> Optional[Path]:
     """
     Find the most recently created session directory.
-    
+
     Returns:
         Path to the latest session directory, or None if not found.
     """
     if not SESSIONS_DIR.exists():
         return None
-    
+
     session_dirs = [
         d for d in SESSIONS_DIR.iterdir()
         if d.is_dir() and not d.name.startswith(".")
     ]
-    
+
     if not session_dirs:
         return None
-    
+
     # Sort by directory name (contains timestamp)
     session_dirs.sort(key=lambda d: d.name, reverse=True)
     return session_dirs[0]
@@ -106,7 +114,7 @@ class TestAgentCore:
     ) -> None:
         """
         Test that the agent can execute a task and produce valid output.
-        
+
         This test:
         1. Runs the agent with the test task and permissive profile
         2. Verifies output.yaml contains status=COMPLETE and non-empty output
@@ -202,4 +210,3 @@ class TestAgentCore:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
-
