@@ -230,28 +230,38 @@ class TestFileSizeLimits:
         "tests/backend/test_ag3ntum_webfetch.py": 1600,
     }
 
+    # Project directories to scan (avoids walking system paths in Docker)
+    PROJECT_DIRS = ["src", "tools", "tests", "skills", "scripts"]
+
     @pytest.mark.unit
     def test_python_file_sizes(self):
         """No Python file should exceed the line limit."""
         oversized = []
-        for root, _, files in os.walk(PROJECT_ROOT):
-            if any(skip in root for skip in ["node_modules", ".git", "__pycache__", ".venv", "venv"]):
+        for subdir in self.PROJECT_DIRS:
+            scan_root = os.path.join(PROJECT_ROOT, subdir)
+            if not os.path.isdir(scan_root):
                 continue
-            for f in files:
-                if not f.endswith(".py"):
+            for root, _, files in os.walk(scan_root):
+                if any(skip in root for skip in [
+                    "node_modules", ".git", "__pycache__",
+                    ".venv", "venv",
+                ]):
                     continue
-                filepath = os.path.join(root, f)
-                if not os.path.isfile(filepath):
-                    continue  # skip broken symlinks
-                rel_path = os.path.relpath(filepath, PROJECT_ROOT)
-                limit = self.WAIVERS.get(rel_path, self.MAX_PYTHON_LINES)
-                with open(filepath) as fh:
-                    line_count = sum(1 for _ in fh)
-                if line_count > limit:
-                    oversized.append(
-                        f"  {rel_path}: {line_count} lines (limit: {limit})\n"
-                        f"    -> Split into smaller modules or extract helpers."
-                    )
+                for f in files:
+                    if not f.endswith(".py"):
+                        continue
+                    filepath = os.path.join(root, f)
+                    if not os.path.isfile(filepath):
+                        continue  # skip broken symlinks
+                    rel_path = os.path.relpath(filepath, PROJECT_ROOT)
+                    limit = self.WAIVERS.get(rel_path, self.MAX_PYTHON_LINES)
+                    with open(filepath) as fh:
+                        line_count = sum(1 for _ in fh)
+                    if line_count > limit:
+                        oversized.append(
+                            f"  {rel_path}: {line_count} lines (limit: {limit})\n"
+                            f"    -> Split into smaller modules or extract helpers."
+                        )
 
         assert not oversized, (
             f"\n{'='*60}\n"
@@ -268,22 +278,34 @@ class TestFileSizeLimits:
     def test_shell_script_sizes(self):
         """Shell scripts should not exceed size limits."""
         oversized = []
-        for root, _, files in os.walk(PROJECT_ROOT):
-            if any(skip in root for skip in ["node_modules", ".git", "__pycache__", ".venv", "venv"]):
+        # Also scan root-level .sh files (run.sh, entrypoints)
+        scan_dirs = self.PROJECT_DIRS + [""]
+        for subdir in scan_dirs:
+            scan_root = os.path.join(PROJECT_ROOT, subdir) if subdir else PROJECT_ROOT
+            if not os.path.isdir(scan_root):
                 continue
-            for f in files:
-                if not f.endswith(".sh"):
+            for root, _, files in os.walk(scan_root):
+                if any(skip in root for skip in [
+                    "node_modules", ".git", "__pycache__",
+                    ".venv", "venv",
+                ]):
                     continue
-                filepath = os.path.join(root, f)
-                rel_path = os.path.relpath(filepath, PROJECT_ROOT)
-                limit = self.WAIVERS.get(rel_path, self.MAX_SHELL_LINES)
-                with open(filepath) as fh:
-                    line_count = sum(1 for _ in fh)
-                if line_count > limit:
-                    oversized.append(
-                        f"  {rel_path}: {line_count} lines (limit: {limit})\n"
-                        f"    -> Consider splitting into sourced scripts."
-                    )
+                # For root-level scan, only check direct files (not subdirs)
+                if not subdir and root != PROJECT_ROOT:
+                    continue
+                for f in files:
+                    if not f.endswith(".sh"):
+                        continue
+                    filepath = os.path.join(root, f)
+                    rel_path = os.path.relpath(filepath, PROJECT_ROOT)
+                    limit = self.WAIVERS.get(rel_path, self.MAX_SHELL_LINES)
+                    with open(filepath) as fh:
+                        line_count = sum(1 for _ in fh)
+                    if line_count > limit:
+                        oversized.append(
+                            f"  {rel_path}: {line_count} lines (limit: {limit})\n"
+                            f"    -> Consider splitting into sourced scripts."
+                        )
 
         assert not oversized, (
             f"\n{'='*60}\n"

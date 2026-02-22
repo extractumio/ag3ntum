@@ -27,6 +27,10 @@ class TestDocumentation:
             f"See the Self-Improvement Protocol in CLAUDE.md for guidance."
         )
 
+    # Paths gitignored in .dockerignore but present on dev machines.
+    # When git is unavailable (Docker), these are silently skipped.
+    GITIGNORED_DOC_PREFIXES = ("docs/", "docs\\")
+
     @pytest.mark.unit
     def test_see_references_resolve(self):
         """All markdown link references in CLAUDE.md must point to existing files.
@@ -52,8 +56,9 @@ class TestDocumentation:
                 cwd=PROJECT_ROOT,
                 capture_output=True, text=True, timeout=5,
             )
-            tracked_files = set(result.stdout.strip().split("\n"))
-            has_git = True
+            if result.returncode == 0 and result.stdout.strip():
+                tracked_files = set(result.stdout.strip().split("\n"))
+                has_git = True
         except (subprocess.SubprocessError, FileNotFoundError):
             pass
 
@@ -73,8 +78,10 @@ class TestDocumentation:
             resolved = os.path.join(PROJECT_ROOT, path)
             in_git = tracked_files is not None and path in tracked_files
             on_disk = os.path.exists(resolved)
-            # Skip gitignored paths (local-only docs)
-            if has_git and not in_git and not on_disk:
+            if in_git or on_disk:
+                continue
+            # Skip gitignored paths via git check-ignore
+            if has_git:
                 ign = subprocess.run(
                     ["git", "check-ignore", "-q", path],
                     cwd=PROJECT_ROOT,
@@ -82,11 +89,14 @@ class TestDocumentation:
                 )
                 if ign.returncode == 0:
                     continue  # path is gitignored, skip
-            if not in_git and not on_disk:
-                broken.append(
-                    f"  [{text}]({path}) -> FILE NOT FOUND\n"
-                    f"    Expected at: {resolved}"
-                )
+            else:
+                # No git available (Docker): skip known gitignored prefixes
+                if path.startswith(self.GITIGNORED_DOC_PREFIXES):
+                    continue
+            broken.append(
+                f"  [{text}]({path}) -> FILE NOT FOUND\n"
+                f"    Expected at: {resolved}"
+            )
 
         assert not broken, (
             f"\nBroken references in CLAUDE.md:\n"
