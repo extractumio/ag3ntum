@@ -242,36 +242,27 @@ class TestFileSizeLimits:
             if not os.path.isdir(scan_root):
                 continue
             for root, _, files in os.walk(scan_root):
-                if any(skip in root for skip in [
-                    "node_modules", ".git", "__pycache__",
-                    ".venv", "venv",
-                ]):
+                if any(s in root for s in ["node_modules", ".git", "__pycache__", ".venv", "venv"]):
                     continue
                 for f in files:
                     if not f.endswith(".py"):
                         continue
                     filepath = os.path.join(root, f)
                     if not os.path.isfile(filepath):
-                        continue  # skip broken symlinks
-                    rel_path = os.path.relpath(filepath, PROJECT_ROOT)
-                    limit = self.WAIVERS.get(rel_path, self.MAX_PYTHON_LINES)
+                        continue
+                    rel = os.path.relpath(filepath, PROJECT_ROOT)
+                    limit = self.WAIVERS.get(rel, self.MAX_PYTHON_LINES)
                     with open(filepath) as fh:
-                        line_count = sum(1 for _ in fh)
-                    if line_count > limit:
+                        count = sum(1 for _ in fh)
+                    if count > limit:
                         oversized.append(
-                            f"  {rel_path}: {line_count} lines (limit: {limit})\n"
+                            f"  {rel}: {count} lines (limit: {limit})\n"
                             f"    -> Split into smaller modules or extract helpers."
                         )
-
         assert not oversized, (
-            f"\n{'='*60}\n"
-            f"FILES EXCEEDING SIZE LIMITS ({len(oversized)})\n"
-            f"{'='*60}\n"
-            + "\n".join(oversized)
-            + f"\n{'='*60}\n"
-            f"Fix: Split large files into focused modules. Each module should "
-            f"have a single responsibility.\n"
-            f"To add a waiver, update WAIVERS dict in test_architecture.py.\n"
+            f"\n{'='*60}\nFILES EXCEEDING SIZE LIMITS ({len(oversized)})\n{'='*60}\n"
+            + "\n".join(oversized) + f"\n{'='*60}\n"
+            f"Fix: Split large files. To add a waiver, update WAIVERS dict.\n"
         )
 
     @pytest.mark.unit
@@ -285,14 +276,10 @@ class TestFileSizeLimits:
             if not os.path.isdir(scan_root):
                 continue
             for root, _, files in os.walk(scan_root):
-                if any(skip in root for skip in [
-                    "node_modules", ".git", "__pycache__",
-                    ".venv", "venv",
-                ]):
+                if any(s in root for s in ["node_modules", ".git", "__pycache__", ".venv", "venv"]):
                     continue
-                # For root-level scan, only check direct files (not subdirs)
                 if not subdir and root != PROJECT_ROOT:
-                    continue
+                    continue  # root-level: only direct files
                 for f in files:
                     if not f.endswith(".sh"):
                         continue
