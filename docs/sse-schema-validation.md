@@ -49,13 +49,13 @@ When Anthropic changes the SSE format (new event types, new fields, changed stru
 
 ```bash
 # 1. Run tests to see what broke
-./run.sh test --subset "sse_schemas"
+./run.sh test --backend
 
 # 2. Re-record fixtures from live API
 python3 scripts/record_sse_samples.py
 
 # 3. Run tests again — new failures show schema drift
-./run.sh test --subset "sse_schemas"
+./run.sh test --backend
 
 # 4. Update schemas.py to match new API format
 # 5. Update translator.py if LLM proxy output format changed

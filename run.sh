@@ -103,8 +103,7 @@ Test Options (for 'test' command):
   --quick                 Run only quick tests (exclude E2E and slow tests)
   --backend               Run only backend tests (Python/pytest)
   --ui                    Run only UI tests (React/vitest)
-  --subset <names>        Run specific backend tests by name (comma-separated)
-                          Examples: "auth", "sessions,streaming", "ask_user_question"
+  --core                  Run only core agent tests (orchestration, hooks, patterns)
 
 External Mount Configuration:
   Mounts can be configured via:
@@ -151,8 +150,7 @@ General Examples:
   ./run.sh test --quick                  # Run quick tests only (no E2E/slow)
   ./run.sh test --backend                # Run backend tests only
   ./run.sh test --ui                     # Run UI/React tests only
-  ./run.sh test --subset auth            # Run auth tests only
-  ./run.sh test --subset sessions,auth   # Run sessions and auth tests
+  ./run.sh test --core                   # Run core agent tests only
   ./run.sh shell                         # Open shell in container
 
 Multi-Instance (Worktrees):
@@ -1352,10 +1350,10 @@ if [[ "${ACTION}" == "test" ]]; then
   # Default: run ALL tests (backend+e2e+security+sandboxing+UI)
   # Specific flags run only that subset
   QUICK_MODE=""
-  SUBSET=""
   BACKEND_ONLY=""
   UI_ONLY=""
   SECURITY_ONLY=""
+  CORE_ONLY=""
   E2E_ONLY=""
   SANDBOXING_ONLY=""
   ALL_MODE=""
@@ -1389,17 +1387,8 @@ if [[ "${ACTION}" == "test" ]]; then
       --sandboxing)
         SANDBOXING_ONLY="1"
         ;;
-      --subset)
-        i=$((i + 1))
-        if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
-          SUBSET="${ARGS_ARRAY[$i]}"
-        else
-          echo "Error: --subset requires a comma-separated list of test names"
-          exit 1
-        fi
-        ;;
-      --subset=*)
-        SUBSET="${arg#--subset=}"
+      --core)
+        CORE_ONLY="1"
         ;;
       *)
         echo "Unknown test option: ${arg}"
@@ -1410,12 +1399,12 @@ if [[ "${ACTION}" == "test" ]]; then
         echo "  --all         Run ALL tests including end-to-end"
         echo "  --backend     Run only backend tests (no e2e)"
         echo "  --security    Run only security tests"
+        echo "  --core        Run only core agent tests"
         echo "  --only-e2e    Run only e2e tests"
         echo "  --e2e         Alias for --only-e2e"
         echo "  --sandboxing  Run only sandboxing tests"
         echo "  --ui          Run only UI/frontend tests"
         echo "  --quick       Run fast tests only (no e2e/slow)"
-        echo "  --subset X    Run tests matching pattern X"
         exit 1
         ;;
     esac
@@ -1482,52 +1471,21 @@ if [[ "${ACTION}" == "test" ]]; then
     exit ${TEST_RESULT}
   fi
 
+  if [[ -n "${CORE_ONLY}" ]]; then
+    echo "=== Running core agent tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
+    exit ${TEST_RESULT}
+  fi
+
   # Build test arguments
   PYTEST_ARGS=()
 
-  if [[ -n "${SUBSET}" ]]; then
-    # Run specific tests by name pattern
-    # Convert comma-separated names to test file paths
-    TEST_FILES=()
-    IFS=',' read -ra NAMES <<< "${SUBSET}"
-    for name in "${NAMES[@]}"; do
-      # Trim whitespace
-      name="${name// /}"
-      # Strip "test_" prefix if user included it (e.g., "test_llm_proxy" -> "llm_proxy")
-      name="${name#test_}"
-      # Also strip ".py" suffix if present
-      name="${name%.py}"
-      # Find matching test files by filename or directory name
-      MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
-      # Also match directories containing the pattern (e.g., --subset "core-tests" matches /tests/core-tests/)
-      if [[ -z "${MATCHES}" ]]; then
-        MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -type d -name "*${name}*" -exec find {} -name "test_*.py" \; 2>/dev/null | sort -u)
-      fi
-      if [[ -n "${MATCHES}" ]]; then
-        while IFS= read -r file; do
-          TEST_FILES+=("${file}")
-        done <<< "${MATCHES}"
-      fi
-    done
-
-    if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
-      echo "No test files found matching: ${SUBSET}"
-      echo ""
-      echo "Available test files:"
-      ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*.py" | sort
-      exit 1
-    fi
-
-    # Add unique test files to args
-    for file in $(printf '%s\n' "${TEST_FILES[@]}" | sort -u); do
-      PYTEST_ARGS+=("${file}")
-    done
-
-    # Include --run-e2e if any subset test might have E2E tests
-    PYTEST_ARGS+=("--run-e2e")
-  else
-    # Run all tests - need separate runs for backend (with --run-e2e) and others
-    if [[ -n "${QUICK_MODE}" ]]; then
+  # Run all tests - need separate runs for backend (with --run-e2e) and others
+  if [[ -n "${QUICK_MODE}" ]]; then
       # Quick mode: exclude E2E and slow tests (all tests at once, no --run-e2e)
       echo "Running quick tests (excluding E2E and slow tests)..."
       PYTEST_ARGS+=("tests/" "-v" "--tb=short")
@@ -1608,34 +1566,27 @@ if [[ "${ACTION}" == "test" ]]; then
         run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short || BACKEND_RESULT=$?
       fi
 
-      # Second run: security tests (no --run-e2e flag)
+      # Second run: security tests
       echo "" | tee -a "$TEST_LOG_FILE"
       echo "=== Running security tests ===" | tee -a "$TEST_LOG_FILE"
       SECURITY_RESULT=0
       run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
 
-      # Check for other test directories and run them
-      OTHER_DIRS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
-      OTHER_RESULT=0
+      # Third run: core agent tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running core agent tests ===" | tee -a "$TEST_LOG_FILE"
+      CORE_RESULT=0
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short || CORE_RESULT=$?
 
-      if [[ -n "${OTHER_DIRS}" ]]; then
-        for dir in ${OTHER_DIRS}; do
-          dir_name=$(basename "${dir}")
-          if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
-            # Check if directory has any test files
-            HAS_TESTS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
-            if [[ -n "${HAS_TESTS}" ]]; then
-              echo "" | tee -a "$TEST_LOG_FILE"
-              echo "=== Running ${dir_name} tests ===" | tee -a "$TEST_LOG_FILE"
-              DIR_RESULT=0
-              run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
-              if [[ ${DIR_RESULT} -ne 0 ]]; then
-                OTHER_RESULT=1
-              fi
-            fi
-          fi
-        done
+      # Fourth run: sandboxing tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running sandboxing tests ===" | tee -a "$TEST_LOG_FILE"
+      SANDBOXING_RESULT=0
+      SANDBOX_DIRS=""
+      if ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api test -d /tests/sandboxing 2>/dev/null; then
+        SANDBOX_DIRS="/tests/sandboxing/"
       fi
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short || SANDBOXING_RESULT=$?
 
       # Run UI tests if not backend-only mode
       UI_RESULT=0
@@ -1646,35 +1597,35 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
 
       # Print combined summary (to console and log)
-      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       {
         echo ""
         echo "========================================"
         echo "=== COMBINED TEST SUMMARY ==="
         echo "========================================"
-        echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
-        echo ""
         if [[ ${BACKEND_RESULT} -eq 0 ]]; then
-          echo "  ✓ Backend tests:  PASSED"
+          echo "  ✓ Backend tests:     PASSED"
         else
-          echo "  ✗ Backend tests:  FAILED"
+          echo "  ✗ Backend tests:     FAILED"
         fi
         if [[ ${SECURITY_RESULT} -eq 0 ]]; then
-          echo "  ✓ Security tests: PASSED"
+          echo "  ✓ Security tests:    PASSED"
         else
-          echo "  ✗ Security tests: FAILED"
+          echo "  ✗ Security tests:    FAILED"
         fi
-        if [[ ${OTHER_RESULT} -eq 0 ]]; then
-          echo "  ✓ Other tests:    PASSED"
+        if [[ ${CORE_RESULT} -eq 0 ]]; then
+          echo "  ✓ Core tests:        PASSED"
         else
-          echo "  ✗ Other tests:    FAILED"
+          echo "  ✗ Core tests:        FAILED"
         fi
-        if [[ -z "${BACKEND_ONLY}" ]]; then
-          if [[ ${UI_RESULT} -eq 0 ]]; then
-            echo "  ✓ UI tests:       PASSED"
-          else
-            echo "  ✗ UI tests:       FAILED"
-          fi
+        if [[ ${SANDBOXING_RESULT} -eq 0 ]]; then
+          echo "  ✓ Sandboxing tests:  PASSED"
+        else
+          echo "  ✗ Sandboxing tests:  FAILED"
+        fi
+        if [[ ${UI_RESULT} -eq 0 ]]; then
+          echo "  ✓ UI tests:          PASSED"
+        else
+          echo "  ✗ UI tests:          FAILED"
         fi
         echo "========================================"
         if [[ -z "${ALL_MODE}" ]]; then
@@ -1691,7 +1642,7 @@ if [[ "${ACTION}" == "test" ]]; then
       ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       # Exit with error if any test suite failed
-      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
+      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${CORE_RESULT} -ne 0 || ${SANDBOXING_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo "" | tee -a "$TEST_LOG_FILE"
         echo "Some tests failed!" | tee -a "$TEST_LOG_FILE"
         exit 1
@@ -1700,38 +1651,6 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "All tests passed!" | tee -a "$TEST_LOG_FILE"
       exit 0
     fi
-  fi
-
-  # Add default flags (only reached for --subset mode)
-  PYTEST_ARGS+=("-v" "--tb=short")
-
-  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}" | tee -a "$TEST_LOG_FILE"
-  echo "" | tee -a "$TEST_LOG_FILE"
-
-  # Run tests in container with logging
-  run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-  TEST_EXIT_CODE=$?
-
-  # Print result summary
-  {
-    echo ""
-    echo "========================================"
-    if [[ ${TEST_EXIT_CODE} -eq 0 ]]; then
-      echo "Tests PASSED"
-    else
-      echo "Tests FAILED"
-    fi
-    echo "========================================"
-    echo ""
-    echo "Test results saved to: ${TEST_LOG_FILE}"
-  } | tee -a "$TEST_LOG_FILE"
-
-  # Restore container to production mode (without test sudoers)
-  echo ""
-  echo "Restoring container to normal mode..."
-  ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
-
-  exit ${TEST_EXIT_CODE}
 fi
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ Run with:
     pytest tests/security/test_uid_mode_integration.py -v
 
 Inside Docker (with test permissions):
-    ./run.sh test --subset uid_mode_integration
+    ./run.sh test --security
 """
 import os
 import sys

@@ -86,9 +86,9 @@ Design plans: `docs/plans/`
 ./run.sh test                          # All tests EXCEPT E2E
 ./run.sh test --all | --quick          # Include E2E | skip E2E+slow
 ./run.sh test --backend | --security   # Backend only | security only
-./run.sh test --sandboxing | --e2e     # Sandbox only | E2E only
+./run.sh test --core | --sandboxing    # Core agent only | sandbox only
+./run.sh test --e2e                    # E2E only (needs real API key)
 ./run.sh test --ui                     # Frontend vitest
-./run.sh test --subset "pattern*"      # Pattern-match test files
 ./run.sh lint                          # flake8 + bandit + mypy + eslint + tsc + structural tests
 ./run.sh audit                         # pip-audit dependency vulnerability scan
 ```
@@ -149,6 +149,8 @@ Design plans: `docs/plans/`
 | Frontend | `tests/web_terminal_console/` | vitest | React component, hook changes |
 
 **Markers**: `unit`, `integration`, `slow`, `e2e`. `asyncio_mode = auto`. `--quick` skips E2E + slow. Only `--all` includes E2E.
+
+**CRITICAL**: Before any full test run, rebuild containers from scratch: `./run.sh rebuild --no-cache` then `./run.sh test --all`.
 
 **Full suite** (~10 min, 300K+ lines): `nohup ./run.sh test --all > /tmp/test-all-output.log 2>&1 &`
 

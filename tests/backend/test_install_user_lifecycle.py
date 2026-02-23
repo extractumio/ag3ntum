@@ -22,8 +22,7 @@ TestCLISubprocessReplace (subprocess-level):
 
 All test users use `insttest_{uuid}` prefix and are cleaned up after each test.
 
-Run: ./run.sh test --subset "install_user_lifecycle"
-  or: ./run.sh test --e2e --subset "install_user_lifecycle"
+Run: ./run.sh test --backend
 """
 import shutil
 import subprocess

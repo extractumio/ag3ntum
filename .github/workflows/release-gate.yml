@@ -33,3 +33,84 @@ jobs:
             echo "::error::CHANGELOG.md does not contain a section for version ${VERSION}. Add: ## [${VERSION}] - $(date +%Y-%m-%d)"
             exit 1
           fi
+
+  # Fast checks (same as CI)
+  fast-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python lint dependencies
+        run: pip install flake8==7.3.0 bandit==1.8.3
+
+      - name: Flake8
+        run: flake8 src/ tools/ tests/ --config=.flake8
+
+      - name: Bandit (security lint)
+        run: bandit -r src/ tools/ -c bandit.yaml -ll -ii
+
+      - name: Frontend setup
+        working-directory: src/web_terminal_client
+        run: npm install --no-fund --no-audit --legacy-peer-deps
+
+      - name: Frontend lint (ESLint)
+        run: cd src/web_terminal_client && npx eslint src/ --max-warnings 53
+
+  # Structural tests (same as CI)
+  structural-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run structural tests
+        run: python -m pytest tests/structural/ -v --tb=long
+
+  # Full Docker test suite (self-hosted runner)
+  docker-tests:
+    runs-on: [self-hosted, linux, docker]
+    needs: [fast-checks, structural-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create secrets config for CI
+        run: |
+          echo "anthropic_api_key: ${ANTHROPIC_API_KEY:-sk-ant-api03-ci-placeholder-key-00000000000000000000000000000000000000000000000000000000000000}" > config/secrets.yaml
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Build test containers
+        run: ./run.sh build
+
+      - name: Run backend tests
+        run: ./run.sh test --backend
+
+      - name: Run security tests
+        run: ./run.sh test --security
+
+      - name: Run core tests
+        run: ./run.sh test --core
+
+      - name: Run sandboxing tests
+        run: ./run.sh test --sandboxing
+
+      - name: Run frontend tests
+        run: ./run.sh test --ui
+
+      - name: Cleanup
+        if: always()
+        run: ./run.sh cleanup

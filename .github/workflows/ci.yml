@@ -104,7 +104,10 @@ jobs:
         run: ./run.sh test --security
 
       - name: Run core tests
-        run: ./run.sh test --subset "core-tests"
+        run: ./run.sh test --core
+
+      - name: Run sandboxing tests
+        run: ./run.sh test --sandboxing
 
       - name: Run frontend tests
         run: ./run.sh test --ui

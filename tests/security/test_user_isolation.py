@@ -24,7 +24,7 @@ Inside Docker:
     docker exec project-ag3ntum-api-1 python -m pytest tests/security/test_user_isolation.py -v
 
 Or via run.sh:
-    ./run.sh test --subset user_isolation
+    ./run.sh test --security
 """
 import os
 import sys
