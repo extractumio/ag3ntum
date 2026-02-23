@@ -26,6 +26,17 @@ from tools.ag3ntum.ag3ntum_write.tool import (
 )
 
 
+@pytest.fixture
+def mock_validator(tmp_path):
+    """Create a mock path validator."""
+    validator = MagicMock()
+    validated_result = MagicMock()
+    validated_result.normalized = tmp_path / "test.txt"
+    validated_result.is_readonly = False
+    validator.validate_path.return_value = validated_result
+    return validator
+
+
 class TestIsPathWritable:
     """Tests for _is_path_writable function."""
 
@@ -137,16 +148,6 @@ class TestVerifyFileWritten:
 
 class TestWriteTool:
     """Integration tests for the Write tool using _write_impl."""
-
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.fixture
     def mock_resolver(self):

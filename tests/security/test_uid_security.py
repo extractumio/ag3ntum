@@ -26,7 +26,7 @@ Inside Docker:
     docker exec project-ag3ntum-api-1 python -m pytest tests/security/test_uid_security.py -v
 
 Or via run.sh:
-    ./run.sh test --subset uid_security
+    ./run.sh test --security
 """
 import os
 import sys

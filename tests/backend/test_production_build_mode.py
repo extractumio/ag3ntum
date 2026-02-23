@@ -9,7 +9,7 @@ Verifies that:
 5. entrypoint-web.sh is mode-aware (prod skips npm, dev does full setup)
 6. web_frontend_server.py module structure is correct
 
-Run: ./run.sh test --subset "production_build"
+Run: ./run.sh test --backend
 """
 import pytest
 import yaml

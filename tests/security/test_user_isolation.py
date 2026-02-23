@@ -24,7 +24,7 @@ Inside Docker:
     docker exec project-ag3ntum-api-1 python -m pytest tests/security/test_user_isolation.py -v
 
 Or via run.sh:
-    ./run.sh test --subset user_isolation
+    ./run.sh test --security
 """
 import os
 import sys
@@ -551,11 +551,16 @@ class TestBubblewrapRealExecution:
         import subprocess
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.returncode == 0:
-            uid = int(result.stdout.strip())
-            assert uid != ROOT_UID, (
-                f"Sandbox command ran as root (UID {ROOT_UID})!"
+        if result.returncode != 0:
+            pytest.skip(
+                f"Bubblewrap command failed (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
             )
+
+        uid = int(result.stdout.strip())
+        assert uid != ROOT_UID, (
+            f"Sandbox command ran as root (UID {ROOT_UID})!"
+        )
 
     @pytest.mark.asyncio
     async def test_sandbox_command_not_root(
@@ -582,11 +587,16 @@ class TestBubblewrapRealExecution:
             executor, "id -u", allow_network=False, timeout=10
         )
 
-        if exit_code == 0:
-            uid = int(stdout.strip())
-            assert uid != ROOT_UID, (
-                f"SECURITY VIOLATION: Sandbox command ran as root!"
+        if exit_code != 0:
+            pytest.skip(
+                f"Sandbox command failed (exit {exit_code}): "
+                f"{stderr.strip()}"
             )
+
+        uid = int(stdout.strip())
+        assert uid != ROOT_UID, (
+            f"SECURITY VIOLATION: Sandbox command ran as root!"
+        )
 
 
 # =============================================================================

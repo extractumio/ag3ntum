@@ -8,8 +8,43 @@ permissions:
   contents: write
 
 jobs:
+  # Run full test suite before creating a release
+  release-tests:
+    runs-on: [self-hosted, linux, docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create secrets config for CI
+        run: |
+          echo "anthropic_api_key: ${ANTHROPIC_API_KEY:-sk-ant-api03-ci-placeholder-key-00000000000000000000000000000000000000000000000000000000000000}" > config/secrets.yaml
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Build test containers
+        run: ./run.sh build
+
+      - name: Run backend tests
+        run: ./run.sh test --backend
+
+      - name: Run security tests
+        run: ./run.sh test --security
+
+      - name: Run core tests
+        run: ./run.sh test --core
+
+      - name: Run sandboxing tests
+        run: ./run.sh test --sandboxing
+
+      - name: Run frontend tests
+        run: ./run.sh test --ui
+
+      - name: Cleanup
+        if: always()
+        run: ./run.sh cleanup
+
   create-release:
     runs-on: ubuntu-latest
+    needs: [release-tests]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,9 +56,7 @@ jobs:
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # Extract content between this version's heading and the next heading
           BODY=$(awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
-          # Write to file for multi-line support
           echo "$BODY" > /tmp/release-body.md
 
       - name: Create git tag

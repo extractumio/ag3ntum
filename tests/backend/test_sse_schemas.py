@@ -5,7 +5,7 @@ These tests validate that our LLM proxy translator produces correctly formatted
 Anthropic SSE events. If Claude Code or the Anthropic API changes message formats,
 these tests will fail, alerting us to adapt our translator.
 
-Run with: ./run.sh test --subset "sse_schemas"
+Run with: ./run.sh test --backend
 """
 from __future__ import annotations
 

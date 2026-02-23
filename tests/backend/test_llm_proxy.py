@@ -15,6 +15,22 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 
+class MockAsyncIterator:
+    """Async iterator over lines for mocking httpx streaming responses."""
+
+    def __init__(self, lines):
+        self.lines = iter(lines)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.lines)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
 class TestLlmProxyAuthentication:
     """Tests that LLM proxy endpoints enforce correct authentication.
 
@@ -834,19 +850,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        # Mock OpenAI streaming response
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -884,18 +887,6 @@ class TestStreamOpenAIToClaude:
         """Every yielded event must have 'event:' prefix line."""
         from src.api.llm_proxy.translator import stream_openai_to_claude
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -915,18 +906,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -954,18 +933,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -997,18 +964,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         # Simulate a tool call with file_path argument
@@ -1050,18 +1005,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -1087,18 +1030,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -1135,18 +1066,6 @@ class TestStreamOpenAIToClaude:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -1423,18 +1342,6 @@ class TestStreamingUsageExtraction:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([
@@ -1465,18 +1372,6 @@ class TestStreamingUsageExtraction:
         from src.api.llm_proxy.translator import stream_openai_to_claude
         import json
 
-        class MockAsyncIterator:
-            def __init__(self, lines):
-                self.lines = iter(lines)
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                try:
-                    return next(self.lines)
-                except StopIteration:
-                    raise StopAsyncIteration
 
         mock_response = MagicMock()
         mock_response.aiter_lines = lambda: MockAsyncIterator([

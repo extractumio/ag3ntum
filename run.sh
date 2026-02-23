@@ -67,11 +67,14 @@ function show_usage() {
 Usage: ./run.sh <command> [OPTIONS]
 
 Commands:
+  setup              Install dev tools (Python venv + Node deps + pre-commit hooks)
   build              Build and deploy the containers
   cleanup            Stop containers and remove images (full cleanup)
   restart            Restart containers to reload code (preserves data)
   rebuild            Full cleanup + build (equivalent to: cleanup && build)
   test               Run tests inside the Docker container
+  lint               Run linters (flake8, bandit, mypy, eslint, tsc, structural)
+  audit              Run dependency vulnerability scan (pip-audit)
   shell              Open a shell inside the API container
   create-user        Create a new user account (uses AG3NTUM_UID_MODE setting)
   delete-user        Delete a user account
@@ -100,8 +103,7 @@ Test Options (for 'test' command):
   --quick                 Run only quick tests (exclude E2E and slow tests)
   --backend               Run only backend tests (Python/pytest)
   --ui                    Run only UI tests (React/vitest)
-  --subset <names>        Run specific backend tests by name (comma-separated)
-                          Examples: "auth", "sessions,streaming", "ask_user_question"
+  --core                  Run only core agent tests (orchestration, hooks, patterns)
 
 External Mount Configuration:
   Mounts can be configured via:
@@ -148,8 +150,7 @@ General Examples:
   ./run.sh test --quick                  # Run quick tests only (no E2E/slow)
   ./run.sh test --backend                # Run backend tests only
   ./run.sh test --ui                     # Run UI/React tests only
-  ./run.sh test --subset auth            # Run auth tests only
-  ./run.sh test --subset sessions,auth   # Run sessions and auth tests
+  ./run.sh test --core                   # Run core agent tests only
   ./run.sh shell                         # Open shell in container
 
 Multi-Instance (Worktrees):
@@ -421,7 +422,7 @@ NO_CACHE=""
 TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup|restart|rebuild|test|shell|create-user|delete-user|cleanup-test-users)
+    setup|build|cleanup|restart|rebuild|test|lint|audit|shell|create-user|delete-user|cleanup-test-users)
       ACTION="$1"
       shift
       # For test command, collect remaining args
@@ -1349,10 +1350,10 @@ if [[ "${ACTION}" == "test" ]]; then
   # Default: run ALL tests (backend+e2e+security+sandboxing+UI)
   # Specific flags run only that subset
   QUICK_MODE=""
-  SUBSET=""
   BACKEND_ONLY=""
   UI_ONLY=""
   SECURITY_ONLY=""
+  CORE_ONLY=""
   E2E_ONLY=""
   SANDBOXING_ONLY=""
   ALL_MODE=""
@@ -1386,17 +1387,8 @@ if [[ "${ACTION}" == "test" ]]; then
       --sandboxing)
         SANDBOXING_ONLY="1"
         ;;
-      --subset)
-        i=$((i + 1))
-        if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
-          SUBSET="${ARGS_ARRAY[$i]}"
-        else
-          echo "Error: --subset requires a comma-separated list of test names"
-          exit 1
-        fi
-        ;;
-      --subset=*)
-        SUBSET="${arg#--subset=}"
+      --core)
+        CORE_ONLY="1"
         ;;
       *)
         echo "Unknown test option: ${arg}"
@@ -1407,12 +1399,12 @@ if [[ "${ACTION}" == "test" ]]; then
         echo "  --all         Run ALL tests including end-to-end"
         echo "  --backend     Run only backend tests (no e2e)"
         echo "  --security    Run only security tests"
+        echo "  --core        Run only core agent tests"
         echo "  --only-e2e    Run only e2e tests"
         echo "  --e2e         Alias for --only-e2e"
         echo "  --sandboxing  Run only sandboxing tests"
         echo "  --ui          Run only UI/frontend tests"
         echo "  --quick       Run fast tests only (no e2e/slow)"
-        echo "  --subset X    Run tests matching pattern X"
         exit 1
         ;;
     esac
@@ -1479,48 +1471,21 @@ if [[ "${ACTION}" == "test" ]]; then
     exit ${TEST_RESULT}
   fi
 
+  if [[ -n "${CORE_ONLY}" ]]; then
+    echo "=== Running core agent tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
+    exit ${TEST_RESULT}
+  fi
+
   # Build test arguments
   PYTEST_ARGS=()
 
-  if [[ -n "${SUBSET}" ]]; then
-    # Run specific tests by name pattern
-    # Convert comma-separated names to test file paths
-    TEST_FILES=()
-    IFS=',' read -ra NAMES <<< "${SUBSET}"
-    for name in "${NAMES[@]}"; do
-      # Trim whitespace
-      name="${name// /}"
-      # Strip "test_" prefix if user included it (e.g., "test_llm_proxy" -> "llm_proxy")
-      name="${name#test_}"
-      # Also strip ".py" suffix if present
-      name="${name%.py}"
-      # Find matching test files in container
-      MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
-      if [[ -n "${MATCHES}" ]]; then
-        while IFS= read -r file; do
-          TEST_FILES+=("${file}")
-        done <<< "${MATCHES}"
-      fi
-    done
-
-    if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
-      echo "No test files found matching: ${SUBSET}"
-      echo ""
-      echo "Available test files:"
-      ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*.py" | sort
-      exit 1
-    fi
-
-    # Add unique test files to args
-    for file in $(printf '%s\n' "${TEST_FILES[@]}" | sort -u); do
-      PYTEST_ARGS+=("${file}")
-    done
-
-    # Include --run-e2e if any subset test might have E2E tests
-    PYTEST_ARGS+=("--run-e2e")
-  else
-    # Run all tests - need separate runs for backend (with --run-e2e) and others
-    if [[ -n "${QUICK_MODE}" ]]; then
+  # Run all tests - need separate runs for backend (with --run-e2e) and others
+  if [[ -n "${QUICK_MODE}" ]]; then
       # Quick mode: exclude E2E and slow tests (all tests at once, no --run-e2e)
       echo "Running quick tests (excluding E2E and slow tests)..."
       PYTEST_ARGS+=("tests/" "-v" "--tb=short")
@@ -1601,34 +1566,27 @@ if [[ "${ACTION}" == "test" ]]; then
         run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short || BACKEND_RESULT=$?
       fi
 
-      # Second run: security tests (no --run-e2e flag)
+      # Second run: security tests
       echo "" | tee -a "$TEST_LOG_FILE"
       echo "=== Running security tests ===" | tee -a "$TEST_LOG_FILE"
       SECURITY_RESULT=0
       run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
 
-      # Check for other test directories and run them
-      OTHER_DIRS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
-      OTHER_RESULT=0
+      # Third run: core agent tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running core agent tests ===" | tee -a "$TEST_LOG_FILE"
+      CORE_RESULT=0
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short || CORE_RESULT=$?
 
-      if [[ -n "${OTHER_DIRS}" ]]; then
-        for dir in ${OTHER_DIRS}; do
-          dir_name=$(basename "${dir}")
-          if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
-            # Check if directory has any test files
-            HAS_TESTS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
-            if [[ -n "${HAS_TESTS}" ]]; then
-              echo "" | tee -a "$TEST_LOG_FILE"
-              echo "=== Running ${dir_name} tests ===" | tee -a "$TEST_LOG_FILE"
-              DIR_RESULT=0
-              run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
-              if [[ ${DIR_RESULT} -ne 0 ]]; then
-                OTHER_RESULT=1
-              fi
-            fi
-          fi
-        done
+      # Fourth run: sandboxing tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running sandboxing tests ===" | tee -a "$TEST_LOG_FILE"
+      SANDBOXING_RESULT=0
+      SANDBOX_DIRS=""
+      if ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api test -d /tests/sandboxing 2>/dev/null; then
+        SANDBOX_DIRS="/tests/sandboxing/"
       fi
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short || SANDBOXING_RESULT=$?
 
       # Run UI tests if not backend-only mode
       UI_RESULT=0
@@ -1639,35 +1597,35 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
 
       # Print combined summary (to console and log)
-      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       {
         echo ""
         echo "========================================"
         echo "=== COMBINED TEST SUMMARY ==="
         echo "========================================"
-        echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
-        echo ""
         if [[ ${BACKEND_RESULT} -eq 0 ]]; then
-          echo "  ✓ Backend tests:  PASSED"
+          echo "  ✓ Backend tests:     PASSED"
         else
-          echo "  ✗ Backend tests:  FAILED"
+          echo "  ✗ Backend tests:     FAILED"
         fi
         if [[ ${SECURITY_RESULT} -eq 0 ]]; then
-          echo "  ✓ Security tests: PASSED"
+          echo "  ✓ Security tests:    PASSED"
         else
-          echo "  ✗ Security tests: FAILED"
+          echo "  ✗ Security tests:    FAILED"
         fi
-        if [[ ${OTHER_RESULT} -eq 0 ]]; then
-          echo "  ✓ Other tests:    PASSED"
+        if [[ ${CORE_RESULT} -eq 0 ]]; then
+          echo "  ✓ Core tests:        PASSED"
         else
-          echo "  ✗ Other tests:    FAILED"
+          echo "  ✗ Core tests:        FAILED"
         fi
-        if [[ -z "${BACKEND_ONLY}" ]]; then
-          if [[ ${UI_RESULT} -eq 0 ]]; then
-            echo "  ✓ UI tests:       PASSED"
-          else
-            echo "  ✗ UI tests:       FAILED"
-          fi
+        if [[ ${SANDBOXING_RESULT} -eq 0 ]]; then
+          echo "  ✓ Sandboxing tests:  PASSED"
+        else
+          echo "  ✗ Sandboxing tests:  FAILED"
+        fi
+        if [[ ${UI_RESULT} -eq 0 ]]; then
+          echo "  ✓ UI tests:          PASSED"
+        else
+          echo "  ✗ UI tests:          FAILED"
         fi
         echo "========================================"
         if [[ -z "${ALL_MODE}" ]]; then
@@ -1684,7 +1642,7 @@ if [[ "${ACTION}" == "test" ]]; then
       ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       # Exit with error if any test suite failed
-      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
+      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${CORE_RESULT} -ne 0 || ${SANDBOXING_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo "" | tee -a "$TEST_LOG_FILE"
         echo "Some tests failed!" | tee -a "$TEST_LOG_FILE"
         exit 1
@@ -1693,38 +1651,196 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "All tests passed!" | tee -a "$TEST_LOG_FILE"
       exit 0
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# Dev environment helper: activate .venv if it exists (for lint/audit/setup)
+# ---------------------------------------------------------------------------
+VENV_DIR="${ROOT_DIR}/.venv"
+
+activate_venv() {
+  if [[ -d "${VENV_DIR}" ]]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+    return 0
+  fi
+  return 1
+}
+
+# Handle setup action — install all dev tools (Python venv + Node + pre-commit)
+if [[ "${ACTION}" == "setup" ]]; then
+  echo "=== Setting up development environment ==="
+
+  # 1. Check prerequisites
+  if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 not found. Install Python 3.12+ first."
+    exit 1
+  fi
+  if ! command -v node &>/dev/null; then
+    echo "Error: node not found. Install Node.js 20+ first."
+    exit 1
   fi
 
-  # Add default flags (only reached for --subset mode)
-  PYTEST_ARGS+=("-v" "--tb=short")
+  PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  NODE_VERSION=$(node --version)
+  echo "  Python: ${PYTHON_VERSION}"
+  echo "  Node:   ${NODE_VERSION}"
 
-  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}" | tee -a "$TEST_LOG_FILE"
-  echo "" | tee -a "$TEST_LOG_FILE"
-
-  # Run tests in container with logging
-  run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-  TEST_EXIT_CODE=$?
-
-  # Print result summary
-  {
-    echo ""
-    echo "========================================"
-    if [[ ${TEST_EXIT_CODE} -eq 0 ]]; then
-      echo "Tests PASSED"
-    else
-      echo "Tests FAILED"
-    fi
-    echo "========================================"
-    echo ""
-    echo "Test results saved to: ${TEST_LOG_FILE}"
-  } | tee -a "$TEST_LOG_FILE"
-
-  # Restore container to production mode (without test sudoers)
+  # 2. Create Python venv and install lint/audit tools
   echo ""
-  echo "Restoring container to normal mode..."
-  ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
+  echo "--- Python dev tools (.venv/) ---"
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "  Creating virtual environment..."
+    python3 -m venv "${VENV_DIR}"
+  else
+    echo "  Virtual environment already exists."
+  fi
+  source "${VENV_DIR}/bin/activate"
 
-  exit ${TEST_EXIT_CODE}
+  echo "  Installing Python dev tools..."
+  pip install --quiet --upgrade pip
+  pip install --quiet \
+    flake8==7.3.0 \
+    bandit==1.8.3 \
+    mypy==1.14.1 \
+    pip-audit==2.9.0 \
+    pytest==9.0.2
+  echo "  Installed: flake8, bandit, mypy, pip-audit, pytest"
+
+  # 3. Install pre-commit hooks
+  echo ""
+  echo "--- Pre-commit hooks ---"
+  pip install --quiet pre-commit
+  if [[ -f ".pre-commit-config.yaml" ]]; then
+    pre-commit install
+    echo "  Pre-commit hooks installed."
+  else
+    echo "  Warning: .pre-commit-config.yaml not found, skipping hooks."
+  fi
+
+  # 4. Install frontend dependencies
+  echo ""
+  echo "--- Frontend dependencies (npm ci) ---"
+  if [[ -f "src/web_terminal_client/package.json" ]]; then
+    (cd src/web_terminal_client && npm ci --legacy-peer-deps 2>&1 | tail -3)
+    echo "  Frontend dependencies installed."
+  else
+    echo "  Warning: src/web_terminal_client/package.json not found."
+  fi
+
+  echo ""
+  echo "=== Dev environment ready ==="
+  echo ""
+  echo "Commands available:"
+  echo "  ./run.sh lint    — run all linters"
+  echo "  ./run.sh audit   — check dependency vulnerabilities"
+  echo "  ./run.sh build   — build and start Docker containers"
+  echo "  ./run.sh test    — run tests (requires Docker)"
+  exit 0
+fi
+
+# Handle lint action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "lint" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first for full linting."
+    echo "         Falling back to system tools..."
+    echo ""
+  fi
+
+  echo "=== Running linters ==="
+  LINT_EXIT=0
+
+  # Python — flake8
+  echo ""
+  echo "--- flake8 (style) ---"
+  if command -v flake8 &>/dev/null; then
+    flake8 src/ tools/ tests/ --config=.flake8 || LINT_EXIT=1
+  else
+    echo "SKIPPED: flake8 not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — bandit (security)
+  echo ""
+  echo "--- bandit (security) ---"
+  if command -v bandit &>/dev/null; then
+    bandit -r src/ tools/ -c bandit.yaml -ll -ii || LINT_EXIT=1
+  else
+    echo "SKIPPED: bandit not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Structural tests
+  echo ""
+  echo "--- structural tests ---"
+  if command -v pytest &>/dev/null || python3 -m pytest --version &>/dev/null 2>&1; then
+    python3 -m pytest tests/structural/ -v --tb=long || LINT_EXIT=1
+  else
+    echo "SKIPPED: pytest not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — mypy (type checking, informational — not blocking until baseline established)
+  echo ""
+  echo "--- mypy (type checking — informational) ---"
+  if command -v mypy &>/dev/null; then
+    mypy src/core/ src/api/ src/services/ --config-file mypy.ini || echo "  (mypy found issues — informational, not blocking)"
+  else
+    echo "SKIPPED: mypy not found. Run: ./run.sh setup"
+  fi
+
+  # Frontend — TypeScript type check + ESLint
+  if [ -d "src/web_terminal_client/node_modules" ]; then
+    echo ""
+    echo "--- TypeScript (tsc --noEmit — informational) ---"
+    # Use tsconfig.lint.json — excludes test files (they need Docker node_modules)
+    # Informational until pre-existing type errors are cleaned up (20 errors in existing code)
+    (cd src/web_terminal_client && npx tsc --noEmit -p tsconfig.lint.json) || echo "  (tsc found type errors — informational, not blocking)"
+
+    echo ""
+    echo "--- ESLint (React/TypeScript) ---"
+    (cd src/web_terminal_client && npx eslint src/ --max-warnings 53) || LINT_EXIT=1
+  else
+    echo ""
+    echo "SKIPPED: Frontend linting (node_modules missing). Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${LINT_EXIT} -eq 0 ]]; then
+    echo "=== All lint checks passed ==="
+  else
+    echo "=== Some lint checks failed (exit code ${LINT_EXIT}) ==="
+  fi
+  exit ${LINT_EXIT}
+fi
+
+# Handle audit action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "audit" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first."
+    echo ""
+  fi
+
+  echo "=== Running dependency audit ==="
+  AUDIT_EXIT=0
+
+  if command -v pip-audit &>/dev/null; then
+    pip-audit --requirement requirements-base.txt --desc || AUDIT_EXIT=1
+  else
+    echo "SKIPPED: pip-audit not found. Run: ./run.sh setup"
+    AUDIT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${AUDIT_EXIT} -eq 0 ]]; then
+    echo "=== Dependency audit passed ==="
+  else
+    echo "=== Dependency audit found issues (exit code ${AUDIT_EXIT}) ==="
+  fi
+  exit ${AUDIT_EXIT}
 fi
 
 # Handle shell action

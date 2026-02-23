@@ -1,40 +1,14 @@
-name: Release Gate
+name: CI
 
 on:
   pull_request:
-    branches: [release]
+    branches: [main, release]
+  push:
+    branches: [main]
+  workflow_dispatch:  # Manual trigger for docker-tests
 
 jobs:
-  check-release-readiness:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check VERSION was updated
-        run: |
-          if ! git diff origin/release...HEAD --name-only | grep -q '^VERSION$'; then
-            echo "::error::VERSION file was not modified. Update it with the new version number."
-            exit 1
-          fi
-
-      - name: Check CHANGELOG was updated
-        run: |
-          if ! git diff origin/release...HEAD --name-only | grep -q '^CHANGELOG.md$'; then
-            echo "::error::CHANGELOG.md was not modified. Document the changes for this release."
-            exit 1
-          fi
-
-      - name: Check version appears in CHANGELOG
-        run: |
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          if ! grep -q "## \[${VERSION}\]" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md does not contain a section for version ${VERSION}. Add: ## [${VERSION}] - $(date +%Y-%m-%d)"
-            exit 1
-          fi
-
-  # Fast checks (same as CI)
+  # Job 1: Fast checks (GitHub-hosted, no Docker needed)
   fast-checks:
     runs-on: ubuntu-latest
     steps:
@@ -61,10 +35,20 @@ jobs:
         working-directory: src/web_terminal_client
         run: npm install --no-fund --no-audit --legacy-peer-deps
 
-      - name: Frontend lint (ESLint)
-        run: cd src/web_terminal_client && npx eslint src/ --max-warnings 53
+      - name: Frontend type check (tsc — informational)
+        working-directory: src/web_terminal_client
+        continue-on-error: true
+        run: npx tsc --noEmit -p tsconfig.lint.json
 
-  # Structural tests (same as CI)
+      - name: Frontend lint (ESLint)
+        working-directory: src/web_terminal_client
+        run: npx eslint src/ --max-warnings 53
+
+      # NOTE: Frontend tests (vitest) run in the docker-tests job.
+      # The vitest config has Docker-specific paths (/app/, AG3NTUM_ROOT=/)
+      # that require the container environment.
+
+  # Job 2: Structural tests (GitHub-hosted, no Docker needed)
   structural-tests:
     runs-on: ubuntu-latest
     steps:
@@ -80,7 +64,24 @@ jobs:
       - name: Run structural tests
         run: python -m pytest tests/structural/ -v --tb=long
 
-  # Full Docker test suite (self-hosted runner)
+  # Job 3: Dependency audit (informational — non-blocking)
+  dependency-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.9.0
+
+      - name: Run dependency audit
+        run: pip-audit --requirement requirements-base.txt --desc
+
+  # Job 4: Docker-based tests (self-hosted runner at extractum VPS)
   docker-tests:
     runs-on: [self-hosted, linux, docker]
     needs: [fast-checks, structural-tests]
