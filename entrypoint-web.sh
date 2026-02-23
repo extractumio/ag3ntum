@@ -22,6 +22,11 @@ fi
 
 # --- Development mode: full setup ---
 
+# Ensure /src/web_terminal_client is writable by ag3ntum_api (UID 45045).
+# On a fresh install, the host directory is owned by root:root from git clone.
+# Vite needs to write temporary .timestamp-*.mjs files here during config loading.
+chown 45045:45045 /src/web_terminal_client
+
 # Ensure /app/node_modules directory is writable by ag3ntum_api
 # Named Docker volumes are created with root ownership by default
 chown -R 45045:45045 /app/node_modules
@@ -30,7 +35,7 @@ chown -R 45045:45045 /app/node_modules
 cp /src/web_terminal_client/package.json /app/package.json
 
 # Copy Vite/vitest configs to a writable directory so Vite can create its
-# temp files (.timestamp-*.mjs) there. Source tree is mounted read-only.
+# temp files (.timestamp-*.mjs) there without polluting the source tree.
 # A node_modules symlink lets the ESM resolver find packages from this location.
 # Port-qualified path supports multiple instances on the same host.
 VITE_CONFIG_DIR="/tmp/vite-${AG3NTUM_WEB_PORT:-50080}"

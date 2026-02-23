@@ -32,6 +32,9 @@ services:
       npm_config_cache: /tmp/.npm
     volumes:
       # Additional volumes for dev mode (merged with base docker-compose.yml volumes)
+      # Override /src mount: dev mode needs read-write so Vite can write temp files
+      # (.timestamp-*.mjs) to /src/web_terminal_client/. Production keeps :ro.
+      - ./src:/src
       - ./tests:/tests:ro
       - ./auto-generated:/auto-generated:ro
       # Named volume for node_modules at /app/ - outside the read-only /src mount
