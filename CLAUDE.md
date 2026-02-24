@@ -60,6 +60,9 @@ Design plans: `docs/plans/`
 - **Verify containers before testing** — before `./run.sh test` or `shell`, confirm containers are up with `docker compose ps`.
 - **Study `requirements.txt`** before adding dependencies — use existing packages, do not add redundant ones.
 - **Empty mounts are valid** — a configured external mount pointing to an empty directory is not an error. Report "no files found".
+- **Follow task management flow** — use Plane for all task tracking. Transition states as you work. Use worktrees for all changes. Never merge PRs — only humans merge.
+
+→ See [docs/internals/ag3ntum-task-management-and-flow.md](docs/internals/ag3ntum-task-management-and-flow.md) for full workflow: task states, branching, testing requirements, commit conventions, Definition of Done.
 
 ---
 
