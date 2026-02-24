@@ -993,68 +993,58 @@ class TestSessionStatusTransitions:
 
 
 class TestSessionChownGIDResolution:
-    """Test that session chown functions use the user's actual primary GID.
+    """Test that session chown functions use the ag3ntum shared group.
 
-    When useradd creates a user whose name matches an existing group
-    (e.g., 'ag3ntum' with GID 1001 vs UID 50000), the primary GID
-    differs from the UID. Chown must use the actual GID, not uid:uid.
+    The implementation uses AG3NTUM_GROUP ('ag3ntum') for group ownership
+    instead of per-user primary GIDs. This ensures both ag3ntum_api and
+    all sandbox users can access files via shared group membership.
     """
 
     @pytest.mark.unit
-    def test_get_primary_gid_returns_correct_gid(self) -> None:
-        """_get_primary_gid resolves UID to actual primary GID."""
-        from src.core.sessions import _get_primary_gid
+    def test_get_ag3ntum_gid_returns_group_gid(self) -> None:
+        """_get_ag3ntum_gid resolves the ag3ntum group to its GID."""
+        from src.core.sessions import _get_ag3ntum_gid
 
-        # Mock pwd.getpwuid to return a user with mismatched GID
-        mock_pw = MagicMock()
-        mock_pw.pw_gid = 1001  # Primary group GID differs from UID
+        mock_grp = MagicMock()
+        mock_grp.gr_gid = 1001
 
-        with patch("src.core.sessions.pwd.getpwuid", return_value=mock_pw):
-            gid = _get_primary_gid(50000)
-            assert gid == 1001, "Should return actual primary GID, not UID"
-
-    @pytest.mark.unit
-    def test_get_primary_gid_fallback_on_keyerror(self) -> None:
-        """_get_primary_gid falls back to uid when user not in passwd."""
-        from src.core.sessions import _get_primary_gid
-
-        with patch("src.core.sessions.pwd.getpwuid", side_effect=KeyError):
-            gid = _get_primary_gid(50000)
-            assert gid == 50000, "Should fall back to UID when lookup fails"
+        with patch("src.core.sessions.grp.getgrnam", return_value=mock_grp):
+            gid = _get_ag3ntum_gid()
+            assert gid == 1001
 
     @pytest.mark.unit
-    def test_sudo_chown_uses_primary_gid(self, tmp_path: object) -> None:
-        """_sudo_chown passes uid:gid (not uid:uid) to chown command."""
+    def test_get_ag3ntum_gid_raises_on_missing_group(self) -> None:
+        """_get_ag3ntum_gid raises KeyError when ag3ntum group missing."""
+        from src.core.sessions import _get_ag3ntum_gid
+
+        with patch("src.core.sessions.grp.getgrnam", side_effect=KeyError):
+            with pytest.raises(KeyError):
+                _get_ag3ntum_gid()
+
+    @pytest.mark.unit
+    def test_sudo_chown_uses_ag3ntum_group(self) -> None:
+        """_sudo_chown passes uid:ag3ntum (not uid:uid) to chown command."""
         from src.core.sessions import _sudo_chown
 
-        mock_pw = MagicMock()
-        mock_pw.pw_gid = 1001
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            _sudo_chown(MagicMock(spec_set=["__str__"]), 50000)
 
-        with patch("src.core.sessions.pwd.getpwuid", return_value=mock_pw):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
-                _sudo_chown(MagicMock(spec_set=["__str__"]), 50000)
-
-                # Verify chown was called with 50000:1001
-                call_args = str(mock_run.call_args)
-                assert "50000:1001" in call_args, (
-                    f"chown should use primary GID 1001, not UID. Got: {call_args}"
-                )
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown should use ag3ntum group, not UID. Got: {call_args}"
+            )
 
     @pytest.mark.unit
-    def test_sudo_chown_recursive_uses_primary_gid(self) -> None:
-        """sudo_chown_recursive passes uid:gid (not uid:uid) to chown -R."""
+    def test_sudo_chown_recursive_uses_ag3ntum_group(self) -> None:
+        """sudo_chown_recursive passes uid:ag3ntum to chown -R."""
         from src.core.sessions import sudo_chown_recursive
 
-        mock_pw = MagicMock()
-        mock_pw.pw_gid = 1001
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            sudo_chown_recursive(MagicMock(spec_set=["__str__"]), 50000)
 
-        with patch("src.core.sessions.pwd.getpwuid", return_value=mock_pw):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
-                sudo_chown_recursive(MagicMock(spec_set=["__str__"]), 50000)
-
-                call_args = str(mock_run.call_args)
-                assert "50000:1001" in call_args, (
-                    f"chown -R should use primary GID. Got: {call_args}"
-                )
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown -R should use ag3ntum group. Got: {call_args}"
+            )
