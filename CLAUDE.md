@@ -238,3 +238,4 @@ Version: `VERSION` file (semver). Branch model: `main` (dev) | `release` (stable
 28. **`docker compose exec` = root** — Use `-u 45045:45045` for npm/vite/node to avoid root-owned files breaking entrypoint.
 29. **External mount dirs may be empty** — A configured mount pointing to an empty host dir is valid. Report "no files found", do not error or retry.
 30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
+31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
