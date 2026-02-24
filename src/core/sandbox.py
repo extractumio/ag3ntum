@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class SandboxMountError(Exception):
     """Raised when a required sandbox mount source does not exist.
-    
+
     This is a FAIL-CLOSED security mechanism. If mount sources are missing,
     the sandbox cannot provide proper isolation and command execution is denied.
     """
@@ -368,6 +368,11 @@ class SandboxExecutor:
 
         cmd.extend(["--setenv", "HOME", config.environment.home])
         cmd.extend(["--setenv", "PATH", config.environment.path])
+
+        # Prevent Python from writing .pyc bytecode cache files.
+        # Skills and tools directories are mounted read-only; Python's
+        # attempt to create __pycache__/ dirs would fail with EROFS.
+        cmd.extend(["--setenv", "PYTHONDONTWRITEBYTECODE", "1"])
 
         # Set execution context for path resolution
         # This allows SandboxPathResolver to detect it's running inside bubblewrap

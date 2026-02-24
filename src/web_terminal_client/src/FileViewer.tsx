@@ -791,6 +791,10 @@ export function FileViewerModal({
   isOpen = true,
   imageUrl,
 }: FileViewerModalProps): JSX.Element | null {
+  // Track where mousedown started to prevent closing when text selection
+  // drags outside the modal (mousedown inside, mouseup on overlay)
+  const mouseDownOnOverlay = useRef(false);
+
   // Handle ESC key to close modal
   useEffect(() => {
     if (!isOpen && !file && !isLoading) return;
@@ -810,7 +814,22 @@ export function FileViewerModal({
   if (!isOpen && !file && !isLoading) return null;
 
   return (
-    <div className="file-viewer-overlay" onClick={onClose}>
+    <div
+      className="file-viewer-overlay"
+      onMouseDown={(e) => {
+        // Only mark as overlay click if mousedown is directly on overlay
+        mouseDownOnOverlay.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        // Close only if both mousedown and click (mouseup) were on the overlay.
+        // This prevents closing when user selects text inside the modal and
+        // releases the mouse button outside (drag selection).
+        if (mouseDownOnOverlay.current && e.target === e.currentTarget && onClose) {
+          onClose();
+        }
+        mouseDownOnOverlay.current = false;
+      }}
+    >
       <div className="file-viewer-modal" onClick={(e) => e.stopPropagation()}>
         <FileViewer
           file={file}
@@ -858,6 +877,8 @@ export function ImageViewerModal({
   onShowInExplorer,
 }: ImageViewerModalProps): JSX.Element | null {
   const [copied, setCopied] = useState(false);
+  // Track where mousedown started to prevent closing on text selection drag
+  const mouseDownOnOverlay = useRef(false);
 
   // Handle ESC key to close modal
   useEffect(() => {
@@ -910,7 +931,18 @@ export function ImageViewerModal({
   if (!isOpen) return null;
 
   return (
-    <div className="image-viewer-modal-overlay" onClick={onClose}>
+    <div
+      className="image-viewer-modal-overlay"
+      onMouseDown={(e) => {
+        mouseDownOnOverlay.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (mouseDownOnOverlay.current && e.target === e.currentTarget) {
+          onClose();
+        }
+        mouseDownOnOverlay.current = false;
+      }}
+    >
       <div className="image-viewer-modal" onClick={(e) => e.stopPropagation()}>
         <div className="image-viewer-modal-header">
           <div className="image-viewer-modal-title">

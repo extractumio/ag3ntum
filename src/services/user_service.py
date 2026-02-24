@@ -585,10 +585,14 @@ class UserService:
             logger.error(f"Failed to chmod/mkdir {home_dir}: {e}")
             raise ValueError(f"Failed to set directory permissions: {e}")
 
-        # 4. Transfer ownership to user:user
+        # 4. Transfer ownership to user:primary_group
+        # Use username as group (resolves to user's actual primary group) instead
+        # of {uid}:{uid}, which creates files with non-existent GID when the
+        # username matches a pre-existing group (e.g., 'ag3ntum' group GID 1001
+        # vs UID 50000).
         try:
             subprocess.run(
-                ["sudo", "chown", "-R", f"{uid}:{uid}", str(home_dir)],
+                ["sudo", "chown", "-R", f"{uid}:{username}", str(home_dir)],
                 check=True,
                 capture_output=True,
             )

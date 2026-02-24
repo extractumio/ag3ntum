@@ -1536,7 +1536,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
   const systemEvents = useMemo<SystemEventView[]>(() => {
     const sysEvents: SystemEventView[] = [];
     let eventCounter = 0;
-    
+
     events.forEach((event) => {
       if (event.type === 'hook_triggered') {
         const decision = String(event.data.decision ?? '');
@@ -1995,7 +1995,11 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                     const isLastAgentMessage = conversation
                       .slice(index + 1)
                       .every((i) => i.type !== 'agent_message');
-                    const messageStatus = item.status ?? (isLastAgentMessage && status !== 'running' ? status : undefined);
+                    // Border status: only the last agent message shows the colored left border.
+                    // Intermediate messages keep the diamond icon (via messageStatus prop) but no border.
+                    const borderStatus = isLastAgentMessage && status !== 'running'
+                      ? (item.status ?? status)
+                      : undefined;
                     const todoPayload = todosByAgentId.get(item.id);
                     const todos = todoPayload?.todos ?? null;
                     // Only show streaming on the last agent message when overall status is running
@@ -2021,7 +2025,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                           onToggleTool={toggleTool}
                           subagentExpanded={expandedSubagents}
                           onToggleSubagent={toggleSubagent}
-                          status={(todoPayload?.status ?? messageStatus) as ResultStatus | undefined}
+                          status={(todoPayload?.status ?? borderStatus) as ResultStatus | undefined}
                           messageStatus={item.messageStatus}
                           messageErrorMessage={item.messageErrorMessage}
                           requestStatus={item.requestStatus}
@@ -2044,6 +2048,13 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                     );
                   }
                   if (item.type === 'output') {
+                    // Border status: only the last output block shows the colored left border
+                    const isLastOutput = conversation
+                      .slice(index + 1)
+                      .every((i) => i.type !== 'output');
+                    const outputBorderStatus = isLastOutput && status !== 'running'
+                      ? item.status
+                      : undefined;
                     return (
                       <div
                         key={item.id}
@@ -2064,7 +2075,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
                           files={item.files}
                           filesExpanded={expandedFiles.has(item.id)}
                           onToggleFiles={() => toggleFiles(item.id)}
-                          status={item.status}
+                          status={outputBorderStatus}
                           error={item.error}
                           onFileAction={handleFileAction}
                           onShowInExplorer={handleShowInExplorer}
@@ -2122,8 +2133,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
           />
         </div>
         {systemEventsExpanded && systemEvents.length > 0 && (
-          <SystemEventsPanel 
-            events={systemEvents} 
+          <SystemEventsPanel
+            events={systemEvents}
             onClose={() => setSystemEventsExpanded(false)}
           />
         )}

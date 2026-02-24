@@ -5,9 +5,10 @@ Comprehensive coverage of all session endpoints including:
 - Response structure validation
 - Edge cases and error scenarios
 - Pagination and filtering
+- Session directory ownership (chown GID resolution)
 """
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -989,3 +990,61 @@ class TestSessionStatusTransitions:
             json={}
         )
         assert start_response.json()["status"] == "running"
+
+
+class TestSessionChownGIDResolution:
+    """Test that session chown functions use the ag3ntum shared group.
+
+    The implementation uses AG3NTUM_GROUP ('ag3ntum') for group ownership
+    instead of per-user primary GIDs. This ensures both ag3ntum_api and
+    all sandbox users can access files via shared group membership.
+    """
+
+    @pytest.mark.unit
+    def test_get_ag3ntum_gid_returns_group_gid(self) -> None:
+        """_get_ag3ntum_gid resolves the ag3ntum group to its GID."""
+        from src.core.sessions import _get_ag3ntum_gid
+
+        mock_grp = MagicMock()
+        mock_grp.gr_gid = 1001
+
+        with patch("src.core.sessions.grp.getgrnam", return_value=mock_grp):
+            gid = _get_ag3ntum_gid()
+            assert gid == 1001
+
+    @pytest.mark.unit
+    def test_get_ag3ntum_gid_raises_on_missing_group(self) -> None:
+        """_get_ag3ntum_gid raises KeyError when ag3ntum group missing."""
+        from src.core.sessions import _get_ag3ntum_gid
+
+        with patch("src.core.sessions.grp.getgrnam", side_effect=KeyError):
+            with pytest.raises(KeyError):
+                _get_ag3ntum_gid()
+
+    @pytest.mark.unit
+    def test_sudo_chown_uses_ag3ntum_group(self) -> None:
+        """_sudo_chown passes uid:ag3ntum (not uid:uid) to chown command."""
+        from src.core.sessions import _sudo_chown
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            _sudo_chown(MagicMock(spec_set=["__str__"]), 50000)
+
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown should use ag3ntum group, not UID. Got: {call_args}"
+            )
+
+    @pytest.mark.unit
+    def test_sudo_chown_recursive_uses_ag3ntum_group(self) -> None:
+        """sudo_chown_recursive passes uid:ag3ntum to chown -R."""
+        from src.core.sessions import sudo_chown_recursive
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            sudo_chown_recursive(MagicMock(spec_set=["__str__"]), 50000)
+
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown -R should use ag3ntum group. Got: {call_args}"
+            )

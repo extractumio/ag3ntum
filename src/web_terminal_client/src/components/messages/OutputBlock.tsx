@@ -21,7 +21,7 @@ export interface OutputBlockProps {
   files: string[];
   filesExpanded: boolean;
   onToggleFiles: () => void;
-  status: ResultStatus;
+  status?: ResultStatus;
   error?: string;
   onFileAction: (filePath: string, mode: 'view' | 'download') => void;
   onShowInExplorer?: (filePath: string) => void;
@@ -50,7 +50,7 @@ export function OutputBlock({
   mobileExpanded,
   onToggleMobileExpand,
 }: OutputBlockProps): JSX.Element {
-  const statusClass = OUTPUT_STATUS_CLASS[status] ?? '';
+  const statusClass = status ? (OUTPUT_STATUS_CLASS[status] ?? '') : '';
   const hasRightContent = Boolean(comments) || files.length > 0;
 
   // Determine if right panel should be shown
