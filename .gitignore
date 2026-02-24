@@ -20,6 +20,7 @@ config/llm-api-proxy.yaml
 auto-generated/
 
 docs/plans/
+docs/internals/
 
 .pytest_cache/
 
@@ -61,7 +62,10 @@ docker-compose.override.yml
 
 users/
 
-.claude/
+.claude/*
+!.claude/agents/
+!.claude/commands/
+!.claude/skills/
 !skills/.claude/
 TODO
 tmp_*.py
