@@ -824,7 +824,7 @@ class TestRealUserCreation:
         permission_checks = [
             # (path, expected_mode, description)
             (user_home, 0o750, "Home should allow group read+traverse for API"),
-            (user_home / "sessions", 0o770, "Sessions allows group rwx for API to create session dirs"),
+            (user_home / "sessions", 0o2770, "Sessions has SGID + group rwx so new dirs inherit ag3ntum group"),
             (user_home / "ag3ntum", 0o750, "ag3ntum allows group traverse to access persistent/"),
             (user_home / "venv", 0o755, "venv should be world-readable"),
         ]

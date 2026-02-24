@@ -71,6 +71,7 @@ RUN mkdir -p /mounts/ro /mounts/rw \
 RUN echo '# User management - create/modify/delete sandbox users' > /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -m -d /users/* -s /bin/bash -u * *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * *' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * -g * *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/useradd -M -d /users/* -s /bin/bash -u * -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -L *' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/usermod -a -G ag3ntum *' >> /etc/sudoers.d/ag3ntum && \
@@ -95,6 +96,7 @@ RUN echo '# User management - create/modify/delete sandbox users' > /etc/sudoers
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 750 /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 755 /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 770 /users/*' >> /etc/sudoers.d/ag3ntum && \
+    echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod 2770 /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 660 /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 755 /users/*' >> /etc/sudoers.d/ag3ntum && \
     echo 'ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chmod -R 770 /users/*' >> /etc/sudoers.d/ag3ntum && \

@@ -31,13 +31,41 @@ def sync_users(prefix: str = "") -> None:
     created = 0
     for username, uid in users:
         # Create Linux user (idempotent -- returns 9 if exists)
-        r = subprocess.run(
-            [
-                "useradd", "-M", "-d", f"/users/{username}",
-                "-s", "/bin/bash", "-u", str(uid), username,
-            ],
-            capture_output=True,
-        )
+        base_cmd = [
+            "useradd", "-M", "-d", f"/users/{username}",
+            "-s", "/bin/bash", "-u", str(uid),
+        ]
+        r = subprocess.run(base_cmd + [username], capture_output=True)
+
+        if r.returncode == 9:
+            # useradd returns 9 when username found in passwd/shadow/group.
+            # Check if user actually exists in /etc/passwd.
+            check = subprocess.run(
+                ["getent", "passwd", username], capture_output=True,
+            )
+            if check.returncode != 0:
+                # User NOT in passwd — stale shadow or group entry.
+                # Check if a group with this name exists and adopt it.
+                gid_check = subprocess.run(
+                    ["getent", "group", username],
+                    capture_output=True, text=True,
+                )
+                if gid_check.returncode == 0:
+                    existing_gid = gid_check.stdout.strip().split(":")[2]
+                    r = subprocess.run(
+                        base_cmd + ["-g", existing_gid, username],
+                        capture_output=True,
+                    )
+                else:
+                    # No group either — clean stale shadow entry and retry
+                    subprocess.run(
+                        ["sed", "-i", f"/^{username}:/d", "/etc/shadow"],
+                        capture_output=True,
+                    )
+                    r = subprocess.run(
+                        base_cmd + [username], capture_output=True,
+                    )
+
         if r.returncode not in (0, 9):
             print(
                 f"WARNING: useradd {username} failed: {r.stderr.decode().strip()}",

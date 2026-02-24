@@ -4,6 +4,7 @@ Health check endpoint for Ag3ntum API.
 import time
 from datetime import datetime, timezone
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,14 +101,16 @@ async def _check_redis_health() -> ComponentHealth:
             return ComponentHealth(status="unhealthy", error="Redis event hub not initialized")
 
         start = time.perf_counter()
-        # Try to ensure the pool is connected and ping
-        await agent_runner._event_hub._ensure_pool()
-        pool = agent_runner._event_hub._pool
+        # Get pool directly from _ensure_pool() return value
+        pool = await agent_runner._event_hub._ensure_pool()
         if pool is None:
             return ComponentHealth(status="unhealthy", error="Redis pool not available")
 
-        async with pool.client() as conn:
-            await conn.ping()
+        client = aioredis.Redis(connection_pool=pool)
+        try:
+            await client.ping()
+        finally:
+            await client.aclose()
 
         latency_ms = (time.perf_counter() - start) * 1000
 
@@ -141,4 +144,3 @@ async def get_config() -> ConfigResponse:
         default_model=default_model,
         thinking_tokens=thinking_tokens,
     )
-
