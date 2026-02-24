@@ -180,6 +180,12 @@ function setup_directories() {
     fi
   done
 
+  # Ensure skills directory is world-readable so sandbox users (running as
+  # unprivileged UIDs in bubblewrap) can read skill files via "other" permissions
+  if [[ -d "skills" ]]; then
+    chmod -R o+rX skills 2>/dev/null || true
+  fi
+
   echo "  Directories ready (permissions managed by container entrypoint)"
 }
 

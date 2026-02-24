@@ -138,7 +138,8 @@ RUN chmod +x /entrypoint-web.sh /entrypoint-api.sh
 # the read-only /src bind mount to avoid Docker overlay2 mount conflicts.
 RUN mkdir -p /data /sessions /app/node_modules \
     && chown -R ag3ntum_api:ag3ntum_api /src /config /prompts /skills /data /users /opt/venv /sessions /mounts /app /web_dist \
-    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /entrypoint-api.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt
+    && chown ag3ntum_api:ag3ntum_api /entrypoint-web.sh /entrypoint-api.sh /requirements-base.txt /requirements-legacy-cpu.txt /requirements-modern-cpu.txt \
+    && chmod -R o+rX /skills
 
 ENV APP_VERSION=${APP_VERSION}
 ENV AG3NTUM_ROOT=/

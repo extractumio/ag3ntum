@@ -857,3 +857,35 @@ class TestCreateLinuxUserStaleEntryRetry:
 
         getent_calls = [c for c in calls_made if "getent" in c]
         assert len(getent_calls) == 0, "getent should not be called when useradd succeeds"
+
+
+class TestChownUsesCorrectGID:
+    """chown must use {uid}:{username} to resolve the actual primary group."""
+
+    @pytest.mark.unit
+    def test_chown_uses_username_as_group(self) -> None:
+        """chown -R uses {uid}:{username} — not {uid}:{uid} (EXT-13 fix)."""
+        calls: list[str] = []
+        svc = UserService()
+
+        def capture(*args: object, **kwargs: object) -> MagicMock:
+            calls.append(str(args))
+            return MagicMock(returncode=0)
+
+        with (
+            patch("subprocess.run", side_effect=capture),
+            patch("pathlib.Path.mkdir"), patch("pathlib.Path.chmod"),
+            patch("pathlib.Path.write_text"),
+            patch("pathlib.Path.exists", return_value=False),
+            patch.object(svc, "_create_user_venv"),
+            patch.object(svc, "_create_user_secrets"),
+            patch.object(svc, "_setup_group_permissions"),
+            patch("src.services.user_service.refresh_process_supplementary_groups"),
+        ):
+            svc._create_linux_user("ag3ntum", 50000)
+
+        chown_r = [c for c in calls if "chown" in c and "-R" in c]
+        assert chown_r, "Expected chown -R call"
+        assert any("50000:ag3ntum" in c for c in chown_r), (
+            f"chown should use {{uid}}:{{username}}. Got: {chown_r}"
+        )

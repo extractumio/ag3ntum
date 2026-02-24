@@ -416,3 +416,80 @@ describe('copyAsMarkdown', () => {
     consoleSpy.mockRestore();
   });
 });
+
+// =============================================================================
+// Clipboard Fallback Tests (test actual utils/index.ts implementation)
+// =============================================================================
+describe('Clipboard execCommand fallback', () => {
+  // Import the actual functions from utils
+  let actualCopyAsRichText: typeof import('../../../src/web_terminal_client/src/utils').copyAsRichText;
+  let actualCopyAsMarkdown: typeof import('../../../src/web_terminal_client/src/utils').copyAsMarkdown;
+
+  beforeEach(async () => {
+    // jsdom doesn't provide execCommand — define it so vi.spyOn can wrap it
+    if (typeof document.execCommand !== 'function') {
+      document.execCommand = (() => false) as typeof document.execCommand;
+    }
+    // Dynamic import to get the real implementations
+    const utils = await import('../../../src/web_terminal_client/src/utils');
+    actualCopyAsRichText = utils.copyAsRichText;
+    actualCopyAsMarkdown = utils.copyAsMarkdown;
+  });
+
+  it('copyAsMarkdown falls back to execCommand when clipboard API unavailable', async () => {
+    // Remove clipboard API
+    const origClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    });
+
+    const mockExecCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+
+    const result = await actualCopyAsMarkdown('# Test markdown');
+
+    expect(result).toBe(true);
+    expect(mockExecCommand).toHaveBeenCalledWith('copy');
+
+    // Restore
+    Object.defineProperty(navigator, 'clipboard', {
+      value: origClipboard,
+      writable: true,
+      configurable: true,
+    });
+    mockExecCommand.mockRestore();
+  });
+
+  it('copyAsRichText falls back to execCommand when clipboard.write throws', async () => {
+    // Make clipboard.write throw (simulates non-HTTPS context)
+    const origClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: {
+        write: vi.fn().mockRejectedValue(new DOMException('Not allowed')),
+        writeText: vi.fn().mockRejectedValue(new DOMException('Not allowed')),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    const mockExecCommand = vi.spyOn(document, 'execCommand').mockReturnValue(true);
+
+    const element = document.createElement('div');
+    element.innerHTML = '<p>Test content</p>';
+    Object.defineProperty(element, 'innerText', { value: 'Test content' });
+
+    const result = await actualCopyAsRichText(element);
+
+    expect(result).toBe(true);
+    expect(mockExecCommand).toHaveBeenCalledWith('copy');
+
+    // Restore
+    Object.defineProperty(navigator, 'clipboard', {
+      value: origClipboard,
+      writable: true,
+      configurable: true,
+    });
+    mockExecCommand.mockRestore();
+  });
+});

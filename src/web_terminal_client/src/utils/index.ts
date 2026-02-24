@@ -629,33 +629,67 @@ export function stripSystemReminders(text: string): string {
 }
 
 // Copy to clipboard utilities
+// Uses Clipboard API when available (HTTPS/localhost), falls back to
+// execCommand('copy') for plain HTTP contexts.
+
+function fallbackCopyText(text: string): boolean {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 export async function copyAsRichText(element: HTMLElement): Promise<boolean> {
   try {
     const html = element.innerHTML;
     const text = element.innerText;
 
-    const htmlBlob = new Blob([html], { type: 'text/html' });
-    const textBlob = new Blob([text], { type: 'text/plain' });
+    // Try Clipboard API first (requires secure context)
+    if (navigator.clipboard?.write) {
+      const htmlBlob = new Blob([html], { type: 'text/html' });
+      const textBlob = new Blob([text], { type: 'text/plain' });
+      const clipboardItem = new ClipboardItem({
+        'text/html': htmlBlob,
+        'text/plain': textBlob,
+      });
+      await navigator.clipboard.write([clipboardItem]);
+      return true;
+    }
 
-    const clipboardItem = new ClipboardItem({
-      'text/html': htmlBlob,
-      'text/plain': textBlob,
-    });
-
-    await navigator.clipboard.write([clipboardItem]);
-    return true;
+    // Fallback: copy as plain text via execCommand
+    return fallbackCopyText(text);
   } catch (err) {
-    console.error('Failed to copy rich text:', err);
-    return false;
+    // Clipboard API threw (e.g., not in secure context) — try fallback
+    try {
+      return fallbackCopyText(element.innerText);
+    } catch {
+      console.error('Failed to copy rich text:', err);
+      return false;
+    }
   }
 }
 
 export async function copyAsMarkdown(markdown: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(markdown);
-    return true;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(markdown);
+      return true;
+    }
+    return fallbackCopyText(markdown);
   } catch (err) {
-    console.error('Failed to copy markdown:', err);
-    return false;
+    try {
+      return fallbackCopyText(markdown);
+    } catch {
+      console.error('Failed to copy markdown:', err);
+      return false;
+    }
   }
 }

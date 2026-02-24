@@ -437,6 +437,37 @@ describe('FileViewer', () => {
       expect(container.querySelector('.file-viewer-modal')).toBeInTheDocument();
       expect(screen.getByText('test.txt')).toBeInTheDocument();
     });
+
+    it('does not close when mousedown inside modal but mouseup on overlay (text selection)', () => {
+      const onClose = vi.fn();
+      const file = createFile();
+
+      const { container } = render(<FileViewerModal file={file} onClose={onClose} />);
+
+      const overlay = container.querySelector('.file-viewer-overlay')!;
+      const modal = container.querySelector('.file-viewer-modal')!;
+
+      // Simulate text selection: mousedown inside modal, then click on overlay
+      fireEvent.mouseDown(modal);
+      fireEvent.click(overlay);
+
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('still closes on clean overlay click (mousedown + click both on overlay)', () => {
+      const onClose = vi.fn();
+      const file = createFile();
+
+      const { container } = render(<FileViewerModal file={file} onClose={onClose} />);
+
+      const overlay = container.querySelector('.file-viewer-overlay')!;
+
+      // Simulate clean click: mousedown on overlay, then click on overlay
+      fireEvent.mouseDown(overlay);
+      fireEvent.click(overlay);
+
+      expect(onClose).toHaveBeenCalled();
+    });
   });
 
   // ==========================================================================
