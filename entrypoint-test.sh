@@ -156,6 +156,9 @@ HEREDOC
         fi
     done
 
+    # SGID on sessions/ so new session dirs inherit ag3ntum group
+    chmod 2770 "${home_dir}/sessions"
+
     # ag3ntum dir: 750 (group traverse only, so secrets.yaml stays protected)
     chgrp ag3ntum "${home_dir}/ag3ntum"
     chmod 750 "${home_dir}/ag3ntum"

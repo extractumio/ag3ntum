@@ -9,12 +9,13 @@ Each session has an isolated workspace with:
 NOTE: All session metadata is stored in SQLite database (Session model),
 NOT in files. This module only manages directory structure.
 
-SECURITY: Session directories use shared GID access model:
+SECURITY: Session directories use ag3ntum group ownership model:
 - Permissions: 770 dirs / 660 files (owner + group, no world access)
-- Owner: sandbox user's UID (both UID and GID set to sandbox user)
-- ag3ntum_api is in each sandbox user's group (shared GID)
+- Owner UID: sandbox user
+- Owner GID: ag3ntum group (always exists, all sandbox users are members)
 - PathValidator provides application-level cross-session/cross-user isolation
 """
+import grp
 import json
 import logging
 import os
@@ -30,23 +31,34 @@ from .path_validator import get_session_linux_uid
 
 logger = logging.getLogger(__name__)
 
+AG3NTUM_GROUP = "ag3ntum"
+
+
+def _get_ag3ntum_gid() -> int:
+    """Return the GID of the ag3ntum group.
+
+    The ag3ntum group is created by the Dockerfile and always exists.
+    All sandbox users and ag3ntum_api are members, so using it as the
+    group owner removes the fragile dependency on per-user groups.
+    """
+    return grp.getgrnam(AG3NTUM_GROUP).gr_gid
+
 
 def _sudo_chown(path: Path, uid: int) -> None:
     """
     Set ownership of a path using sudo chown.
 
-    The API process (ag3ntum_api) doesn't have CAP_CHOWN as an effective
-    capability when running as non-root. We use sudo chown instead,
-    which is allowed via sudoers rules in the Dockerfile:
-      ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown *:* /users/*
+    Sets owner to the sandbox user's UID and group to ag3ntum.
+    The ag3ntum group (GID 1001) always exists (created by Dockerfile)
+    and both ag3ntum_api and all sandbox users are members.
 
     Args:
         path: Path to change ownership of
-        uid: UID to set as owner and group
+        uid: UID to set as owner
     """
     try:
         result = subprocess.run(
-            ["sudo", "/usr/bin/chown", f"{uid}:{uid}", str(path)],
+            ["sudo", "/usr/bin/chown", f"{uid}:{AG3NTUM_GROUP}", str(path)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -64,8 +76,8 @@ def chown_to_session_user(path: Path, session_id: str) -> None:
     Change ownership of a file/directory to the session's sandbox user.
 
     Called by Write/Edit/MultiEdit MCP tools after creating/modifying files.
-    Sets both UID and GID to the sandbox user's ID (e.g., 50000:50000).
-    Since ag3ntum_api is in the sandbox user's group (shared GID model),
+    Sets UID to the sandbox user and GID to the ag3ntum group.
+    Since ag3ntum_api and all sandbox users are in the ag3ntum group,
     both the API process and Bash sandbox can access files with 660/770 perms.
 
     Uses sudo chown for paths under /users/*. Silently skips for
@@ -87,18 +99,15 @@ def sudo_chown_recursive(path: Path, uid: int) -> None:
     """
     Recursively set ownership of a path using sudo chown -R.
 
-    The API process (ag3ntum_api) doesn't have CAP_CHOWN as an effective
-    capability when running as non-root. We use sudo chown instead,
-    which is allowed via sudoers rules in the Dockerfile:
-      ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/chown -R *:* /users/*
+    Sets owner to the sandbox user's UID and group to ag3ntum.
 
     Args:
         path: Path to change ownership of (recursively)
-        uid: UID to set as owner and group
+        uid: UID to set as owner
     """
     try:
         result = subprocess.run(
-            ["sudo", "/usr/bin/chown", "-R", f"{uid}:{uid}", str(path)],
+            ["sudo", "/usr/bin/chown", "-R", f"{uid}:{AG3NTUM_GROUP}", str(path)],
             capture_output=True,
             text=True,
             timeout=30,  # Longer timeout for recursive operation
@@ -106,7 +115,7 @@ def sudo_chown_recursive(path: Path, uid: int) -> None:
         if result.returncode != 0:
             logger.warning(f"sudo chown -R failed for {path}: {result.stderr.strip()}")
         else:
-            logger.info(f"Set ownership of {path} (recursive) to {uid}:{uid}")
+            logger.info(f"Set ownership of {path} (recursive) to {uid}:{AG3NTUM_GROUP}")
     except subprocess.TimeoutExpired:
         logger.warning(f"sudo chown -R timed out for {path}")
     except Exception as e:
@@ -581,7 +590,7 @@ class SessionManager:
             # Set ownership if provided (use lchown for symlinks)
             if owner_uid is not None:
                 try:
-                    os.lchown(link_path, owner_uid, owner_uid)
+                    os.lchown(link_path, owner_uid, _get_ag3ntum_gid())
                 except OSError as e:
                     logger.warning(f"Could not set ownership of {link_path}: {e}")
 
@@ -786,12 +795,12 @@ def secure_file_write(
     Security Properties:
     - File permissions: 660 by default (owner + group read/write)
     - No world access
-    - Ownership: Set to owner_uid if provided (both UID and GID)
+    - Ownership: owner_uid:ag3ntum if provided
 
     Args:
         file_path: Path to write to
         content: Content to write (bytes or str)
-        owner_uid: UID to set as owner (optional)
+        owner_uid: UID to set as owner (optional, group is always ag3ntum)
         mode: File permission mode (default: 660 = owner + group read/write)
     """
     # Write content
@@ -803,10 +812,10 @@ def secure_file_write(
     # Set permissions BEFORE ownership (in case we lose access after chown)
     file_path.chmod(mode)
 
-    # Set ownership if provided (both owner and group to sandbox user)
+    # Set ownership if provided (owner=sandbox user, group=ag3ntum)
     if owner_uid is not None:
         try:
-            os.chown(file_path, owner_uid, owner_uid)
+            os.chown(file_path, owner_uid, _get_ag3ntum_gid())
         except OSError as e:
             logger.warning(f"Could not set ownership of {file_path} to {owner_uid}: {e}")
 
@@ -816,7 +825,7 @@ def _secure_path(path: Path, mode: int, owner_uid: Optional[int]) -> None:
     try:
         path.chmod(mode)
         if owner_uid:
-            os.chown(path, owner_uid, owner_uid)
+            os.chown(path, owner_uid, _get_ag3ntum_gid())
     except OSError:
         pass
 
@@ -839,7 +848,7 @@ def ensure_secure_session_files(
     - Directories: 770 (owner rwx + group rwx, no world)
     - Files: 660 (owner rw + group rw, no world)
     - Sensitive files (agent.jsonl, .claude.json): 660
-    - Ownership: uid:uid (sandbox user owns both UID and GID)
+    - Ownership: uid:ag3ntum (sandbox user UID, ag3ntum GID)
 
     Args:
         session_dir: Path to the session directory

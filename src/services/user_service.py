@@ -44,6 +44,11 @@ from ..core.uid_security import (
 # API user UID - used for logging only (access control is app-level via PathValidator)
 API_UID = 45045
 
+# Groups that must never be deleted by groupdel (system/infrastructure groups)
+PROTECTED_GROUPS = frozenset({
+    "ag3ntum", "ag3ntum_api", "root", "sudo", "adm", "nogroup",
+})
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,12 +235,49 @@ class UserService:
 
             try:
                 # Create Linux user (idempotent — useradd returns 9 if exists)
+                base_cmd = [
+                    "sudo", "useradd", "-M", "-d", f"/users/{user.username}",
+                    "-s", "/bin/bash", "-u", str(user.linux_uid),
+                ]
                 proc = subprocess.run(
-                    ["sudo", "useradd", "-M", "-d", f"/users/{user.username}",
-                     "-s", "/bin/bash", "-u", str(user.linux_uid), user.username],
+                    base_cmd + [user.username],
                     capture_output=True, text=True,
                 )
                 created = proc.returncode == 0
+
+                if proc.returncode == 9:
+                    # Check if user actually exists in /etc/passwd
+                    check = subprocess.run(
+                        ["getent", "passwd", user.username],
+                        capture_output=True,
+                    )
+                    if check.returncode != 0:
+                        # User NOT in passwd — group name conflict.
+                        # Check if a group with this name exists and adopt it.
+                        gid_check = subprocess.run(
+                            ["getent", "group", user.username],
+                            capture_output=True, text=True,
+                        )
+                        if gid_check.returncode == 0:
+                            existing_gid = gid_check.stdout.strip().split(":")[2]
+                            proc = subprocess.run(
+                                base_cmd + ["-g", existing_gid, user.username],
+                                capture_output=True, text=True,
+                            )
+                            created = proc.returncode == 0
+                        else:
+                            # Clean stale shadow entry and retry
+                            subprocess.run(
+                                ["sudo", "sed", "-i",
+                                 f"/^{user.username}:/d", "/etc/shadow"],
+                                capture_output=True,
+                            )
+                            proc = subprocess.run(
+                                base_cmd + [user.username],
+                                capture_output=True, text=True,
+                            )
+                            created = proc.returncode == 0
+
                 if proc.returncode not in (0, 9):
                     logger.error(
                         f"Failed to ensure Linux user {user.username}: {proc.stderr.strip()}"
@@ -776,8 +818,9 @@ class UserService:
             f"useradd returned 9 for {username} but user not in /etc/passwd. "
             "Cleaning up stale entries and retrying."
         )
-        # Remove stale group and shadow entries
-        subprocess.run(["sudo", "groupdel", username], capture_output=True)
+        # Remove stale group and shadow entries (guard against protected groups)
+        if username not in PROTECTED_GROUPS:
+            subprocess.run(["sudo", "groupdel", username], capture_output=True)
         subprocess.run(
             ["sudo", "sed", "-i", f"/^{username}:/d", "/etc/shadow"],
             capture_output=True,
@@ -907,6 +950,15 @@ class UserService:
                         check=True,
                         capture_output=True,
                     )
+
+            # Set SGID bit on sessions/ so new session dirs inherit ag3ntum group
+            sessions_path = home_dir / "sessions"
+            if sessions_path.exists():
+                subprocess.run(
+                    ["sudo", "chmod", "2770", str(sessions_path)],
+                    check=True,
+                    capture_output=True,
+                )
 
             # ag3ntum directory: needs group traverse permission (750) so API can access persistent/
             # secrets.yaml inside is protected by its own 600 permissions
@@ -1061,16 +1113,18 @@ class UserService:
         # userdel only removes the group if no other user has it as primary
         # and no other users are members. A leftover group entry can cause
         # useradd to return code 9 on recreate.
-        try:
-            subprocess.run(
-                ["sudo", "groupdel", username],
-                check=True,
-                capture_output=True,
-            )
-            logger.debug(f"Deleted group {username}")
-        except subprocess.CalledProcessError:
-            # Group doesn't exist or has other members — either is fine
-            pass
+        # Guard: never delete protected system/infrastructure groups.
+        if username not in PROTECTED_GROUPS:
+            try:
+                subprocess.run(
+                    ["sudo", "groupdel", username],
+                    check=True,
+                    capture_output=True,
+                )
+                logger.debug(f"Deleted group {username}")
+            except subprocess.CalledProcessError:
+                # Group doesn't exist or has other members — either is fine
+                pass
 
     def cleanup_test_users(self, pattern: str = "testuser_") -> int:
         """
