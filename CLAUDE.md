@@ -237,3 +237,4 @@ Version: `VERSION` file (semver). Branch model: `main` (dev) | `release` (stable
 27. **Shared Vite config** — `vite.shared.mjs` shared by `vite.config.mjs` + `vitest.config.mjs`. Entrypoint copies to `/tmp/vite-*/`.
 28. **`docker compose exec` = root** — Use `-u 45045:45045` for npm/vite/node to avoid root-owned files breaking entrypoint.
 29. **External mount dirs may be empty** — A configured mount pointing to an empty host dir is valid. Report "no files found", do not error or retry.
+30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
