@@ -57,6 +57,13 @@ from .ag3ntum_ask import (
 from .ag3ntum_file_tools import (
     create_ag3ntum_tools_mcp_server,
 )
+from .ag3ntum_ssh import (
+    AG3NTUM_SSH_EXEC_TOOL,
+    AG3NTUM_SSH_READ_TOOL,
+    AG3NTUM_SSH_CONNECT_TOOL,
+    SSHToolContext,
+    create_ssh_tools,
+)
 
 __all__ = [
     # Bash tool (with bwrap sandbox)
@@ -89,4 +96,10 @@ __all__ = [
     "AG3NTUM_ASK_TOOL",
     "get_pending_question",
     "submit_answer",
+    # SSH tools
+    "AG3NTUM_SSH_EXEC_TOOL",
+    "AG3NTUM_SSH_READ_TOOL",
+    "AG3NTUM_SSH_CONNECT_TOOL",
+    "SSHToolContext",
+    "create_ssh_tools",
 ]

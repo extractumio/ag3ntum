@@ -1,0 +1,164 @@
+# SSH Privilege Level Definitions
+# Copy to ssh-privilege-levels.yaml and customize.
+#
+# Five tiers (L0-L4) with escalating capabilities:
+# L0 = Monitoring (read-only, allowlist)
+# L1 = Service Management (targeted sudo)
+# L2 = Configuration (path-restricted writes)
+# L3 = Administration (broad sudo, blocklist)
+# L4 = Emergency (minimal filter, time-boxed)
+
+privilege_levels:
+  L0_monitoring:
+    description: "Read-only monitoring and diagnostics"
+    sudo_allowed: false
+    command_mode: allowlist
+    allowed_commands:
+      - pattern: '^cat\s+/var/log/[\w/.+-]+$'
+        description: "Read log files"
+      - pattern: '^tail\s+-[nf]\s+\d*\s+/var/log/[\w/.+-]+$'
+        description: "Tail log files"
+      - pattern: '^grep\s+.*\s+/var/log/[\w/.+-]+$'
+        description: "Search log files"
+      - pattern: '^ls\s+-[la]+\s+/[\w/.+-]+$'
+        description: "List directory contents"
+      - pattern: '^systemctl\s+status\s+[\w@.-]+$'
+        description: "Check service status"
+      - pattern: '^journalctl\s+(-u\s+[\w@.-]+\s+)?--no-pager(\s+-n\s+\d+)?$'
+        description: "Read journal logs"
+      - pattern: '^df\s+-[hT]+$'
+        description: "Disk usage"
+      - pattern: '^free\s+-[hm]+$'
+        description: "Memory usage"
+      - pattern: '^uptime$'
+        description: "System uptime"
+      - pattern: '^uname\s+-[a]+$'
+        description: "System info"
+      - pattern: '^ps\s+aux(\s+\|\s+head\s+-\d+)?$'
+        description: "Process list"
+      - pattern: '^netstat\s+-[tlnup]+$|^ss\s+-[tlnup]+$'
+        description: "Network connections"
+      - pattern: '^dig\s+[\w.-]+$'
+        description: "DNS lookup"
+      - pattern: '^ping\s+-c\s+\d+\s+[\w.-]+$'
+        description: "Network connectivity"
+      - pattern: '^openssl\s+s_client\s+-connect\s+[\w.-]+:\d+$'
+        description: "SSL certificate check"
+      - pattern: '^cat\s+/etc/os-release$'
+        description: "OS version"
+      - pattern: '^nginx\s+-t$|^apache2ctl\s+-t$|^httpd\s+-t$'
+        description: "Config syntax check"
+      - pattern: '^php\s+-v$|^python3?\s+--version$|^node\s+--version$'
+        description: "Runtime version check"
+      - pattern: '^docker\s+ps(\s+-a)?$|^docker\s+stats\s+--no-stream$'
+        description: "Container status"
+      - pattern: '^hostname$'
+        description: "Hostname"
+      - pattern: '^whoami$'
+        description: "Current user"
+      - pattern: '^id$'
+        description: "User identity"
+
+  L1_service_management:
+    description: "Service restart and cache management"
+    sudo_allowed: true
+    sudo_restricted_to:
+      - '^sudo\s+systemctl\s+(restart|reload|start|stop)\s+[\w@.-]+$'
+      - '^sudo\s+service\s+[\w.-]+\s+(restart|reload|start|stop)$'
+      - '^sudo\s+nginx\s+-s\s+(reload|reopen)$'
+      - '^sudo\s+apachectl\s+graceful$'
+    inherits: L0_monitoring
+    human_approval: per_session
+
+  L2_configuration:
+    description: "Configuration file editing"
+    sudo_allowed: true
+    writable_paths:
+      - '/etc/nginx/'
+      - '/etc/apache2/'
+      - '/etc/php/'
+      - '/etc/mysql/'
+      - '/etc/postgresql/'
+      - '/etc/redis/'
+      - '/etc/systemd/system/'
+    blocked_paths:
+      - '/etc/shadow'
+      - '/etc/passwd'
+      - '/etc/sudoers'
+      - '/etc/ssh/sshd_config'
+      - '/etc/pam.d/'
+    inherits: L1_service_management
+    human_approval: per_write_command
+
+  L3_administration:
+    description: "Full system administration"
+    sudo_allowed: true
+    command_mode: blocklist
+    blocked_commands:
+      - pattern: '^sudo\s+rm\s+-rf\s+/$'
+        description: "Delete root filesystem"
+      - pattern: ':\(\)\{.*\|.*&.*\};:'
+        description: "Fork bomb"
+      - pattern: 'dd\s+.*of=/dev/[sh]d[a-z]'
+        description: "Raw disk overwrite"
+      - pattern: 'mkfs\.'
+        description: "Format filesystem"
+      - pattern: '>\s*/dev/[sh]d[a-z]'
+        description: "Redirect to disk device"
+      - pattern: 'chmod\s+-R\s+777\s+/'
+        description: "World-writable root"
+      - pattern: 'shutdown\s+(-h\s+)?now|halt|poweroff|init\s+0'
+        description: "System shutdown"
+      - pattern: 'reboot|init\s+6'
+        description: "System reboot"
+    inherits: L2_configuration
+    human_approval: per_command
+
+  L4_emergency:
+    description: "Emergency unrestricted access"
+    sudo_allowed: true
+    command_mode: blocklist
+    blocked_commands:
+      - pattern: '^sudo\s+rm\s+-rf\s+/$'
+        description: "Delete root filesystem"
+      - pattern: ':\(\)\{.*\|.*&.*\};:'
+        description: "Fork bomb"
+    max_session_duration_seconds: 1800
+    requires_reauthentication: true
+    human_approval: per_command
+
+# Commands ALWAYS blocked regardless of privilege level
+always_blocked:
+  persistence:
+    - pattern: '>>?\s*.*authorized_keys'
+      description: "SSH key injection"
+    - pattern: 'crontab\s+-[el]?|>>?\s*.*cron'
+      description: "Cron job modification"
+    - pattern: 'systemctl\s+(enable|disable|mask)'
+      description: "Systemd service modification"
+    - pattern: '/etc/init\.d|update-rc\.d|chkconfig'
+      description: "Init script modification"
+    - pattern: 'ld\.so\.preload|LD_PRELOAD'
+      description: "Library preloading"
+
+  lateral_movement:
+    - pattern: '\bssh\s+'
+      description: "Nested SSH"
+    - pattern: '\bscp\s+'
+      description: "SCP from remote"
+    - pattern: '\bcurl\s+.*\|\s*(bash|sh|python)'
+      description: "Download and execute"
+    - pattern: '\bwget\s+.*-O\s*-\s*\|'
+      description: "Download and pipe"
+    - pattern: '\bnc\s+-[lp]|\bncat\s+-[lp]|\bsocat\b'
+      description: "Reverse shell / listener"
+    - pattern: '169\.254\.169\.254'
+      description: "Cloud metadata endpoint"
+
+  data_exfiltration_require_approval:
+    - pattern: '\bmysqldump\b|\bpg_dump\b'
+      description: "Database dump"
+    - pattern: '\btar\s+.*-[cz].*\/'
+      description: "Archive creation"
+    - pattern: 'cat\s+.*\.(env|key|pem|p12|pfx|jks)\b'
+      description: "Sensitive file read"

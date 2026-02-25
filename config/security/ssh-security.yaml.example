@@ -1,0 +1,82 @@
+# SSH Security Configuration for Ag3ntum
+# Copy to ssh-security.yaml and customize for your environment.
+#
+# IMPORTANT: SSH is DISABLED by default. Set enabled: true to activate.
+
+ssh:
+  # Master switch — admin must explicitly enable
+  enabled: false
+
+  # Default access mode for new connections
+  # operations: Predefined operations only (safest)
+  # readonly: Read-only commands in filtered shell
+  # filtered_shell: Filtered arbitrary commands (most flexible)
+  default_mode: readonly
+
+  # Connection and execution limits
+  limits:
+    max_connections_per_user: 3
+    max_concurrent_commands: 5
+    session_timeout_seconds: 1800    # 30 minutes
+    command_timeout_seconds: 300     # 5 minutes per command
+    max_output_bytes: 1048576        # 1MB per command output
+    max_file_read_bytes: 5242880     # 5MB per file read
+    max_file_write_bytes: 1048576    # 1MB per file write
+    rate_limit_commands_per_minute: 30
+
+  # Host access control
+  hosts:
+    mode: allowlist    # allowlist | blocklist
+
+    # Hosts that can NEVER be connected to
+    always_blocked:
+      - "127.0.0.1"
+      - "localhost"
+      - "::1"
+      - "169.254.0.0/16"    # Cloud metadata endpoint
+
+    # Override: specific private IPs that ARE allowed
+    # Example: ["192.168.1.10", "10.0.1.5"]
+    private_network_exceptions: []
+
+  # Credential security
+  credentials:
+    key_storage_encryption: "fernet"
+    allowed_key_types:
+      - "ed25519"
+      - "rsa-4096"
+    prohibited_key_types:
+      - "dsa"
+      - "rsa-1024"
+      - "rsa-2048"
+    certificate_support: true
+    certificate_ca_url: null    # e.g., "https://vault.example.com/v1/ssh/sign/agent"
+    certificate_ttl_seconds: 3600
+    password_auth_allowed: false    # Discourage password auth
+    # Path to known_hosts file for host key verification.
+    # null = use system defaults (~/.ssh/known_hosts).
+    # NEVER set to "none" — that disables host key verification (MITM risk).
+    known_hosts_path: null
+
+  # Context isolation for sensitive files
+  context_isolation:
+    enabled: true
+    auto_detect_sensitive: true
+    always_redact_secrets: true
+    max_context_file_size_bytes: 102400    # 100KB
+
+  # Audit logging
+  audit:
+    enabled: true
+    log_commands: true
+    log_file_access: true
+    log_connection_events: true
+    sensitive_command_alert: true
+    retention_days: 90
+
+  # Behavior monitoring
+  behavior_monitor:
+    enabled: true
+    anomaly_detection: true
+    circuit_breaker_threshold: 10
+    command_pattern_window_seconds: 60

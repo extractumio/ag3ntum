@@ -16,6 +16,7 @@ rich==13.7.0
 python-multipart==0.0.22
 bcrypt==4.2.1
 cryptography==46.0.5
+asyncssh==2.19.0
 detect-secrets==1.5.0
 redis==7.1.0
 pytest==9.0.2
