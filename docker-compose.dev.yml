@@ -1,0 +1,46 @@
+# =============================================================================
+# Development Mode Docker Compose Override
+# =============================================================================
+#
+# Overrides the web container to use Vite dev server with HMR instead of the
+# production static file server. Also adds web_node_modules volume and
+# additional mounts needed for frontend development and testing.
+#
+# In production mode (default), the web container serves a pre-built static
+# bundle from /web_dist — no node_modules or npm install needed.
+#
+# This file OVERRIDES the ag3ntum-web service defined in docker-compose.yml:
+#   - command:     vite dev server (replaces uvicorn static server)
+#   - working_dir: /src/web_terminal_client (replaces /)
+#   - environment: adds dev-specific vars (AG3NTUM_WEB_PORT, npm_config_cache)
+#   - volumes:     adds web_node_modules, tests, auto-generated
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   (or: ./run.sh build --dev)
+#
+# =============================================================================
+
+services:
+  ag3ntum-web:
+    # Override: Vite dev server instead of production static server
+    command: ["sh", "-c", "exec vite --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs --host 0.0.0.0 --port 50080"]
+    working_dir: /src/web_terminal_client
+    environment:
+      AG3NTUM_MODE: "dev"
+      AG3NTUM_WEB_PORT: "50080"
+      npm_config_cache: /tmp/.npm
+    volumes:
+      # Additional volumes for dev mode (merged with base docker-compose.yml volumes)
+      # Override /src mount: dev mode needs read-write so Vite can write temp files
+      # (.timestamp-*.mjs) to /src/web_terminal_client/. Production keeps :ro.
+      - ./src:/src
+      - ./tests:/tests:ro
+      - ./auto-generated:/auto-generated:ro
+      # Named volume for node_modules at /app/ - outside the read-only /src mount
+      # to avoid Docker overlay2 mount conflicts on Linux
+      - web_node_modules:/app/node_modules
+
+# Named volumes for web frontend dependencies (dev mode only)
+volumes:
+  web_node_modules:

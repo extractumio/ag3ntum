@@ -21,7 +21,7 @@ The script will:
 3. Update tests/backend/fixtures/anthropic_sse_samples.json
 4. Print a summary of changes
 
-After running, execute: ./run.sh test --subset "sse_schemas"
+After running, execute: ./run.sh test --backend
 """
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ def print_summary(
     summarize("multiple_tools_stream", multiple_tools_stream)
 
     print("\n" + "=" * 60)
-    print("Next step: ./run.sh test --subset 'sse_schemas'")
+    print("Next step: ./run.sh test --backend")
     print("=" * 60)
 
 

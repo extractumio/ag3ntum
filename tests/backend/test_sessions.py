@@ -5,9 +5,10 @@ Comprehensive coverage of all session endpoints including:
 - Response structure validation
 - Edge cases and error scenarios
 - Pagination and filtering
+- Session directory ownership (chown GID resolution)
 """
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,13 +32,13 @@ class TestSessionRun:
 
         assert response.status_code == 201
         data = response.json()
-        
+
         # Validate response structure (TaskStartedResponse)
         assert "session_id" in data
         assert data["status"] == "running"
         assert data["message"] == "Task execution started"
         assert "resumed_from" in data  # Can be None
-        
+
         # Validate session_id format: YYYYMMDD_HHMMSS_uuid8
         session_id = data["session_id"]
         parts = session_id.split("_")
@@ -158,7 +159,7 @@ class TestSessionCreate:
 
         assert response.status_code == 201
         data = response.json()
-        
+
         # Validate full SessionResponse structure
         assert "id" in data
         assert data["status"] == "pending"
@@ -242,12 +243,12 @@ class TestSessionCreate:
         )
 
         data = response.json()
-        
+
         # Validate created_at is ISO format
         created_at = data["created_at"]
         assert "T" in created_at
         datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        
+
         # updated_at should also be valid
         updated_at = data["updated_at"]
         datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
@@ -276,7 +277,7 @@ class TestSessionList:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate SessionListResponse structure
         assert "sessions" in data
         assert isinstance(data["sessions"], list)
@@ -440,7 +441,7 @@ class TestSessionList:
 
         response = client.get("/api/v1/sessions", headers=auth_headers)
         data = response.json()
-        
+
         # Newest first
         assert data["sessions"][0]["task"] == "Task 2"
         assert data["sessions"][1]["task"] == "Task 1"
@@ -467,7 +468,7 @@ class TestSessionGet:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate full SessionResponse structure
         assert data["id"] == session_id
         assert "status" in data
@@ -567,7 +568,7 @@ class TestSessionTask:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate TaskStartedResponse structure
         assert data["status"] == "running"
         assert data["session_id"] == session_id
@@ -663,7 +664,7 @@ class TestSessionTask:
     ) -> None:
         """Returns 409 when task is already running."""
         session_id = created_session["id"]
-        
+
         # Mock the agent runner to say task is already running
         mock_agent_runner.is_running.return_value = True
 
@@ -708,7 +709,7 @@ class TestSessionCancel:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate CancelResponse structure
         assert data["session_id"] == session_id
         assert "status" in data
@@ -792,7 +793,7 @@ class TestSessionResult:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # Validate ResultResponse structure
         assert data["session_id"] == session_id
         assert "status" in data
@@ -820,7 +821,7 @@ class TestSessionResult:
 
         data = response.json()
         metrics = data["metrics"]
-        
+
         # Validate ResultMetrics structure
         assert "duration_ms" in metrics
         assert "num_turns" in metrics
@@ -911,7 +912,7 @@ class TestSessionResumability:
 
         assert response.status_code == 200
         data = response.json()
-        
+
         # resumable field should be present (can be None for non-cancelled)
         assert "resumable" in data
 
@@ -991,31 +992,59 @@ class TestSessionStatusTransitions:
         assert start_response.json()["status"] == "running"
 
 
-class TestCancelledEventStructure:
-    """Tests for cancelled event structure in API responses."""
+class TestSessionChownGIDResolution:
+    """Test that session chown functions use the ag3ntum shared group.
+
+    The implementation uses AG3NTUM_GROUP ('ag3ntum') for group ownership
+    instead of per-user primary GIDs. This ensures both ag3ntum_api and
+    all sandbox users can access files via shared group membership.
+    """
 
     @pytest.mark.unit
-    def test_cancel_response_structure(
-        self,
-        client: TestClient,
-        auth_headers: dict,
-        created_session: dict
-    ) -> None:
-        """Cancel response has correct structure."""
-        session_id = created_session["id"]
+    def test_get_ag3ntum_gid_returns_group_gid(self) -> None:
+        """_get_ag3ntum_gid resolves the ag3ntum group to its GID."""
+        from src.core.sessions import _get_ag3ntum_gid
 
-        response = client.post(
-            f"/api/v1/sessions/{session_id}/cancel",
-            headers=auth_headers
-        )
+        mock_grp = MagicMock()
+        mock_grp.gr_gid = 1001
 
-        assert response.status_code == 200
-        data = response.json()
+        with patch("src.core.sessions.grp.getgrnam", return_value=mock_grp):
+            gid = _get_ag3ntum_gid()
+            assert gid == 1001
 
-        # Validate CancelResponse fields
-        assert "session_id" in data
-        assert "status" in data
-        assert "message" in data
-        assert data["session_id"] == session_id
+    @pytest.mark.unit
+    def test_get_ag3ntum_gid_raises_on_missing_group(self) -> None:
+        """_get_ag3ntum_gid raises KeyError when ag3ntum group missing."""
+        from src.core.sessions import _get_ag3ntum_gid
 
+        with patch("src.core.sessions.grp.getgrnam", side_effect=KeyError):
+            with pytest.raises(KeyError):
+                _get_ag3ntum_gid()
 
+    @pytest.mark.unit
+    def test_sudo_chown_uses_ag3ntum_group(self) -> None:
+        """_sudo_chown passes uid:ag3ntum (not uid:uid) to chown command."""
+        from src.core.sessions import _sudo_chown
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            _sudo_chown(MagicMock(spec_set=["__str__"]), 50000)
+
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown should use ag3ntum group, not UID. Got: {call_args}"
+            )
+
+    @pytest.mark.unit
+    def test_sudo_chown_recursive_uses_ag3ntum_group(self) -> None:
+        """sudo_chown_recursive passes uid:ag3ntum to chown -R."""
+        from src.core.sessions import sudo_chown_recursive
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            sudo_chown_recursive(MagicMock(spec_set=["__str__"]), 50000)
+
+            call_args = str(mock_run.call_args)
+            assert "50000:ag3ntum" in call_args, (
+                f"chown -R should use ag3ntum group. Got: {call_args}"
+            )

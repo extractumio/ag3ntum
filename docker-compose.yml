@@ -6,6 +6,15 @@
 #   AG3NTUM_WEB_PORT   - Web UI port on host (default: 50080)
 #   AG3NTUM_REDIS_PORT - Redis debug port on host (default: 46379)
 #   AG3NTUM_UID_MODE   - UID mapping mode: "isolated" (default) or "direct"
+#   AG3NTUM_MODE       - Deployment mode: "prod" (default) or "dev"
+#
+# Deployment Modes:
+#   prod (default): Web container serves pre-built static bundle (fast startup)
+#   dev:            Web container runs Vite dev server with HMR (see docker-compose.dev.yml)
+#
+# Both modes use two ports:
+#   - WEB_PORT (50080): Web UI
+#   - API_PORT (40080): API endpoint
 #
 # UID Security Modes:
 #   isolated (default): UIDs 50000-60000, doesn't map to host users (multi-tenant safe)
@@ -48,6 +57,7 @@ services:
       - ./tools:/tools:ro
       - ./tests:/tests:ro
       - ./scripts:/scripts:ro
+      - ./auto-generated:/auto-generated:ro
     ports:
       - "${AG3NTUM_API_PORT:-40080}:40080"
     cap_add:
@@ -75,23 +85,27 @@ services:
   ag3ntum-web:
     image: ag3ntum:${AG3NTUM_IMAGE_TAG:-latest}
     build: .
-    # Web container doesn't need shared GID — entrypoint drops to ag3ntum_api
+    # Production mode (default): serves pre-built static bundle from /web_dist.
+    # Dev mode overrides command/volumes via docker-compose.dev.yml for Vite HMR.
     entrypoint: ["/entrypoint-web.sh"]
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "50080"]
-    working_dir: /src/web_terminal_client
+    command:
+      - python3
+      - -m
+      - uvicorn
+      - src.web_frontend_server:app
+      - --host=0.0.0.0
+      - --port=50080
     environment:
       AG3NTUM_ROOT: "/"
       PYTHONPATH: "/"
-      AG3NTUM_WEB_PORT: "50080"
-      npm_config_cache: /tmp/.npm
+      AG3NTUM_MODE: "${AG3NTUM_MODE:-prod}"
     volumes:
       - ./config:/config
       - ./logs:/logs
-      - ./src:/src
-      - ./tests:/tests:ro
-      # Named volume for node_modules - Docker manages permissions internally
-      # This avoids host permission issues regardless of who runs install.sh
-      - web_node_modules:/src/web_terminal_client/node_modules
+      - ./src:/src:ro
+      # Mount generated config.yaml into the static bundle so port/hostname
+      # changes take effect on restart without requiring a full image rebuild.
+      - ./src/web_terminal_client/public/config.yaml:/web_dist/config.yaml:ro
     ports:
       - "${AG3NTUM_WEB_PORT:-50080}:50080"
     depends_on:
@@ -108,7 +122,4 @@ services:
       - "127.0.0.1:${AG3NTUM_REDIS_PORT:-46379}:6379"
     restart: unless-stopped
 
-# Named volumes for container-managed data
-volumes:
-  # node_modules for web frontend - managed by Docker to avoid host permission issues
-  web_node_modules:
+# Named volumes: web_node_modules defined in docker-compose.dev.yml (dev mode only)

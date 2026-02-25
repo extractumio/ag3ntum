@@ -797,3 +797,170 @@ class TestDockerToDisplayPath:
         validator = Ag3ntumPathValidator(config)
         result = validator.docker_to_display_path(mount_path / "apt" / "history.log")
         assert result == "external/ro/global_var_log/apt/history.log"
+
+
+# =============================================================================
+# Test: Path Encoding Attacks
+# =============================================================================
+
+class TestPathEncodingAttacks:
+    """Test path validation against various encoding-based attacks.
+
+    These tests verify that the PathValidator correctly handles
+    URL-encoded, double-encoded, backslash, and mixed-encoding
+    path traversal attempts. The validator works with filesystem
+    paths (not URLs), so URL encoding is treated as literal
+    characters and does not resolve to traversal.
+    """
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> Path:
+        """Create a temporary workspace directory."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        return workspace
+
+    @pytest.fixture
+    def validator(self, workspace: Path) -> Ag3ntumPathValidator:
+        """Create a validator with default config."""
+        config = PathValidatorConfig(workspace_path=workspace)
+        return Ag3ntumPathValidator(config)
+
+    def test_url_encoded_traversal(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """URL-encoded traversal: %2e%2e%2fetc%2fpasswd.
+
+        The PathValidator operates on filesystem paths, not URLs.
+        URL-encoded characters are treated as literal filename characters,
+        not decoded to '../etc/passwd'. The path resolves within workspace
+        as a file literally named '%2e%2e%2fetc%2fpasswd'.
+        """
+        # This should either:
+        # 1. Resolve within workspace (as literal filename) - ALLOWED
+        # 2. Be caught by boundary check if somehow decoded - BLOCKED
+        # Either outcome is acceptable for security
+        try:
+            result = validator.validate_path("%2e%2e%2fetc%2fpasswd", "read")
+            # If it passes, it must resolve within workspace
+            assert str(result.normalized).startswith(str(validator.workspace))
+        except PathValidationError:
+            pass  # Also acceptable - blocked is safe
+
+    def test_double_encoded_traversal(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Double-encoded traversal: %252e%252e%252f.
+
+        Double encoding is a technique to bypass first-pass decoding.
+        PathValidator treats these as literal characters.
+        """
+        try:
+            result = validator.validate_path("%252e%252e%252f", "read")
+            assert str(result.normalized).startswith(str(validator.workspace))
+        except PathValidationError:
+            pass  # Blocked is safe
+
+    def test_backslash_traversal(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        r"""Backslash traversal: ..\etc\passwd.
+
+        On Linux, backslash is a valid filename character, not a path
+        separator. The path resolves within workspace as a file literally
+        containing backslashes in its name.
+        """
+        try:
+            result = validator.validate_path("..\\etc\\passwd", "read")
+            # On Linux, this is treated as a literal filename with backslashes
+            # It should still be within workspace
+            assert str(result.normalized).startswith(str(validator.workspace))
+        except PathValidationError:
+            pass  # Also acceptable
+
+    def test_mixed_encoding_traversal(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Mixed encoding: ..%2Fetc/passwd.
+
+        Combines literal '..' with URL-encoded '/' and normal '/'.
+        PathValidator treats '%2F' as a literal character (not decoded),
+        so '..%2Fetc' is a single filename component that resolves
+        within workspace. Traversal detection warns but path is safe.
+        """
+        # PathValidator doesn't URL-decode; '..%2Fetc' resolves
+        # as literal filename in workspace/etc/passwd
+        result = validator.validate_path("..%2Fetc/passwd", "read")
+        assert str(result.normalized).startswith(
+            str(validator.workspace)
+        )
+
+    def test_dot_dot_with_encoded_separator(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Path with literal '..' and encoded separator: ..%2f.
+
+        PathValidator treats '%2f' as a literal character, so '..%2f'
+        is a single filename component (not a traversal). The '..'
+        prefix triggers a warning but the path resolves within workspace.
+        """
+        # PathValidator doesn't URL-decode; '..%2f' is a literal filename
+        result = validator.validate_path("..%2f", "read")
+        assert str(result.normalized).startswith(
+            str(validator.workspace)
+        )
+
+    def test_unicode_slash_attack(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Unicode characters that look like slash: /../ etc.
+
+        Test that unicode normalization doesn't create traversal.
+        """
+        # Fullwidth solidus (U+FF0F) looks like / but is a different character
+        try:
+            result = validator.validate_path(
+                "..\uff0fetc\uff0fpasswd", "read"
+            )
+            # '..' triggers traversal via standard path resolution
+            # but \uff0f is not a path separator on Linux
+            # This should either resolve in workspace or be blocked
+            if result:
+                assert str(result.normalized).startswith(
+                    str(validator.workspace)
+                )
+        except PathValidationError:
+            pass  # Blocked is safe
+
+    def test_null_byte_before_extension(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Null byte injection: file.txt%00.env.
+
+        Null bytes are dangerous in C-based systems but Python handles them.
+        The PathValidator should reject or safely handle null bytes.
+        """
+        with pytest.raises((PathValidationError, ValueError)):
+            validator.validate_path("file.txt\x00.env", "read")
+
+    def test_overlong_utf8_dot(
+        self, validator: Ag3ntumPathValidator
+    ) -> None:
+        """Overlong UTF-8 encoding of dot character.
+
+        In theory, overlong sequences could bypass dot-dot checks.
+        Python's string handling normalizes these before they reach
+        the filesystem, preventing the attack.
+        """
+        # This tests that the path with unusual dot-like chars
+        # doesn't escape the workspace
+        try:
+            result = validator.validate_path(
+                "\xc0\xae\xc0\xae/etc/passwd", "read"
+            )
+            if result:
+                assert str(result.normalized).startswith(
+                    str(validator.workspace)
+                )
+        except (PathValidationError, ValueError, UnicodeError):
+            pass  # Any rejection is safe

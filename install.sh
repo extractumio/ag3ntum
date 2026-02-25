@@ -4,10 +4,15 @@
 # https://github.com/extractumio/ag3ntum
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/release/install.sh | bash
 #
 # Or download and run:
 #   chmod +x install.sh && ./install.sh
+#
+# Options:
+#   --dev          Development mode (Vite dev server, clones 'main' branch)
+#   --branch B     Clone specific branch (default: 'release')
+#   --help         Show help
 #
 # This script:
 #   1. Checks prerequisites (Docker, Git)
@@ -26,20 +31,24 @@ set -euo pipefail
 
 REPO_URL="https://github.com/extractumio/ag3ntum.git"
 MIN_DOCKER_VERSION="20.10"
+DEFAULT_BRANCH="release"
 
 # Braille spinner frames (same as web terminal)
 SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 # Colors (ANSI escape codes)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m' # No Color
+# Use $'...' syntax so escape sequences are interpreted at assignment time.
+# Single quotes ('\033[...') store the literal backslash sequence, which
+# only works with echo -e or printf — plain echo leaves them unrendered.
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+WHITE=$'\033[0;37m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m' # No Color
 
 # Configuration defaults
 DEFAULT_API_PORT="40080"
@@ -207,6 +216,36 @@ check_port_available() {
     else
         # Cannot check, assume available
         return 0
+    fi
+}
+
+# Reclaim ownership of files left by a previous build using Docker (no sudo needed).
+# Container entrypoint chowns data dirs and secrets to UID 45045. On Linux, re-running
+# the installer without this would fail on file writes. Uses Docker to fix ownership.
+# macOS/Windows use Docker Desktop which handles permissions transparently.
+reclaim_previous_build_ownership() {
+    local os_type
+    os_type="$(uname -s)"
+
+    # Only needed on Linux, and only as a non-root user
+    if [[ "${os_type}" != "Linux" ]] || [[ "$(id -u)" == "0" ]]; then
+        return 0
+    fi
+
+    local needs_reclaim=0
+
+    # Check config files (secrets.yaml gets chowned to 45045 by container entrypoint)
+    for f in config/*; do
+        if [[ -f "$f" ]] && [[ ! -w "$f" ]]; then
+            needs_reclaim=1
+            break
+        fi
+    done
+
+    if [[ "$needs_reclaim" == "1" ]]; then
+        print_info "Reclaiming config file ownership from previous build..."
+        docker run --rm -v "$(pwd)/config:/config" alpine chown -R "$(id -u):$(id -g)" /config
+        print_success "Ownership reclaimed"
     fi
 }
 
@@ -415,13 +454,13 @@ setup_repository() {
     fi
 
     # Clone the repository
-    print_info "Cloning Ag3ntum repository..."
+    print_info "Cloning Ag3ntum repository (branch: ${AG3NTUM_BRANCH})..."
 
     # Clone with progress indicator
     local clone_output
     clone_output=$(mktemp)
 
-    (git clone --depth 1 "$REPO_URL" ag3ntum > "$clone_output" 2>&1) &
+    (git clone --depth 1 --branch "$AG3NTUM_BRANCH" "$REPO_URL" ag3ntum > "$clone_output" 2>&1) &
     local clone_pid=$!
 
     if ! spinner $clone_pid "Cloning repository"; then
@@ -517,7 +556,7 @@ gather_configuration() {
         print_warning "Invalid port number (must be 1024-65535)"
     done
 
-    # Web UI port
+    # Web UI port (used in both prod and dev modes)
     while true; do
         prompt_text "Web UI port" "$DEFAULT_WEB_PORT" WEB_PORT
         if validate_port "$WEB_PORT"; then
@@ -577,28 +616,11 @@ anthropic_api_key: ${ANTHROPIC_API_KEY}
 fernet_key: ${fernet_key}
 EOF
 
-    # Secure the file - owned by API user (UID 45045) with mode 600
-    # On Linux, the API container runs as UID 45045 and needs to read this file
-    local os_type
-    os_type="$(uname -s)"
-
-    if [[ "${os_type}" == "Darwin" ]] || [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-        # macOS/Windows: Docker Desktop handles permissions - just secure the file
-        chmod 600 config/secrets.yaml
-    else
-        # Linux: Set ownership to API user (UID 45045) so container can read it
-        if [[ "$(id -u)" == "0" ]]; then
-            chown 45045:45045 config/secrets.yaml
-        else
-            sudo chown 45045:45045 config/secrets.yaml
-        fi
-        chmod 600 config/secrets.yaml
-    fi
-
     # Clear the variable from memory
     unset ANTHROPIC_API_KEY
 
-    print_success "secrets.yaml created (permissions: 600, owner: 45045)"
+    # Container entrypoint will chown 45045 + chmod 600 at startup
+    print_success "secrets.yaml created (container entrypoint will secure permissions)"
 }
 
 generate_api_yaml() {
@@ -821,6 +843,12 @@ generate_configuration() {
         exit 1
     fi
 
+    # Reclaim ownership of files left by a previous build.
+    # run.sh build chowns logs/, data/, users/ to UID 45045. install.sh itself
+    # chowns config/secrets.yaml to 45045. On re-install these files become
+    # unwritable by the current user. Reclaim everything we need to touch.
+    reclaim_previous_build_ownership
+
     # Generate all configuration files
     generate_secrets_yaml
     generate_api_yaml
@@ -862,12 +890,19 @@ run_build() {
     print_info "This may take 5-10 minutes on first build..."
     echo ""
 
-    # Export port variables for run.sh to read from config
+    # Export port variables and mode for run.sh
     export AG3NTUM_API_PORT="$API_PORT"
     export AG3NTUM_WEB_PORT="$WEB_PORT"
+    export AG3NTUM_MODE="$AG3NTUM_MODE"
+
+    # Build command: add --dev flag if in dev mode
+    local build_flags="--no-cache"
+    if [[ "$AG3NTUM_MODE" == "dev" ]]; then
+        build_flags="--no-cache --dev"
+    fi
 
     # Run the build with output (use 'build' not 'rebuild' to preserve generated config)
-    if ! ./run.sh build --no-cache; then
+    if ! ./run.sh build ${build_flags}; then
         print_error "Build failed"
         echo ""
         echo "Check the output above for errors."
@@ -879,23 +914,146 @@ run_build() {
     print_success "Build completed successfully"
 }
 
+wait_for_api() {
+    local max_wait=60
+    local interval=2
+    local elapsed=0
+    local health_url="http://localhost:${API_PORT:-40080}/api/v1/health"
+
+    print_info "Waiting for API to be ready..."
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if curl -sf "$health_url" >/dev/null 2>&1; then
+            print_success "API is ready"
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    print_warning "API health check timed out after ${max_wait}s (continuing anyway)"
+    return 0
+}
+
 create_admin_user() {
     print_step "Creating Admin User"
 
+    # Wait for API to be fully initialized (DB migrations, user sync, etc.)
+    # before attempting to create a user via docker exec
+    wait_for_api
+
     print_info "Creating user: $ADMIN_USERNAME ($ADMIN_EMAIL)"
 
-    if ! ./run.sh create-user \
+    # Attempt to create the user, capturing output to detect "already exists"
+    local create_output
+    create_output=$(mktemp)
+
+    if ./run.sh create-user \
         --username="$ADMIN_USERNAME" \
         --email="$ADMIN_EMAIL" \
         --password="$ADMIN_PASSWORD" \
-        --admin; then
+        --admin > "$create_output" 2>&1; then
+        cat "$create_output"
+        rm -f "$create_output"
+        print_success "Admin user created"
+    elif grep -qi "already exists" "$create_output"; then
+        # User or Linux account already exists — ask whether to replace or keep
+        rm -f "$create_output"
+        echo ""
+        print_warning "User '$ADMIN_USERNAME' already exists."
+        echo ""
+        echo "  ${BOLD}Replace${NC} — Delete and recreate with the new credentials you just entered."
+        echo "  ${BOLD}Keep${NC}    — Keep the existing account (login with your previous password)."
+        echo ""
+
+        if prompt_yesno "Replace existing user with new credentials?" "n"; then
+            print_info "Replacing user (delete + recreate in single transaction)..."
+
+            # Use a single Python process to delete-if-exists then create.
+            # This avoids the race condition / DB mismatch that occurs when
+            # delete_user.py and create_user.py run as separate processes
+            # while the API server also holds the database open.
+            # Credentials are passed via env vars to avoid shell injection from
+            # special characters in passwords.
+            if ! docker compose exec -T -u root \
+                -e "_INSTALL_USERNAME=$ADMIN_USERNAME" \
+                -e "_INSTALL_EMAIL=$ADMIN_EMAIL" \
+                -e "_INSTALL_PASSWORD=$ADMIN_PASSWORD" \
+                ag3ntum-api \
+                python3 -c '
+import asyncio, sys, os
+sys.path.insert(0, "/")
+os.environ.setdefault("AG3NTUM_ROOT", "/")
+
+from src.db.database import AsyncSessionLocal, init_db, engine
+from src.db import models
+from src.services.user_service import user_service
+from sqlalchemy import select
+
+username = os.environ["_INSTALL_USERNAME"]
+email = os.environ["_INSTALL_EMAIL"]
+password = os.environ["_INSTALL_PASSWORD"]
+
+async def replace_user():
+    await init_db()
+    # Step 1: Delete any DB records that would conflict (by username OR email,
+    # matching the same uniqueness check that create_user uses).
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(models.User).where(
+                (models.User.username == username) | (models.User.email == email)
+            )
+        )
+        conflicts = result.scalars().all()
+        if conflicts:
+            for row in conflicts:
+                print(f"Deleting conflicting user: {row.username} ({row.email})")
+                await user_service.delete_user(db=db, username=row.username, delete_linux_user=True)
+        else:
+            print("No conflicting DB records (Linux user may exist, proceeding).")
+
+    # Step 2: Create fresh
+    async with AsyncSessionLocal() as db:
+        user = await user_service.create_user(
+            db=db,
+            username=username,
+            email=email,
+            password=password,
+            role="admin",
+        )
+        print(f"User created: {user.username} (UID {user.linux_uid})")
+
+    await engine.dispose()
+
+asyncio.run(replace_user())
+'; then
+                print_error "Failed to replace admin user"
+                echo ""
+                echo "Try manually:"
+                echo "  ${CYAN}./run.sh delete-user --username=$ADMIN_USERNAME --force${NC}"
+                echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
+                exit 1
+            fi
+            print_success "Admin user replaced successfully"
+        else
+            print_success "Keeping existing admin user '$ADMIN_USERNAME'"
+            print_info "Login with your previous credentials"
+            ADMIN_EMAIL="(previous email)"
+        fi
+    else
+        # Some other failure
+        cat "$create_output"
+        rm -f "$create_output"
         print_warning "Failed to create admin user automatically"
         echo ""
         echo "You can create it manually:"
         echo "  ${CYAN}./run.sh create-user --username=$ADMIN_USERNAME --email=$ADMIN_EMAIL --password=YOUR_PASSWORD --admin${NC}"
-    else
-        print_success "Admin user created"
     fi
+
+    # Restart API so the process inherits the new user's group (Gotcha #12).
+    # Without this, session directory access fails with PermissionError.
+    print_info "Restarting API to activate user access..."
+    docker compose restart ag3ntum-api 2>/dev/null || true
+    wait_for_api
 
     # Clear password from memory
     unset ADMIN_PASSWORD
@@ -936,11 +1094,16 @@ EOF
     echo ""
 
     local protocol="http"
-    local web_url="${protocol}://${SERVER_HOSTNAME}:${WEB_PORT}"
     local api_url="${protocol}://${SERVER_HOSTNAME}:${API_PORT}"
+    local web_url="${protocol}://${SERVER_HOSTNAME}:${WEB_PORT}"
 
     printf "${BOLD}Web Interface:${NC}  ${CYAN}%s${NC}\n" "$web_url"
     printf "${BOLD}API Endpoint:${NC}   ${CYAN}%s/api/v1${NC}\n" "$api_url"
+    if [[ "$AG3NTUM_MODE" == "dev" ]]; then
+        print_dim "  (Dev mode: Vite dev server with HMR)"
+    else
+        print_dim "  (Prod mode: pre-built static bundle)"
+    fi
     echo ""
     printf "${BOLD}Login with:${NC}\n"
     printf "  Email:    ${WHITE}%s${NC}\n" "$ADMIN_EMAIL"
@@ -981,7 +1144,56 @@ trap cleanup_on_exit EXIT INT TERM
 # MAIN
 # =============================================================================
 
+show_install_usage() {
+    echo "Ag3ntum Installer"
+    echo ""
+    echo "Usage: install.sh [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --dev          Development mode (Vite dev server, clones 'main' branch)"
+    echo "  --branch B     Clone specific branch (default: '${DEFAULT_BRANCH}')"
+    echo "  --help, -h     Show this help"
+    echo ""
+    echo "Default: production mode from '${DEFAULT_BRANCH}' branch"
+    echo ""
+    echo "Examples:"
+    echo "  install.sh                  # Production from 'release' branch"
+    echo "  install.sh --dev            # Development from 'main' branch"
+    echo "  install.sh --branch main    # Production from 'main' branch"
+}
+
 main() {
+    # Parse arguments
+    AG3NTUM_BRANCH="${DEFAULT_BRANCH}"
+    AG3NTUM_MODE="prod"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dev)
+                AG3NTUM_MODE="dev"
+                AG3NTUM_BRANCH="main"
+                shift
+                ;;
+            --branch)
+                AG3NTUM_BRANCH="${2:?'--branch requires a value'}"
+                shift 2
+                ;;
+            --branch=*)
+                AG3NTUM_BRANCH="${1#*=}"
+                shift
+                ;;
+            --help|-h)
+                show_install_usage
+                exit 0
+                ;;
+            *)
+                print_error "Unknown argument: $1"
+                show_install_usage
+                exit 1
+                ;;
+        esac
+    done
+
     # Show welcome banner
     show_banner
 
@@ -989,6 +1201,7 @@ main() {
     detect_os
 
     print_dim "Detected OS: $DETECTED_OS"
+    print_dim "Mode: ${AG3NTUM_MODE} | Branch: ${AG3NTUM_BRANCH}"
     echo ""
 
     # Check prerequisites

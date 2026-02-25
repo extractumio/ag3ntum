@@ -731,7 +731,7 @@ class TestGetAllMountsWithHostPaths:
     @pytest.fixture
     def mock_manifest(self, tmp_path: Path, monkeypatch) -> Path:
         """Create mock manifest file."""
-        manifest_dir = tmp_path / "data" / "auto-generated"
+        manifest_dir = tmp_path / "auto-generated"
         manifest_dir.mkdir(parents=True)
         manifest_path = manifest_dir / "auto-generated-mounts.yaml"
 
@@ -761,8 +761,8 @@ mounts:
         # Patch the manifest path
         monkeypatch.setattr(
             "src.services.mount_service.Path",
-            lambda p: Path(str(p).replace("/data/auto-generated", str(manifest_dir)))
-            if "/data/auto-generated" in str(p)
+            lambda p: Path(str(p).replace("/auto-generated", str(manifest_dir)))
+            if "/auto-generated" in str(p)
             else Path(p)
         )
 
@@ -814,7 +814,7 @@ class TestGetPathDisplayMapping:
     @pytest.fixture
     def mock_manifest_for_display(self, tmp_path: Path, monkeypatch) -> Path:
         """Create mock manifest file for path display mapping tests."""
-        manifest_dir = tmp_path / "data" / "auto-generated"
+        manifest_dir = tmp_path / "auto-generated"
         manifest_dir.mkdir(parents=True)
         manifest_path = manifest_dir / "auto-generated-mounts.yaml"
 
@@ -847,7 +847,7 @@ mounts:
 
         def patched_path(p):
             p_str = str(p)
-            if p_str == "/data/auto-generated/auto-generated-mounts.yaml":
+            if p_str == "/auto-generated/auto-generated-mounts.yaml":
                 return original_path(manifest_path)
             return original_path(p)
 

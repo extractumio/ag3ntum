@@ -176,6 +176,20 @@ copy_configs() {
     echo "  Warning: api.yaml not found in main worktree — copy from api.yaml.example"
   fi
 
+  # agent.yaml
+  if [[ -f "${SCRIPT_DIR}/config/agent.yaml" ]]; then
+    cp "${SCRIPT_DIR}/config/agent.yaml" "${config_dir}/agent.yaml"
+    echo "  Copied: agent.yaml"
+  else
+    echo "  Warning: agent.yaml not found in main worktree — copy from agent.yaml.example"
+  fi
+
+  # llm-api-proxy.yaml (if exists)
+  if [[ -f "${SCRIPT_DIR}/config/llm-api-proxy.yaml" ]]; then
+    cp "${SCRIPT_DIR}/config/llm-api-proxy.yaml" "${config_dir}/llm-api-proxy.yaml"
+    echo "  Copied: llm-api-proxy.yaml"
+  fi
+
   # external-mounts.yaml (if exists)
   if [[ -f "${SCRIPT_DIR}/config/external-mounts.yaml" ]]; then
     cp "${SCRIPT_DIR}/config/external-mounts.yaml" "${config_dir}/external-mounts.yaml"

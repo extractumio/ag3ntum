@@ -19,11 +19,22 @@ USED_MOUNT_NAMES=""
 IMAGE_PREFIX="ag3ntum"  # Image name prefix
 CONTAINER_UID="45045"   # UID of ag3ntum_api user inside container
 
+# Config file registry: "relative_path:tier"
+# REQUIRED_SECRET = fail with instructions if missing (contains credentials)
+# REQUIRED_SAFE   = auto-create from .example template if missing
+CONFIG_REGISTRY=(
+  "config/secrets.yaml:REQUIRED_SECRET"
+  "config/agent.yaml:REQUIRED_SAFE"
+  "config/api.yaml:REQUIRED_SAFE"
+  "config/external-mounts.yaml:REQUIRED_SAFE"
+  "config/llm-api-proxy.yaml:REQUIRED_SAFE"
+)
+
 # Reserved mount names that cannot be used
 RESERVED_NAMES=("persistent" "ro" "rw" "external" "dynamic")
 
-# Safely remove a file that may be owned by root (from a previous container build).
-# Uses sudo only on Linux and only when the file exists and is not owned by the current user.
+# Safely remove a file that may be owned by container UID (from a previous build).
+# Uses Docker to remove files that the host user cannot — no sudo needed.
 function safe_remove_file() {
   local file="$1"
   [[ ! -e "${file}" ]] && return 0
@@ -33,41 +44,37 @@ function safe_remove_file() {
     return 0
   fi
 
-  # On Linux, fall back to sudo for container-owned files
-  local os_type
-  os_type="$(uname -s)"
-  if [[ "${os_type}" == "Linux" ]]; then
-    sudo rm -f "$(pwd)/${file}" 2>/dev/null || {
-      echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
-      return 0
-    }
-  else
-    echo "Warning: Cannot remove ${file}. Check file permissions."
+  # Fall back to Docker for container-owned files (no sudo needed)
+  local dir
+  dir="$(dirname "${file}")"
+  local base
+  base="$(basename "${file}")"
+  docker run --rm -v "$(pwd)/${dir}:/work" alpine rm -f "/work/${base}" 2>/dev/null || {
+    echo "Warning: Cannot remove ${file} (owned by container UID ${CONTAINER_UID}). Continuing."
     return 0
-  fi
+  }
 }
 
-# Directories that container needs to WRITE to (need ownership fix on Linux)
-# Note: node_modules uses a named Docker volume (see docker-compose.yml) to avoid permission issues
-# src/web_terminal_client needs write access for Vite's temp files during dev mode
+# Directories that container needs to WRITE to (ownership managed by container entrypoint)
+# Note: node_modules uses a named Docker volume at /app/node_modules (outside /src:ro mount)
 WRITABLE_DIRS=("logs" "data" "users")
 
-# Directories that need to exist but should stay user-owned (for script to write, container reads)
-SCRIPT_DIRS=("data/auto-generated")
-
 # Directories that container only READS from (just need to exist)
-READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests")
+READABLE_DIRS=("config" "src" "prompts" "skills" "tools" "tests" "auto-generated")
 
 function show_usage() {
   cat <<EOF
 Usage: ./run.sh <command> [OPTIONS]
 
 Commands:
+  setup              Install dev tools (Python venv + Node deps + pre-commit hooks)
   build              Build and deploy the containers
   cleanup            Stop containers and remove images (full cleanup)
   restart            Restart containers to reload code (preserves data)
   rebuild            Full cleanup + build (equivalent to: cleanup && build)
   test               Run tests inside the Docker container
+  lint               Run linters (flake8, bandit, mypy, eslint, tsc, structural)
+  audit              Run dependency vulnerability scan (pip-audit)
   shell              Open a shell inside the API container
   create-user        Create a new user account (uses AG3NTUM_UID_MODE setting)
   delete-user        Delete a user account
@@ -79,6 +86,7 @@ UID Security Modes:
   See docs/UID-SECURITY.md for details
 
 Options:
+  --dev                 Development mode (Vite dev server with HMR on separate port)
   --mount-rw=PATH:NAME  Mount host PATH as read-write (accessible at ./external/rw/NAME)
   --mount-rw=PATH       Mount host PATH as read-write (name defaults to basename)
   --mount-ro=PATH:NAME  Mount host PATH as read-only (accessible at ./external/ro/NAME)
@@ -86,13 +94,16 @@ Options:
   --no-cache            Force rebuild without Docker cache (for build/rebuild)
   --help                Show this help message
 
+Deployment Modes:
+  prod (default)  Web container serves pre-built static bundle (fast startup)
+  dev (--dev)     Web container runs Vite dev server with HMR (hot-reload)
+
 Test Options (for 'test' command):
   (no args)               Run ALL tests (backend + security + E2E + UI)
   --quick                 Run only quick tests (exclude E2E and slow tests)
   --backend               Run only backend tests (Python/pytest)
   --ui                    Run only UI tests (React/vitest)
-  --subset <names>        Run specific backend tests by name (comma-separated)
-                          Examples: "auth", "sessions,streaming", "ask_user_question"
+  --core                  Run only core agent tests (orchestration, hooks, patterns)
 
 External Mount Configuration:
   Mounts can be configured via:
@@ -139,8 +150,7 @@ General Examples:
   ./run.sh test --quick                  # Run quick tests only (no E2E/slow)
   ./run.sh test --backend                # Run backend tests only
   ./run.sh test --ui                     # Run UI/React tests only
-  ./run.sh test --subset auth            # Run auth tests only
-  ./run.sh test --subset sessions,auth   # Run sessions and auth tests
+  ./run.sh test --core                   # Run core agent tests only
   ./run.sh shell                         # Open shell in container
 
 Multi-Instance (Worktrees):
@@ -158,136 +168,80 @@ CLI Hints:
 EOF
 }
 
-# Check if user has privileges to set directory ownership (Linux only)
-# Called early to fail fast with a clear message
-function check_privileges() {
-  local os_type
-  os_type="$(uname -s)"
-
-  # macOS - Docker Desktop handles permissions automatically
-  if [[ "${os_type}" == "Darwin" ]]; then
-    return 0
-  fi
-
-  # Windows environments (Git Bash, MINGW, Cygwin) - Docker Desktop handles permissions
-  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-    return 0
-  fi
-
-  # At this point we're on Linux (native or WSL)
-  # Running as root - all good
-  if [[ "$(id -u)" == "0" ]]; then
-    return 0
-  fi
-
-  # Check if sudo is available and user has passwordless sudo (or cached credentials)
-  if ! command -v sudo &>/dev/null; then
-    echo ""
-    echo "ERROR: This script requires root privileges to set directory ownership."
-    echo ""
-    echo "The container runs as UID ${CONTAINER_UID} and needs write access to data directories."
-    echo "Please run as root or install sudo:"
-    echo ""
-    echo "  sudo ./run.sh $*"
-    echo ""
-    exit 1
-  fi
-
-  # Test if sudo chown works (using actual command that will be needed)
-  # This allows specific sudoers rules for chown without requiring general sudo access
-  local test_dir="$(pwd)/${WRITABLE_DIRS[0]}"
-  mkdir -p "${test_dir}" 2>/dev/null || true
-
-  if ! sudo -n chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
-    echo ""
-    echo "NOTE: This script requires sudo privileges to set directory ownership."
-    echo "You may be prompted for your password."
-    echo ""
-    # Try sudo with prompt - if it fails, user doesn't have sudo access
-    if ! sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${test_dir}" 2>/dev/null; then
-      echo ""
-      echo "ERROR: Cannot obtain sudo privileges for chown."
-      echo "Please run as root or add to /etc/sudoers.d/ag3ntum:"
-      echo ""
-      echo "  ${USER} ALL=(ALL) NOPASSWD: /usr/bin/chown -R ${CONTAINER_UID}\\:${CONTAINER_UID} $(pwd)/*"
-      echo ""
-      exit 1
-    fi
-  fi
-
-  return 0
-}
-
-# Setup directories with proper ownership for container user
-# Container runs as ag3ntum_api (UID 45045) - see Dockerfile
+# Setup directories — just ensure they exist.
+# Permissions are managed by the container entrypoint (runs as root before dropping to 45045).
 function setup_directories() {
   echo "=== Setting up directories ==="
 
-  # Check privileges early - fail fast with clear message
-  check_privileges
-
-  # Create all required directories
-  # On Linux, parent dirs may be owned by container UID from previous runs, so use sudo if needed
-  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}" "${SCRIPT_DIRS[@]}"; do
+  for dir in "${WRITABLE_DIRS[@]}" "${READABLE_DIRS[@]}"; do
     if [[ ! -d "${dir}" ]]; then
       echo "  Creating ${dir}/"
-      mkdir -p "${dir}" 2>/dev/null || sudo mkdir -p "$(pwd)/${dir}"
+      mkdir -p "${dir}"
     fi
   done
 
-  # On macOS and Windows, Docker Desktop handles file permissions automatically
-  # via its virtualization layer - no ownership changes needed
-  local os_type
-  os_type="$(uname -s)"
-
-  if [[ "${os_type}" == "Darwin" ]]; then
-    echo "  macOS: Docker Desktop handles permissions automatically"
-    echo "  Directories ready"
-    return
+  # Ensure skills directory is world-readable so sandbox users (running as
+  # unprivileged UIDs in bubblewrap) can read skill files via "other" permissions
+  if [[ -d "skills" ]]; then
+    chmod -R o+rX skills 2>/dev/null || true
   fi
 
-  if [[ "${os_type}" == MINGW* ]] || [[ "${os_type}" == CYGWIN* ]] || [[ "${os_type}" == MSYS* ]]; then
-    echo "  Windows: Docker Desktop handles permissions automatically"
-    echo "  Directories ready"
-    return
-  fi
+  echo "  Directories ready (permissions managed by container entrypoint)"
+}
 
-  # On Linux (native or WSL), set ownership of writable directories to container user (UID 45045)
-  echo "  Linux: Setting ownership to UID ${CONTAINER_UID} for writable directories"
+# Validate config files from CONFIG_REGISTRY.
+# Auto-creates REQUIRED_SAFE configs from .example templates.
+# Fails with instructions for missing REQUIRED_SECRET configs.
+function validate_and_provision_configs() {
+  local missing_secrets=()
 
-  for dir in "${WRITABLE_DIRS[@]}"; do
-    local current_uid
-    current_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
+  for entry in "${CONFIG_REGISTRY[@]}"; do
+    local cfg="${entry%%:*}"
+    local tier="${entry##*:}"
 
-    if [[ "${current_uid}" != "${CONTAINER_UID}" ]]; then
-      if [[ "$(id -u)" == "0" ]]; then
-        # Running as root - can chown directly
-        echo "  Setting ownership: ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "${dir}"
+    # Already exists — nothing to do
+    if [[ -f "${cfg}" ]]; then
+      continue
+    fi
+
+    if [[ "${tier}" == "REQUIRED_SAFE" ]]; then
+      # Auto-create from .example template
+      if [[ "${cfg}" == "config/external-mounts.yaml" ]]; then
+        # Special case: .example contains sample paths that fail mount validation.
+        # Create a minimal empty config instead.
+        cat > "${cfg}" <<'EXTMOUNTS'
+# External mounts configuration
+# See external-mounts.yaml.example for documentation and examples.
+original_paths:
+  ro: []
+  rw: []
+EXTMOUNTS
+        echo "INFO: Created ${cfg} (minimal empty config)"
+      elif [[ -f "${cfg}.example" ]]; then
+        cp "${cfg}.example" "${cfg}"
+        echo "INFO: Created ${cfg} from ${cfg}.example — review and adjust as needed"
       else
-        # Running as regular user - need sudo (already verified in check_privileges)
-        # Use full path for sudoers rule matching
-        echo "  Setting ownership (sudo): ${dir}/ -> ${CONTAINER_UID}:${CONTAINER_UID}"
-        sudo chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${dir}"
+        echo "WARNING: ${cfg} is missing and no .example template found"
       fi
+    elif [[ "${tier}" == "REQUIRED_SECRET" ]]; then
+      missing_secrets+=("${cfg}")
     fi
   done
 
-  # SCRIPT_DIRS should be user-owned (script writes, container reads)
-  # This MUST happen AFTER the WRITABLE_DIRS loop above, because chown -R on parent
-  # dirs (like "data") would otherwise overwrite these subdirectories
-  for dir in "${SCRIPT_DIRS[@]}"; do
-    if [[ -d "${dir}" ]]; then
-      local owner_uid
-      owner_uid=$(stat -c '%u' "${dir}" 2>/dev/null || echo "0")
-      if [[ "${owner_uid}" != "$(id -u)" ]]; then
-        echo "  Fixing ownership (sudo): ${dir}/ -> $(id -u):$(id -g)"
-        sudo chown -R "$(id -u):$(id -g)" "$(pwd)/${dir}"
+  if [[ ${#missing_secrets[@]} -gt 0 ]]; then
+    echo ""
+    echo "ERROR: Required secret configuration files are missing:"
+    for cfg in "${missing_secrets[@]}"; do
+      echo "  - ${cfg}"
+      if [[ -f "${cfg}.example" ]]; then
+        echo "    Create from example: cp ${cfg}.example ${cfg}"
       fi
-    fi
-  done
-
-  echo "  Directories ready"
+    done
+    echo ""
+    echo "These files contain credentials and cannot be auto-generated."
+    echo "Run install.sh for guided setup, or create them manually from .example files."
+    exit 1
+  fi
 }
 
 # Validate and process a mount specification
@@ -474,7 +428,7 @@ NO_CACHE=""
 TEST_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|cleanup|restart|rebuild|test|shell|create-user|delete-user|cleanup-test-users)
+    setup|build|cleanup|restart|rebuild|test|lint|audit|shell|create-user|delete-user|cleanup-test-users)
       ACTION="$1"
       shift
       # For test command, collect remaining args
@@ -532,6 +486,10 @@ while [[ $# -gt 0 ]]; do
       MOUNTS_RO+=("$validated")
       shift
       ;;
+    --dev)
+      AG3NTUM_MODE="dev"
+      shift
+      ;;
     --no-cache)
       NO_CACHE="--no-cache"
       shift
@@ -552,6 +510,36 @@ if [[ -z "${ACTION}" ]]; then
   show_usage
   exit 1
 fi
+
+# =============================================================================
+# Mode Detection (prod vs dev)
+# =============================================================================
+# Priority: CLI --dev flag > AG3NTUM_MODE env var > .env file > default (prod)
+#
+# Both modes serve Web UI on WEB_PORT (50080) and API on API_PORT (40080).
+#
+# prod (default): Web container serves pre-built static bundle (fast startup,
+#                 no node_modules, no npm install).
+# dev:            Web container runs Vite dev server with HMR and hot-reload.
+if [[ -z "${AG3NTUM_MODE:-}" ]]; then
+  if [[ -f .env ]] && grep -q '^AG3NTUM_MODE=' .env; then
+    AG3NTUM_MODE="$(grep '^AG3NTUM_MODE=' .env | cut -d= -f2)"
+  else
+    AG3NTUM_MODE="prod"
+  fi
+fi
+
+# Compose command varies by mode
+if [[ "${AG3NTUM_MODE}" == "dev" ]]; then
+  COMPOSE_CMD="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
+else
+  COMPOSE_CMD="docker compose"
+fi
+
+# Compose command that always includes the web service with dev overlay (for UI tests).
+# In prod mode, docker-compose.yml already includes the web service, but UI tests need
+# the dev overlay for node_modules volume and Vite dev server.
+COMPOSE_WITH_WEB="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
 
 function read_config_value() {
   local key="$1"
@@ -613,16 +601,11 @@ function render_ui_config() {
   PROTOCOL="$(read_config_value 'server.protocol' 'http')"
 
   local target="src/web_terminal_client/public/config.yaml"
-  local target_dir
-  target_dir="$(dirname "${target}")"
 
   # Remove existing file first (may be owned by container user from previous build)
   safe_remove_file "${target}"
 
-  # On Linux, the parent directory may be owned by container UID (45045) from a
-  # previous build. Write to a temp file and sudo-move if not writable.
-  if [[ -w "${target_dir}" ]]; then
-    cat > "${target}" <<EOF
+  cat > "${target}" <<EOF
 server:
   port: ${WEB_PORT}
   host: "0.0.0.0"
@@ -636,27 +619,6 @@ ui:
   max_output_lines: 1000
   auto_scroll: true
 EOF
-  else
-    local tmpfile
-    tmpfile="$(mktemp)"
-    cat > "${tmpfile}" <<EOF
-server:
-  port: ${WEB_PORT}
-  host: "0.0.0.0"
-
-api:
-  # API URL derived from server.hostname and server.protocol in api.yaml
-  # Frontend will replace "localhost" with browser hostname if accessed remotely
-  base_url: "${PROTOCOL}://${HOSTNAME}:${API_PORT}"
-
-ui:
-  max_output_lines: 1000
-  auto_scroll: true
-EOF
-    sudo mv "${tmpfile}" "$(pwd)/${target}"
-    sudo chown "${CONTAINER_UID}:${CONTAINER_UID}" "$(pwd)/${target}"
-    sudo chmod 644 "$(pwd)/${target}"
-  fi
 
   echo "  Frontend config: ${PROTOCOL}://${HOSTNAME}:${API_PORT}"
 }
@@ -664,10 +626,10 @@ EOF
 function generate_compose_override() {
   # Generate docker-compose.override.yml with extra mounts if any were specified
   local override_file="docker-compose.override.yml"
-  local manifest_file="data/auto-generated/auto-generated-mounts.yaml"
+  local manifest_file="auto-generated/auto-generated-mounts.yaml"
 
-  # Ensure the auto-generated directory exists (may need sudo on Linux after setup_directories)
-  mkdir -p "data/auto-generated" 2>/dev/null || sudo mkdir -p "data/auto-generated" 2>/dev/null || true
+  # Ensure the auto-generated directory exists
+  mkdir -p "auto-generated" 2>/dev/null || true
 
   # Remove existing generated files (may be owned by root from previous container build)
   safe_remove_file "${override_file}"
@@ -910,13 +872,15 @@ EOF
 function check_services() {
   local missing=0
   local running
-  running="$(docker compose ps --status running --services || true)"
-  for svc in ag3ntum-api ag3ntum-web; do
-    if ! grep -q "${svc}" <<<"${running}"; then
-      echo "Service not running: ${svc}"
-      missing=1
-    fi
-  done
+  running="$(${COMPOSE_CMD} ps --status running --services || true)"
+  if ! grep -q "ag3ntum-api" <<<"${running}"; then
+    echo "Service not running: ag3ntum-api"
+    missing=1
+  fi
+  if ! grep -q "ag3ntum-web" <<<"${running}"; then
+    echo "Service not running: ag3ntum-web"
+    missing=1
+  fi
   return "${missing}"
 }
 
@@ -932,8 +896,9 @@ function do_cleanup() {
   echo "=== Starting cleanup for instance: ${project_name} ==="
 
   # Step 1: Stop and remove project containers (scoped by COMPOSE_PROJECT_NAME in .env)
+  # Use --remove-orphans to also clean up dev-mode web containers when in prod mode
   echo "Stopping containers..."
-  docker compose down --remove-orphans --timeout 10 2>/dev/null || true
+  ${COMPOSE_CMD} down --remove-orphans --timeout 10 2>/dev/null || true
 
   # Step 2: Remove project-specific volumes
   echo "Removing project volumes..."
@@ -943,10 +908,41 @@ function do_cleanup() {
   echo "Removing project networks..."
   docker network ls --filter "name=${project_name}_" -q 2>/dev/null | xargs -r docker network rm 2>/dev/null || true
 
-  # Step 4: Remove ag3ntum images only if no other instances are running
-  local other_running
-  other_running=$(docker compose ls -q 2>/dev/null | grep -v "^${project_name}$" || true)
-  if [[ -z "${other_running}" ]]; then
+  # Step 3.5: Reclaim ownership of container-owned directories (no sudo needed)
+  local os_type
+  os_type="$(uname -s)"
+  if [[ "${os_type}" == "Linux" ]] && [[ "$(id -u)" != "0" ]]; then
+    echo "Reclaiming directory ownership..."
+    local me
+    me="$(id -u):$(id -g)"
+    # Use any available ag3ntum image (still exists at this point, before image removal)
+    local reclaim_image
+    reclaim_image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" | head -1 || true)
+    if [[ -z "${reclaim_image}" ]]; then
+      reclaim_image="alpine"
+    fi
+    local mount_args=""
+    for dir in logs data users; do
+      if [[ -d "$dir" ]]; then
+        mount_args="${mount_args} -v $(pwd)/${dir}:/${dir}"
+      fi
+    done
+    if [[ -n "${mount_args}" ]]; then
+      docker run --rm ${mount_args} "${reclaim_image}" chown -R "${me}" /logs /data /users 2>/dev/null || true
+    fi
+    # Also reclaim config/secrets.yaml
+    if [[ -f "config/secrets.yaml" ]] && [[ ! -w "config/secrets.yaml" ]]; then
+      docker run --rm -v "$(pwd)/config:/config" "${reclaim_image}" chown "${me}" /config/secrets.yaml 2>/dev/null || true
+    fi
+  fi
+
+  # Step 4: Remove ag3ntum images only if no other ag3ntum instances are running
+  # After docker compose down above, our containers are stopped. Check if any
+  # still-running containers use ag3ntum images (= other worktree instances).
+  # This avoids false positives from unrelated compose projects (postgres, etc.).
+  local other_ag3ntum
+  other_ag3ntum=$(docker ps --format '{{.Image}}' 2>/dev/null | grep "^${IMAGE_PREFIX}:" || true)
+  if [[ -z "${other_ag3ntum}" ]]; then
     echo "No other instances running. Removing ${IMAGE_PREFIX} images..."
     local images
     images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${IMAGE_PREFIX}:" || true)
@@ -954,6 +950,25 @@ function do_cleanup() {
       echo "  Removing: ${images}"
       echo "${images}" | xargs -r docker rmi -f 2>/dev/null || true
     fi
+
+    # Remove third-party images pulled by this compose file (e.g. redis)
+    # only if no other containers still reference them
+    local compose_images
+    compose_images=$(${COMPOSE_CMD} config --images 2>/dev/null || true)
+    for img in ${compose_images}; do
+      # Skip ag3ntum images — already handled above
+      [[ "${img}" == "${IMAGE_PREFIX}:"* ]] && continue
+      if docker images --format '{{.Repository}}:{{.Tag}}' | grep -qF "${img}"; then
+        local users
+        users=$(docker ps -a --filter "ancestor=${img}" -q 2>/dev/null || true)
+        if [[ -z "${users}" ]]; then
+          echo "  Removing ${img}..."
+          docker rmi "${img}" 2>/dev/null || true
+        else
+          echo "  Preserving ${img} — still used by other containers."
+        fi
+      fi
+    done
 
     # Also remove any dangling images
     local dangling
@@ -963,7 +978,7 @@ function do_cleanup() {
       echo "${dangling}" | xargs -r docker rmi -f 2>/dev/null || true
     fi
   else
-    echo "Other instances still running — preserving shared images."
+    echo "Other ag3ntum instances still running — preserving shared images."
   fi
 
   # Step 5: Remove generated files
@@ -996,24 +1011,23 @@ function do_cleanup() {
 }
 
 function do_restart() {
-  echo "=== Restarting containers to reload code ==="
-  
-  # Restart API container (where Python code runs)
+  echo "=== Restarting containers to reload code (mode: ${AG3NTUM_MODE}) ==="
+
+  # Restart both containers
   echo "Restarting ag3ntum-api..."
-  docker compose restart ag3ntum-api
-  
-  # Optionally restart web if needed
+  ${COMPOSE_CMD} restart ag3ntum-api
+
   echo "Restarting ag3ntum-web..."
-  docker compose restart ag3ntum-web
-  
+  ${COMPOSE_CMD} restart ag3ntum-web
+
   # Wait for services to be healthy
   sleep 2
-  
+
   if check_services; then
     echo "=== Restart complete - services running ==="
   else
     echo "=== WARNING: Some services may not be running ==="
-    docker compose ps
+    ${COMPOSE_CMD} ps
   fi
 }
 
@@ -1045,7 +1059,7 @@ function create_user() {
   fi
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1053,18 +1067,25 @@ function create_user() {
 
   # Get current UID mode from container
   local uid_mode
-  uid_mode=$(docker compose exec -T ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
+  uid_mode=$(${COMPOSE_CMD} exec -T ag3ntum-api printenv AG3NTUM_UID_MODE 2>/dev/null | tr -d '\r' || echo "isolated")
 
   echo "=== Creating user: $USERNAME ==="
   echo "  UID Security Mode: ${uid_mode:-isolated}"
 
   # Run create_user.py inside container as root (avoids sudo prompts)
-  docker compose exec -T -u root ag3ntum-api \
+  ${COMPOSE_CMD} exec -T -u root ag3ntum-api \
     python3 src/cli/create_user.py \
     --username="$USERNAME" \
     --email="$EMAIL" \
     --password="$PASSWORD" \
     $ADMIN
+
+  # Restart API so the process inherits the new user's group (Gotcha #12).
+  # Without this, session directory access fails with PermissionError because
+  # setpriv --init-groups only reads /etc/group at process start.
+  echo ""
+  echo "Restarting API to activate user access..."
+  ${COMPOSE_CMD} restart ag3ntum-api
 }
 
 # Function to delete a user
@@ -1095,7 +1116,7 @@ function delete_user() {
   fi
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1108,7 +1129,7 @@ function delete_user() {
   fi
 
   # Run delete_user.py inside container as root (needs elevated permissions)
-  docker compose exec -T -u root ag3ntum-api \
+  ${COMPOSE_CMD} exec -T -u root ag3ntum-api \
     python3 src/cli/delete_user.py \
     --username="$USERNAME" \
     $FORCE
@@ -1130,27 +1151,50 @@ fi
 run_ui_tests() {
   echo "=== Running UI/React tests ==="
 
-  # Ensure ag3ntum-web container is running (test setup may have stopped it)
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
-    echo "Starting ag3ntum-web container..."
-    docker compose up -d ag3ntum-web
-    sleep 2
-    if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+  # UI tests always need the web container in dev mode (with node_modules).
+  # COMPOSE_WITH_WEB includes docker-compose.dev.yml for Vite + node_modules.
+  # Always call up -d: if web is running in prod mode (from ./run.sh build),
+  # compose detects the config change and recreates it with the dev overlay.
+  echo "Ensuring ag3ntum-web container is running (dev mode)..."
+  ${COMPOSE_WITH_WEB} up -d ag3ntum-web
+
+  # Wait for entrypoint to complete (npm install + vite startup).
+  # The entrypoint installs packages as ag3ntum_api (UID 45045). We must NOT
+  # exec npm commands as root while it's running — that creates root-owned
+  # /tmp/.npm cache files that cause EACCES on the next entrypoint npm install.
+  echo "Waiting for Vite dev server to be ready..."
+  local attempts=0
+  local max_attempts=60
+  while [[ $attempts -lt $max_attempts ]]; do
+    if ! ${COMPOSE_WITH_WEB} ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
       echo "Error: ag3ntum-web container failed to start."
-      echo "Check logs with: docker compose logs ag3ntum-web"
+      echo "Check logs with: ${COMPOSE_WITH_WEB} logs ag3ntum-web"
       return 1
     fi
+    # Check if vite is ready by looking for "VITE.*ready" in container logs
+    if ${COMPOSE_WITH_WEB} logs ag3ntum-web 2>&1 | grep -q "VITE.*ready"; then
+      echo "  Vite dev server ready."
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  if [[ $attempts -ge $max_attempts ]]; then
+    echo "Error: Vite dev server did not start within ${max_attempts}s."
+    echo "Check logs with: ${COMPOSE_WITH_WEB} logs ag3ntum-web"
+    return 1
   fi
 
-  # Check if node_modules needs reinstalling (platform mismatch between host and container)
-  # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux)
+  # Check if node_modules needs reinstalling (platform mismatch between host and container).
+  # The bind-mounted node_modules may have wrong platform binaries (darwin vs linux).
+  # Run as ag3ntum_api (45045) to match entrypoint's ownership of /tmp/.npm cache.
   echo "Checking node_modules platform compatibility..."
-  NEEDS_REINSTALL=$(docker compose exec -T ag3ntum-web sh -c '
-    if [ ! -d /src/web_terminal_client/node_modules ]; then
+  NEEDS_REINSTALL=$(${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c '
+    if [ ! -d /app/node_modules ]; then
       echo "missing"
-    elif [ ! -d /src/web_terminal_client/node_modules/@rollup ]; then
+    elif [ ! -d /app/node_modules/@rollup ]; then
       echo "missing_rollup"
-    elif ! ls /src/web_terminal_client/node_modules/@rollup/rollup-linux-* >/dev/null 2>&1; then
+    elif ! ls /app/node_modules/@rollup/rollup-linux-* >/dev/null 2>&1; then
       echo "wrong_platform"
     else
       echo "ok"
@@ -1159,9 +1203,10 @@ run_ui_tests() {
 
   if [[ "${NEEDS_REINSTALL}" != "ok" ]]; then
     echo "Reinstalling node_modules for Linux platform (reason: ${NEEDS_REINSTALL})..."
-    docker compose exec -T ag3ntum-web sh -c '
-      cd /src/web_terminal_client && \
-      rm -rf node_modules && \
+    ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c '
+      cp /src/web_terminal_client/package.json /app/package.json && \
+      cd /app && \
+      rm -rf node_modules/* node_modules/.[!.]* 2>/dev/null; \
       npm install --no-fund --no-audit --no-package-lock
     '
   fi
@@ -1169,7 +1214,7 @@ run_ui_tests() {
   # Run vite build first to catch Babel transpilation errors
   # (Vitest uses esbuild which is more permissive than Babel)
   echo "Running vite build to verify transpilation..."
-  if ! docker compose exec -T ag3ntum-web sh -c 'cd /src/web_terminal_client && npm run build'; then
+  if ! ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 ag3ntum-web sh -c 'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs'; then
     echo ""
     echo "ERROR: Vite build failed. Fix transpilation errors before running tests."
     return 1
@@ -1179,13 +1224,42 @@ run_ui_tests() {
 
   # Run vitest inside the Docker container
   echo "Running vitest in Docker container..."
-  docker compose exec -T -e FORCE_COLOR=1 ag3ntum-web npm run test:run
+  ${COMPOSE_WITH_WEB} exec -T -u 45045:45045 -e FORCE_COLOR=1 ag3ntum-web sh -c 'cd /src/web_terminal_client && vitest run --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vitest.config.mjs'
   return $?
 }
 
 # Handle test action
 if [[ "${ACTION}" == "test" ]]; then
   echo "=== Running tests ==="
+
+  # Prevent concurrent test runs — two ./run.sh test invocations sharing the
+  # same container race on container lifecycle (test mode → production restore).
+  # When one finishes and restores the container, it kills the other mid-flight.
+  TEST_LOCK_FILE="${ROOT_DIR}/.test.lock"
+
+  # Try to acquire lock (atomic via mkdir — works across Linux and macOS)
+  cleanup_test_lock() {
+    rm -f "${TEST_LOCK_FILE}" 2>/dev/null || true
+  }
+
+  if [[ -f "${TEST_LOCK_FILE}" ]]; then
+    LOCK_PID=$(cat "${TEST_LOCK_FILE}" 2>/dev/null || echo "")
+    if [[ -n "${LOCK_PID}" ]] && kill -0 "${LOCK_PID}" 2>/dev/null; then
+      echo "Error: Another test run is already in progress (PID ${LOCK_PID})."
+      echo "If this is stale, remove ${TEST_LOCK_FILE} and retry."
+      exit 1
+    else
+      # Stale lock from a crashed run — clean it up
+      if [[ -n "${LOCK_PID}" ]]; then
+        echo "Removing stale test lock (PID ${LOCK_PID} is not running)."
+      fi
+      cleanup_test_lock
+    fi
+  fi
+
+  # Write our PID to the lock file
+  echo $$ > "${TEST_LOCK_FILE}"
+  trap cleanup_test_lock EXIT
 
   # Set up test logging - output goes to both console and log file
   TEST_LOG_FILE="logs/latest-test-results.log"
@@ -1204,10 +1278,10 @@ if [[ "${ACTION}" == "test" ]]; then
       echo ""
     } > "$TEST_LOG_FILE"
     CAN_LOG=1
-  elif docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  elif ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     # logs/ directory is owned by container UID (45045). Use the running container
     # to create a world-writable log file so tee -a can append without sudo.
-    docker compose exec -T ag3ntum-api sh -c "
+    ${COMPOSE_CMD} exec -T ag3ntum-api sh -c "
       echo '========================================' > /logs/latest-test-results.log &&
       echo 'Test Run: $(date '+%Y-%m-%d %H:%M:%S')' >> /logs/latest-test-results.log &&
       echo '========================================' >> /logs/latest-test-results.log &&
@@ -1282,10 +1356,10 @@ if [[ "${ACTION}" == "test" ]]; then
   # Default: run ALL tests (backend+e2e+security+sandboxing+UI)
   # Specific flags run only that subset
   QUICK_MODE=""
-  SUBSET=""
   BACKEND_ONLY=""
   UI_ONLY=""
   SECURITY_ONLY=""
+  CORE_ONLY=""
   E2E_ONLY=""
   SANDBOXING_ONLY=""
   ALL_MODE=""
@@ -1319,17 +1393,8 @@ if [[ "${ACTION}" == "test" ]]; then
       --sandboxing)
         SANDBOXING_ONLY="1"
         ;;
-      --subset)
-        i=$((i + 1))
-        if [[ $i -lt ${#ARGS_ARRAY[@]} ]]; then
-          SUBSET="${ARGS_ARRAY[$i]}"
-        else
-          echo "Error: --subset requires a comma-separated list of test names"
-          exit 1
-        fi
-        ;;
-      --subset=*)
-        SUBSET="${arg#--subset=}"
+      --core)
+        CORE_ONLY="1"
         ;;
       *)
         echo "Unknown test option: ${arg}"
@@ -1340,12 +1405,12 @@ if [[ "${ACTION}" == "test" ]]; then
         echo "  --all         Run ALL tests including end-to-end"
         echo "  --backend     Run only backend tests (no e2e)"
         echo "  --security    Run only security tests"
+        echo "  --core        Run only core agent tests"
         echo "  --only-e2e    Run only e2e tests"
         echo "  --e2e         Alias for --only-e2e"
         echo "  --sandboxing  Run only sandboxing tests"
         echo "  --ui          Run only UI/frontend tests"
         echo "  --quick       Run fast tests only (no e2e/slow)"
-        echo "  --subset X    Run tests matching pattern X"
         exit 1
         ;;
     esac
@@ -1371,8 +1436,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1381,8 +1446,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ --run-e2e -v --tb=short -m "e2e"
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1397,8 +1462,8 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
@@ -1407,53 +1472,26 @@ if [[ "${ACTION}" == "test" ]]; then
     run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short
     TEST_RESULT=$?
     echo "" | tee -a "$TEST_LOG_FILE"
-    echo "Restoring container to production mode..."
-    docker compose up -d ag3ntum-api
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
+    exit ${TEST_RESULT}
+  fi
+
+  if [[ -n "${CORE_ONLY}" ]]; then
+    echo "=== Running core agent tests only ===" | tee -a "$TEST_LOG_FILE"
+    run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short
+    TEST_RESULT=$?
+    echo "" | tee -a "$TEST_LOG_FILE"
+    echo "Restoring container to normal mode..."
+    ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
     exit ${TEST_RESULT}
   fi
 
   # Build test arguments
   PYTEST_ARGS=()
 
-  if [[ -n "${SUBSET}" ]]; then
-    # Run specific tests by name pattern
-    # Convert comma-separated names to test file paths
-    TEST_FILES=()
-    IFS=',' read -ra NAMES <<< "${SUBSET}"
-    for name in "${NAMES[@]}"; do
-      # Trim whitespace
-      name="${name// /}"
-      # Strip "test_" prefix if user included it (e.g., "test_llm_proxy" -> "llm_proxy")
-      name="${name#test_}"
-      # Also strip ".py" suffix if present
-      name="${name%.py}"
-      # Find matching test files in container
-      MATCHES=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*${name}*.py" 2>/dev/null | sort -u)
-      if [[ -n "${MATCHES}" ]]; then
-        while IFS= read -r file; do
-          TEST_FILES+=("${file}")
-        done <<< "${MATCHES}"
-      fi
-    done
-
-    if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
-      echo "No test files found matching: ${SUBSET}"
-      echo ""
-      echo "Available test files:"
-      ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -name "test_*.py" | sort
-      exit 1
-    fi
-
-    # Add unique test files to args
-    for file in $(printf '%s\n' "${TEST_FILES[@]}" | sort -u); do
-      PYTEST_ARGS+=("${file}")
-    done
-
-    # Include --run-e2e if any subset test might have E2E tests
-    PYTEST_ARGS+=("--run-e2e")
-  else
-    # Run all tests - need separate runs for backend (with --run-e2e) and others
-    if [[ -n "${QUICK_MODE}" ]]; then
+  # Run all tests - need separate runs for backend (with --run-e2e) and others
+  if [[ -n "${QUICK_MODE}" ]]; then
       # Quick mode: exclude E2E and slow tests (all tests at once, no --run-e2e)
       echo "Running quick tests (excluding E2E and slow tests)..."
       PYTEST_ARGS+=("tests/" "-v" "--tb=short")
@@ -1503,8 +1541,8 @@ if [[ "${ACTION}" == "test" ]]; then
 
       # Restore container to production mode
       echo ""
-      echo "Restoring container to production mode..."
-      docker compose up -d ag3ntum-api
+      echo "Restoring container to normal mode..."
+      ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       if [[ ${BACKEND_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo "" | tee -a "$TEST_LOG_FILE"
@@ -1534,34 +1572,27 @@ if [[ "${ACTION}" == "test" ]]; then
         run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/backend/ -v --tb=short || BACKEND_RESULT=$?
       fi
 
-      # Second run: security tests (no --run-e2e flag)
+      # Second run: security tests
       echo "" | tee -a "$TEST_LOG_FILE"
       echo "=== Running security tests ===" | tee -a "$TEST_LOG_FILE"
       SECURITY_RESULT=0
       run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/security/ -v --tb=short || SECURITY_RESULT=$?
 
-      # Check for other test directories and run them
-      OTHER_DIRS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find /tests -maxdepth 1 -type d ! -name backend ! -name security ! -name __pycache__ ! -name tests 2>/dev/null | grep -v "^/tests$" || true)
-      OTHER_RESULT=0
+      # Third run: core agent tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running core agent tests ===" | tee -a "$TEST_LOG_FILE"
+      CORE_RESULT=0
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} tests/core-tests/ -v --tb=short || CORE_RESULT=$?
 
-      if [[ -n "${OTHER_DIRS}" ]]; then
-        for dir in ${OTHER_DIRS}; do
-          dir_name=$(basename "${dir}")
-          if [[ "${dir_name}" != ".DS_Store" && "${dir_name}" != "__pycache__" ]]; then
-            # Check if directory has any test files
-            HAS_TESTS=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api find "${dir}" -name "test_*.py" 2>/dev/null | head -1)
-            if [[ -n "${HAS_TESTS}" ]]; then
-              echo "" | tee -a "$TEST_LOG_FILE"
-              echo "=== Running ${dir_name} tests ===" | tee -a "$TEST_LOG_FILE"
-              DIR_RESULT=0
-              run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${dir}/" -v --tb=short || DIR_RESULT=$?
-              if [[ ${DIR_RESULT} -ne 0 ]]; then
-                OTHER_RESULT=1
-              fi
-            fi
-          fi
-        done
+      # Fourth run: sandboxing tests
+      echo "" | tee -a "$TEST_LOG_FILE"
+      echo "=== Running sandboxing tests ===" | tee -a "$TEST_LOG_FILE"
+      SANDBOXING_RESULT=0
+      SANDBOX_DIRS=""
+      if ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api test -d /tests/sandboxing 2>/dev/null; then
+        SANDBOX_DIRS="/tests/sandboxing/"
       fi
+      run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} ${SANDBOX_DIRS} tests/backend/test_sandbox*.py -v --tb=short || SANDBOXING_RESULT=$?
 
       # Run UI tests if not backend-only mode
       UI_RESULT=0
@@ -1572,35 +1603,35 @@ if [[ "${ACTION}" == "test" ]]; then
       fi
 
       # Print combined summary (to console and log)
-      TOTAL_BACKEND=$(${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api python -m pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
       {
         echo ""
         echo "========================================"
         echo "=== COMBINED TEST SUMMARY ==="
         echo "========================================"
-        echo "Backend tests in suite: ${TOTAL_BACKEND:-302}"
-        echo ""
         if [[ ${BACKEND_RESULT} -eq 0 ]]; then
-          echo "  ✓ Backend tests:  PASSED"
+          echo "  ✓ Backend tests:     PASSED"
         else
-          echo "  ✗ Backend tests:  FAILED"
+          echo "  ✗ Backend tests:     FAILED"
         fi
         if [[ ${SECURITY_RESULT} -eq 0 ]]; then
-          echo "  ✓ Security tests: PASSED"
+          echo "  ✓ Security tests:    PASSED"
         else
-          echo "  ✗ Security tests: FAILED"
+          echo "  ✗ Security tests:    FAILED"
         fi
-        if [[ ${OTHER_RESULT} -eq 0 ]]; then
-          echo "  ✓ Other tests:    PASSED"
+        if [[ ${CORE_RESULT} -eq 0 ]]; then
+          echo "  ✓ Core tests:        PASSED"
         else
-          echo "  ✗ Other tests:    FAILED"
+          echo "  ✗ Core tests:        FAILED"
         fi
-        if [[ -z "${BACKEND_ONLY}" ]]; then
-          if [[ ${UI_RESULT} -eq 0 ]]; then
-            echo "  ✓ UI tests:       PASSED"
-          else
-            echo "  ✗ UI tests:       FAILED"
-          fi
+        if [[ ${SANDBOXING_RESULT} -eq 0 ]]; then
+          echo "  ✓ Sandboxing tests:  PASSED"
+        else
+          echo "  ✗ Sandboxing tests:  FAILED"
+        fi
+        if [[ ${UI_RESULT} -eq 0 ]]; then
+          echo "  ✓ UI tests:          PASSED"
+        else
+          echo "  ✗ UI tests:          FAILED"
         fi
         echo "========================================"
         if [[ -z "${ALL_MODE}" ]]; then
@@ -1613,11 +1644,11 @@ if [[ "${ACTION}" == "test" ]]; then
 
       # Restore container to production mode
       echo ""
-      echo "Restoring container to production mode..."
-      docker compose up -d ag3ntum-api
+      echo "Restoring container to normal mode..."
+      ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
       # Exit with error if any test suite failed
-      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${OTHER_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
+      if [[ ${BACKEND_RESULT} -ne 0 || ${SECURITY_RESULT} -ne 0 || ${CORE_RESULT} -ne 0 || ${SANDBOXING_RESULT} -ne 0 || ${UI_RESULT} -ne 0 ]]; then
         echo "" | tee -a "$TEST_LOG_FILE"
         echo "Some tests failed!" | tee -a "$TEST_LOG_FILE"
         exit 1
@@ -1626,38 +1657,196 @@ if [[ "${ACTION}" == "test" ]]; then
       echo "All tests passed!" | tee -a "$TEST_LOG_FILE"
       exit 0
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# Dev environment helper: activate .venv if it exists (for lint/audit/setup)
+# ---------------------------------------------------------------------------
+VENV_DIR="${ROOT_DIR}/.venv"
+
+activate_venv() {
+  if [[ -d "${VENV_DIR}" ]]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+    return 0
+  fi
+  return 1
+}
+
+# Handle setup action — install all dev tools (Python venv + Node + pre-commit)
+if [[ "${ACTION}" == "setup" ]]; then
+  echo "=== Setting up development environment ==="
+
+  # 1. Check prerequisites
+  if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 not found. Install Python 3.12+ first."
+    exit 1
+  fi
+  if ! command -v node &>/dev/null; then
+    echo "Error: node not found. Install Node.js 20+ first."
+    exit 1
   fi
 
-  # Add default flags (only reached for --subset mode)
-  PYTEST_ARGS+=("-v" "--tb=short")
+  PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  NODE_VERSION=$(node --version)
+  echo "  Python: ${PYTHON_VERSION}"
+  echo "  Node:   ${NODE_VERSION}"
 
-  echo "Running: ${PYTEST_CMD} ${PYTEST_ARGS[*]}" | tee -a "$TEST_LOG_FILE"
-  echo "" | tee -a "$TEST_LOG_FILE"
-
-  # Run tests in container with logging
-  run_with_log ${COMPOSE_TEST} exec ${EXEC_OPTS} ag3ntum-api ${PYTEST_CMD} "${PYTEST_ARGS[@]}"
-  TEST_EXIT_CODE=$?
-
-  # Print result summary
-  {
-    echo ""
-    echo "========================================"
-    if [[ ${TEST_EXIT_CODE} -eq 0 ]]; then
-      echo "Tests PASSED"
-    else
-      echo "Tests FAILED"
-    fi
-    echo "========================================"
-    echo ""
-    echo "Test results saved to: ${TEST_LOG_FILE}"
-  } | tee -a "$TEST_LOG_FILE"
-
-  # Restore container to production mode (without test sudoers)
+  # 2. Create Python venv and install lint/audit tools
   echo ""
-  echo "Restoring container to production mode..."
-  docker compose up -d ag3ntum-api
+  echo "--- Python dev tools (.venv/) ---"
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "  Creating virtual environment..."
+    python3 -m venv "${VENV_DIR}"
+  else
+    echo "  Virtual environment already exists."
+  fi
+  source "${VENV_DIR}/bin/activate"
 
-  exit ${TEST_EXIT_CODE}
+  echo "  Installing Python dev tools..."
+  pip install --quiet --upgrade pip
+  pip install --quiet \
+    flake8==7.3.0 \
+    bandit==1.8.3 \
+    mypy==1.14.1 \
+    pip-audit==2.9.0 \
+    pytest==9.0.2
+  echo "  Installed: flake8, bandit, mypy, pip-audit, pytest"
+
+  # 3. Install pre-commit hooks
+  echo ""
+  echo "--- Pre-commit hooks ---"
+  pip install --quiet pre-commit
+  if [[ -f ".pre-commit-config.yaml" ]]; then
+    pre-commit install
+    echo "  Pre-commit hooks installed."
+  else
+    echo "  Warning: .pre-commit-config.yaml not found, skipping hooks."
+  fi
+
+  # 4. Install frontend dependencies
+  echo ""
+  echo "--- Frontend dependencies (npm ci) ---"
+  if [[ -f "src/web_terminal_client/package.json" ]]; then
+    (cd src/web_terminal_client && npm ci --legacy-peer-deps 2>&1 | tail -3)
+    echo "  Frontend dependencies installed."
+  else
+    echo "  Warning: src/web_terminal_client/package.json not found."
+  fi
+
+  echo ""
+  echo "=== Dev environment ready ==="
+  echo ""
+  echo "Commands available:"
+  echo "  ./run.sh lint    — run all linters"
+  echo "  ./run.sh audit   — check dependency vulnerabilities"
+  echo "  ./run.sh build   — build and start Docker containers"
+  echo "  ./run.sh test    — run tests (requires Docker)"
+  exit 0
+fi
+
+# Handle lint action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "lint" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first for full linting."
+    echo "         Falling back to system tools..."
+    echo ""
+  fi
+
+  echo "=== Running linters ==="
+  LINT_EXIT=0
+
+  # Python — flake8
+  echo ""
+  echo "--- flake8 (style) ---"
+  if command -v flake8 &>/dev/null; then
+    flake8 src/ tools/ tests/ --config=.flake8 || LINT_EXIT=1
+  else
+    echo "SKIPPED: flake8 not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — bandit (security)
+  echo ""
+  echo "--- bandit (security) ---"
+  if command -v bandit &>/dev/null; then
+    bandit -r src/ tools/ -c bandit.yaml -ll -ii || LINT_EXIT=1
+  else
+    echo "SKIPPED: bandit not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Structural tests
+  echo ""
+  echo "--- structural tests ---"
+  if command -v pytest &>/dev/null || python3 -m pytest --version &>/dev/null 2>&1; then
+    python3 -m pytest tests/structural/ -v --tb=long || LINT_EXIT=1
+  else
+    echo "SKIPPED: pytest not found. Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  # Python — mypy (type checking, informational — not blocking until baseline established)
+  echo ""
+  echo "--- mypy (type checking — informational) ---"
+  if command -v mypy &>/dev/null; then
+    mypy src/core/ src/api/ src/services/ --config-file mypy.ini || echo "  (mypy found issues — informational, not blocking)"
+  else
+    echo "SKIPPED: mypy not found. Run: ./run.sh setup"
+  fi
+
+  # Frontend — TypeScript type check + ESLint
+  if [ -d "src/web_terminal_client/node_modules" ]; then
+    echo ""
+    echo "--- TypeScript (tsc --noEmit — informational) ---"
+    # Use tsconfig.lint.json — excludes test files (they need Docker node_modules)
+    # Informational until pre-existing type errors are cleaned up (20 errors in existing code)
+    (cd src/web_terminal_client && npx tsc --noEmit -p tsconfig.lint.json) || echo "  (tsc found type errors — informational, not blocking)"
+
+    echo ""
+    echo "--- ESLint (React/TypeScript) ---"
+    (cd src/web_terminal_client && npx eslint src/ --max-warnings 53) || LINT_EXIT=1
+  else
+    echo ""
+    echo "SKIPPED: Frontend linting (node_modules missing). Run: ./run.sh setup"
+    LINT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${LINT_EXIT} -eq 0 ]]; then
+    echo "=== All lint checks passed ==="
+  else
+    echo "=== Some lint checks failed (exit code ${LINT_EXIT}) ==="
+  fi
+  exit ${LINT_EXIT}
+fi
+
+# Handle audit action (no Docker needed — runs on host)
+if [[ "${ACTION}" == "audit" ]]; then
+  # Auto-activate venv if available
+  if ! activate_venv; then
+    echo "Warning: .venv/ not found. Run './run.sh setup' first."
+    echo ""
+  fi
+
+  echo "=== Running dependency audit ==="
+  AUDIT_EXIT=0
+
+  if command -v pip-audit &>/dev/null; then
+    pip-audit --requirement requirements-base.txt --desc || AUDIT_EXIT=1
+  else
+    echo "SKIPPED: pip-audit not found. Run: ./run.sh setup"
+    AUDIT_EXIT=1
+  fi
+
+  echo ""
+  if [[ ${AUDIT_EXIT} -eq 0 ]]; then
+    echo "=== Dependency audit passed ==="
+  else
+    echo "=== Dependency audit found issues (exit code ${AUDIT_EXIT}) ==="
+  fi
+  exit ${AUDIT_EXIT}
 fi
 
 # Handle shell action
@@ -1665,7 +1854,7 @@ if [[ "${ACTION}" == "shell" ]]; then
   echo "=== Opening shell in Docker container ==="
 
   # Check if container is running
-  if ! docker compose ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
+  if ! ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-api"; then
     echo "Error: ag3ntum-api container is not running."
     echo "Start it first with: ./run.sh build"
     exit 1
@@ -1673,7 +1862,7 @@ if [[ "${ACTION}" == "shell" ]]; then
 
   # Shell requires TTY
   if [ -t 0 ]; then
-    docker compose exec ag3ntum-api /bin/bash
+    ${COMPOSE_CMD} exec ag3ntum-api /bin/bash
   else
     echo "Error: Shell requires an interactive terminal."
     exit 1
@@ -1705,7 +1894,7 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
   if [[ ! -f "docker-compose.test.yml" ]] || [[ ! -f "config/test/sudoers-test" ]]; then
     echo "Warning: Test configuration files not found, using standard compose."
     echo "Some cleanup operations may fail without test permissions."
-    COMPOSE_TEST="docker compose"
+    COMPOSE_TEST="${COMPOSE_CMD}"
     EXEC_OPTS="-T"  # No user override needed for standard compose
   fi
 
@@ -1727,8 +1916,8 @@ if [[ "${ACTION}" == "cleanup-test-users" ]]; then
 
   # Restore container to production mode
   echo ""
-  echo "Restoring container to production mode..."
-  docker compose up -d ag3ntum-api
+  echo "Restoring container to normal mode..."
+  ${COMPOSE_CMD} up -d ag3ntum-api ag3ntum-web
 
   exit 0
 fi
@@ -1739,6 +1928,9 @@ if [[ "${ACTION}" == "rebuild" ]]; then
   ACTION="build"
   # Fall through to build
 fi
+
+# Validate and auto-provision config files before reading any config values
+validate_and_provision_configs
 
 API_PORT="$(read_config_value 'api.external_port' '40080')"
 WEB_PORT="$(read_config_value 'web.external_port' '50080')"
@@ -1774,7 +1966,7 @@ ROLLBACK_ENV=0
 cleanup() {
   if [[ "${ROLLBACK_ENV}" -eq 1 && -s "${BACKUP_ENV}" ]]; then
     cp "${BACKUP_ENV}" .env
-    docker compose up -d --remove-orphans || true
+    ${COMPOSE_CMD} up -d --remove-orphans || true
   fi
   rm -f "${BACKUP_ENV}"
 }
@@ -1797,12 +1989,13 @@ AG3NTUM_IMAGE_TAG=${IMAGE_TAG}
 AG3NTUM_API_PORT=${API_PORT}
 AG3NTUM_WEB_PORT=${WEB_PORT}
 AG3NTUM_REDIS_PORT=${REDIS_PORT}
+AG3NTUM_MODE=${AG3NTUM_MODE}
 COMPOSE_PROJECT_NAME=${PROJECT_NAME}
 EOF
 
-echo "Starting containers with tag ${IMAGE_TAG}..."
+echo "Starting containers with tag ${IMAGE_TAG} (mode: ${AG3NTUM_MODE})..."
 # Use --force-recreate to ensure fresh containers with new code
-docker compose up -d --remove-orphans --force-recreate
+${COMPOSE_CMD} up -d --remove-orphans --force-recreate
 
 if ! check_services; then
   echo "Deployment failed, rolling back."
@@ -1811,16 +2004,45 @@ fi
 
 ROLLBACK_ENV=0
 
+# Validate frontend build (catches module resolution failures early)
+echo ""
+if [[ "${AG3NTUM_MODE}" == "dev" ]]; then
+  # Dev mode: validate via web container's Vite build
+  if ${COMPOSE_CMD} ps --status running --services 2>/dev/null | grep -q "ag3ntum-web"; then
+    echo "Validating frontend build (dev mode)..."
+    if ${COMPOSE_CMD} exec -T ag3ntum-web sh -c \
+      'cd /src/web_terminal_client && vite build --config /tmp/vite-${AG3NTUM_WEB_PORT:-50080}/vite.config.mjs' \
+      >/dev/null 2>&1; then
+      echo "  Frontend build validation passed"
+    else
+      echo "  WARNING: Frontend build validation failed. Check web container logs."
+      echo "           ${COMPOSE_CMD} logs ag3ntum-web"
+    fi
+  fi
+else
+  # Prod mode: verify the static bundle exists in the web container
+  echo "Validating production frontend bundle..."
+  if ${COMPOSE_CMD} exec -T ag3ntum-web sh -c 'test -f /web_dist/index.html' 2>/dev/null; then
+    echo "  Production frontend bundle verified"
+  else
+    echo "  WARNING: Production frontend bundle missing. Check Dockerfile build stage."
+  fi
+fi
+
 # Verify fresh containers
 echo ""
 echo "=== Deployment Verification ==="
-echo "Instance:  ${PROJECT_NAME}"
-echo "Image tag: ${IMAGE_TAG}"
-echo "API Port:  ${API_PORT}"
-echo "Web Port:  ${WEB_PORT}"
+echo "Instance:   ${PROJECT_NAME}"
+echo "Mode:       ${AG3NTUM_MODE}"
+echo "Image tag:  ${IMAGE_TAG}"
+echo "Web Port:   ${WEB_PORT}"
+echo "API Port:   ${API_PORT}"
 echo "Redis Port: ${REDIS_PORT}"
 echo ""
 echo "Container status:"
-docker compose ps
+${COMPOSE_CMD} ps
+echo ""
+echo "Web UI:  http://localhost:${WEB_PORT}"
+echo "API:     http://localhost:${API_PORT}"
 echo ""
 echo "=== Deployment complete at $(date) ==="

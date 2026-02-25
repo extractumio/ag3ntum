@@ -56,7 +56,7 @@ class TestSkillsEndpoint:
             assert "skills" in data
             for skill in data["skills"]:
                 # Each skill should have id, name, description
-                assert "id" in skill or True  # May be empty
+                assert "id" in skill
                 assert isinstance(skill, dict)
 
     @pytest.mark.unit
@@ -95,7 +95,7 @@ class TestSkillDiscovery:
 
                 assert response.status_code == 200
                 data = response.json()
-                assert len(data["skills"]) >= 0  # May have skills or not
+                assert len(data["skills"]) == 2
 
     @pytest.mark.unit
     def test_skill_loading_failure_graceful(self, client: TestClient, auth_headers: dict) -> None:

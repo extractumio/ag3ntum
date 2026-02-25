@@ -54,6 +54,7 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
   const [error, setError] = useState<string | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
+  // Effect: load available bases from API, then reconcile localStorage
   useEffect(() => {
     async function loadBases() {
       try {
@@ -65,10 +66,35 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
           setEnabled(data.enabled);
           setAvailableBases(data.bases);
           setMaxMounts(data.max_mounts_per_session);
+
+          // Reconcile localStorage with server state
+          const saved = getJson('ag3ntum_dynamic_mounts');
+          if (!data.enabled || data.bases.length === 0) {
+            // Feature disabled or no bases — clear stale mounts
+            if (saved && saved.length > 0) {
+              setJson('ag3ntum_dynamic_mounts', []);
+            }
+            onMountsChange([]);
+          } else if (saved && saved.length > 0) {
+            // Feature enabled — keep only mounts whose base still exists
+            const validBaseNames = new Set(data.bases.map(b => b.name));
+            const valid = saved.filter(m => validBaseNames.has(m.base));
+            if (valid.length !== saved.length) {
+              // Some mounts were stale — update localStorage
+              setJson('ag3ntum_dynamic_mounts', valid);
+            }
+            onMountsChange(valid);
+          }
+        } else {
+          setEnabled(false);
+          // API error — don't load stale mounts
+          onMountsChange([]);
         }
       } catch (e) {
         console.error('Failed to load available mounts:', e);
         setEnabled(false);
+        // Network error — don't load stale mounts
+        onMountsChange([]);
       } finally {
         setLoading(false);
       }
@@ -76,15 +102,8 @@ export function MountSelectorPopup({ baseUrl, token, selectedMounts, onMountsCha
     if (token) {
       loadBases();
     }
-  }, [baseUrl, token]);
-
-  useEffect(() => {
-    const saved = getJson('ag3ntum_dynamic_mounts');
-    if (saved) {
-      onMountsChange(saved);
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [baseUrl, token]);
 
   const updateMounts = useCallback((mounts: DynamicMountRequest[]) => {
     onMountsChange(mounts);

@@ -213,7 +213,7 @@ def get_global_mounts_for_path_validator() -> dict[str, dict[str, Path]]:
     """
     result: dict[str, dict[str, Path]] = {"ro": {}, "rw": {}}
 
-    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    manifest_path = Path("/auto-generated/auto-generated-mounts.yaml")
     if not manifest_path.exists():
         logger.debug(f"No mounts manifest at {manifest_path}")
         return result
@@ -270,7 +270,7 @@ def get_all_mounts_with_host_paths(username: str | None = None) -> dict[str, lis
     """
     result: dict[str, list[dict]] = {"ro": [], "rw": []}
 
-    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    manifest_path = Path("/auto-generated/auto-generated-mounts.yaml")
     if not manifest_path.exists():
         logger.debug(f"No mounts manifest at {manifest_path}")
         return result
@@ -349,7 +349,7 @@ def get_path_display_mapping(username: str | None = None) -> dict[str, str]:
     """
     result: dict[str, str] = {}
 
-    manifest_path = Path("/data/auto-generated/auto-generated-mounts.yaml")
+    manifest_path = Path("/auto-generated/auto-generated-mounts.yaml")
     if not manifest_path.exists():
         return result
 
@@ -695,7 +695,7 @@ class DynamicMountService:
         if not self.enabled:
             return DynamicMountValidation(
                 is_valid=False,
-                error="Dynamic mounts feature is disabled",
+                error="Dynamic mounts feature is disabled. Clear your browser's mount selections or enable dynamic mounts in external-mounts.yaml",
                 denial_code="FEATURE_DISABLED"
             )
 

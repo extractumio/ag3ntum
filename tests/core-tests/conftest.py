@@ -19,7 +19,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Add custom command line options for compatibility with run.sh --subset."""
+    """Add custom command line options for compatibility with run.sh --core."""
     try:
         parser.addoption(
             "--run-e2e",
@@ -29,4 +29,3 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         )
     except ValueError:
         pass  # Already registered by another conftest (e.g., when run from tests/ root)
-

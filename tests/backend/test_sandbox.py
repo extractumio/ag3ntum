@@ -475,6 +475,24 @@ class TestSandboxExecutor:
         assert uid_idx < separator_idx, "--uid should appear before --"
         assert gid_idx < separator_idx, "--gid should appear before --"
 
+    @requires_linux
+    def test_pythondontwritebytecode_env_set(
+        self, basic_config: SandboxConfig
+    ) -> None:
+        """PYTHONDONTWRITEBYTECODE=1 prevents .pyc writes on read-only mounts."""
+        executor = SandboxExecutor(basic_config)
+        cmd = executor.build_bwrap_command(["python3", "script.py"], allow_network=False)
+
+        for i, arg in enumerate(cmd):
+            if (
+                arg == "--setenv"
+                and i + 2 < len(cmd)
+                and cmd[i + 1] == "PYTHONDONTWRITEBYTECODE"
+            ):
+                assert cmd[i + 2] == "1"
+                return
+        pytest.fail("--setenv PYTHONDONTWRITEBYTECODE 1 not found in bwrap command")
+
 
 class TestMountValidation:
     """Test mount source validation (fail-closed security)."""

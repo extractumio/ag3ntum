@@ -37,6 +37,9 @@ ag3ntum_api ALL=(ALL) NOPASSWD: /usr/bin/touch *
 ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel *
 ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/userdel -r *
 
+# Allow groupdel for cleanup after userdel (stale group entries prevent user recreation)
+ag3ntum_api ALL=(root) NOPASSWD: /usr/sbin/groupdel *
+
 # Allow find with -exec for test verification
 # SEC-PY-002: Required to search and verify file permissions across user directories
 ag3ntum_api ALL=(root) NOPASSWD: /usr/bin/find /users/* *

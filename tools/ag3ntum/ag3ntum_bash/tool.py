@@ -102,10 +102,16 @@ async def _bash_impl(
     if preview_mode not in ("head", "tail"):
         preview_mode = default_preview_mode
 
-    # Ensure output directory exists
+    # Ensure output directory exists with world-readable permissions
+    # so the sandbox user (running in bwrap) can traverse the directory
     output_path = workspace / output_dir
     try:
         output_path.mkdir(parents=True, exist_ok=True)
+        # Set 755 on .tmp and .tmp/cmd so sandbox user can read output files
+        output_path.chmod(0o755)
+        tmp_parent = workspace / ".tmp"
+        if tmp_parent.exists() and tmp_parent != workspace:
+            tmp_parent.chmod(0o755)
     except OSError as e:
         return _error_response(f"Failed to create output directory: {e}")
 

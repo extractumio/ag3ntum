@@ -203,31 +203,49 @@ class TestAskUserQuestionToolValidation:
     @pytest.mark.asyncio
     async def test_validation_empty_questions(self):
         """Validation rejects empty questions array."""
-        # Test that empty questions would be rejected
-        # This tests the validation logic conceptually
-        questions = []
-        assert len(questions) == 0  # Empty questions should be rejected
+        from tools.ag3ntum.ag3ntum_ask.tool import create_ask_user_question_tool
+
+        # Patch @tool to be a transparent passthrough decorator
+        with patch("tools.ag3ntum.ag3ntum_ask.tool.tool",
+                    lambda name, desc, schema: (lambda fn: fn)):
+            ask_fn = create_ask_user_question_tool(session_id="test-val")
+            result = await ask_fn({"questions": []})
+
+        assert result.get("is_error") is True
+        assert "required" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
     async def test_validation_minimum_options(self):
         """Validation requires at least 2 options per question."""
-        questions = [{
-            "question": "Pick one?",
-            "header": "Test",
-            "options": [{"label": "Only one option"}],
-        }]
-        # Should have at least 2 options
-        assert len(questions[0]["options"]) < 2
+        from tools.ag3ntum.ag3ntum_ask.tool import create_ask_user_question_tool
+
+        with patch("tools.ag3ntum.ag3ntum_ask.tool.tool",
+                    lambda name, desc, schema: (lambda fn: fn)):
+            ask_fn = create_ask_user_question_tool(session_id="test-val")
+            result = await ask_fn({"questions": [{
+                "question": "Pick one?",
+                "header": "Test",
+                "options": [{"label": "Only one option"}],
+            }]})
+
+        assert result.get("is_error") is True
+        assert "at least 2" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
     async def test_validation_question_field_required(self):
         """Validation requires 'question' field in each question."""
-        questions = [{
-            "header": "Test",
-            "options": [{"label": "A"}, {"label": "B"}],
-        }]
-        # Should have 'question' field
-        assert "question" not in questions[0]
+        from tools.ag3ntum.ag3ntum_ask.tool import create_ask_user_question_tool
+
+        with patch("tools.ag3ntum.ag3ntum_ask.tool.tool",
+                    lambda name, desc, schema: (lambda fn: fn)):
+            ask_fn = create_ask_user_question_tool(session_id="test-val")
+            result = await ask_fn({"questions": [{
+                "header": "Test",
+                "options": [{"label": "A"}, {"label": "B"}],
+            }]})
+
+        assert result.get("is_error") is True
+        assert "question" in result["content"][0]["text"].lower()
 
     @pytest.mark.asyncio
     async def test_json_string_parsing(self):

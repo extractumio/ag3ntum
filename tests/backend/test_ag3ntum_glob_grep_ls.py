@@ -36,6 +36,24 @@ from tools.ag3ntum.ag3ntum_ls.tool import (
 from src.core.path_validator import PathValidationError
 
 
+@pytest.fixture
+def mock_validator(tmp_path):
+    """Create a mock path validator with display path support."""
+    validator = MagicMock()
+    validated_result = MagicMock()
+    validated_result.normalized = tmp_path
+    validator.validate_path.return_value = validated_result
+    validator.workspace = tmp_path
+
+    def _display_path(p, ws=tmp_path):
+        try:
+            return str(p.relative_to(ws))
+        except ValueError:
+            return str(p.resolve().relative_to(ws.resolve()))
+    validator.docker_to_display_path = _display_path
+    return validator
+
+
 # ============================================================================
 # Glob Tool Tests
 # ============================================================================
@@ -53,20 +71,6 @@ class TestGlobToolConstants:
 class TestGlobToolBasic:
     """Tests for basic Glob tool functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_glob_finds_files(self, tmp_path, mock_validator):
@@ -202,20 +206,6 @@ class TestGrepToolConstants:
 class TestGrepToolBasic:
     """Tests for basic Grep tool functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_grep_finds_pattern(self, tmp_path, mock_validator):
@@ -382,20 +372,6 @@ class TestFormatSize:
 class TestLSToolBasic:
     """Tests for basic LS tool functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_ls_lists_files(self, tmp_path, mock_validator):
@@ -550,20 +526,6 @@ class TestLSBrokenSymlinks:
     doesn't exist, causing ENOENT when LS traverses the workspace.
     """
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_ls_skips_broken_symlink(self, tmp_path, mock_validator):
@@ -837,20 +799,6 @@ class TestPathValidatorSandboxView:
 class TestGlobBrokenSymlinks:
     """Tests for Glob tool handling of broken symlinks."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_glob_skips_broken_symlink(self, tmp_path, mock_validator):
@@ -870,20 +818,6 @@ class TestGlobBrokenSymlinks:
 class TestGrepBrokenSymlinks:
     """Tests for Grep tool handling of broken symlinks."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path
-        validator.validate_path.return_value = validated_result
-        validator.workspace = tmp_path
-        def _display_path(p, ws=tmp_path):
-            try:
-                return str(p.relative_to(ws))
-            except ValueError:
-                return str(p.resolve().relative_to(ws.resolve()))
-        validator.docker_to_display_path = _display_path
-        return validator
 
     @pytest.mark.asyncio
     async def test_grep_skips_broken_symlink(self, tmp_path, mock_validator):

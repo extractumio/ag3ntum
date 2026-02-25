@@ -25,6 +25,17 @@ from tools.ag3ntum.ag3ntum_read.tool import (
 )
 
 
+@pytest.fixture
+def mock_validator(tmp_path):
+    """Create a mock path validator."""
+    validator = MagicMock()
+    validated_result = MagicMock()
+    validated_result.normalized = tmp_path / "test.txt"
+    validated_result.is_readonly = False
+    validator.validate_path.return_value = validated_result
+    return validator
+
+
 class TestReadToolConstants:
     """Tests for tool constants."""
 
@@ -42,15 +53,6 @@ class TestReadToolConstants:
 class TestReadToolBasicReading:
     """Tests for basic file reading functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_read_simple_file(self, tmp_path, mock_validator):
@@ -121,15 +123,6 @@ class TestReadToolBasicReading:
 class TestReadToolOffsetAndLimit:
     """Tests for offset and limit parameters."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_read_with_offset(self, tmp_path, mock_validator):
@@ -208,15 +201,6 @@ class TestReadToolOffsetAndLimit:
 class TestReadToolPathValidation:
     """Tests for path validation and security."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_missing_file_path(self):
@@ -275,15 +259,6 @@ class TestReadToolPathValidation:
 class TestReadToolErrorHandling:
     """Tests for error handling."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_file_not_found(self, tmp_path, mock_validator):
@@ -340,15 +315,6 @@ class TestReadToolErrorHandling:
 class TestReadToolSecretsRedaction:
     """Tests for secrets redaction functionality."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_secrets_redacted_in_output(self, tmp_path, mock_validator):
@@ -431,15 +397,6 @@ class TestReadToolSecretsRedaction:
 class TestReadToolEdgeCases:
     """Edge case tests for the Read tool."""
 
-    @pytest.fixture
-    def mock_validator(self, tmp_path):
-        """Create a mock path validator."""
-        validator = MagicMock()
-        validated_result = MagicMock()
-        validated_result.normalized = tmp_path / "test.txt"
-        validated_result.is_readonly = False
-        validator.validate_path.return_value = validated_result
-        return validator
 
     @pytest.mark.asyncio
     async def test_large_file(self, tmp_path, mock_validator):

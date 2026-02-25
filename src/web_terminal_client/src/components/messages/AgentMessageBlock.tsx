@@ -5,7 +5,7 @@
  * Extracted from App.tsx for better modularity.
  */
 
-import React, { useRef } from 'react';
+import { useRef } from 'react';
 import type { ToolCallView, SubagentView, TodoItem, ResultStatus } from '../../types/conversation';
 import {
   stripResumeContext,
@@ -16,7 +16,7 @@ import {
 } from '../../utils';
 import { renderMarkdown } from '../../MarkdownRenderer';
 import { CopyButtons } from '../common';
-import { AgentSpinner, InlineStreamSpinner, TrailingWaitSpinner } from '../spinners';
+import { AgentSpinner, InlineStreamSpinner, TrailingActivitySpinner } from '../spinners';
 import { ToolCallBlock } from './ToolCallBlock';
 import { SubagentBlock } from './SubagentBlock';
 import { AskUserQuestionBlock } from './AskUserQuestionBlock';
@@ -95,7 +95,14 @@ export function AgentMessageBlock({
   const normalizedStatus = status ? (normalizeStatus(status) as ResultStatus) : undefined;
   const isTerminalStatus = normalizedStatus && normalizedStatus !== 'running';
   const statusLabel = getStatusLabel(normalizedStatus);
-  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'error' || normalizedStatus === 'cancelled';
+  const showFailureStatus = normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
+
+  // Derive currently running tool (skip Think as it's not a user-visible tool)
+  const runningTool = toolCalls.find(t => t.status === 'running' && t.tool !== 'Think');
+  const runningToolName = runningTool?.tool.replace(/^mcp__ag3ntum__/, '') || null;
+
+  // Running subagents for status display
+  const runningSubagents = subagents.filter(s => s.status === 'running');
 
   // Show inline spinner when streaming and no tool calls or subagents
   const showInlineSpinner = isStreaming && toolCalls.length === 0 && subagents.length === 0;
@@ -138,6 +145,16 @@ export function AgentMessageBlock({
         <span className={`message-icon ${getIconStatusClass()}`}>◆</span>
         <span className="message-sender">AGENT</span>
         <span className="message-time">@ {time}</span>
+        {subagents.length > 0 && (
+          <span className="subagent-status-dots">
+            {subagents.map(sub => (
+              <span key={sub.id} className={`subagent-dot subagent-dot-${sub.status}`}
+                    title={`${sub.name}: ${sub.status}`}>
+                ◆
+              </span>
+            ))}
+          </span>
+        )}
         {/* Message stats badges */}
         {(otherToolCalls.length > 0 || subagents.length > 0 || (files && files.length > 0)) && (
           <div className="message-stats">
@@ -198,10 +215,37 @@ export function AgentMessageBlock({
               <>
                 {renderMarkdown(displayContent)}
                 {showInlineSpinner && <InlineStreamSpinner />}
-                {showTrailingWait && <TrailingWaitSpinner />}
+                {showTrailingWait && (
+                  <TrailingActivitySpinner
+                    toolName={runningToolName}
+                    subagents={subagents}
+                  />
+                )}
               </>
             ) : null}
-            {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && <AgentSpinner />}
+            {!displayContent && !isTerminalStatus && !showInlineSpinner && askUserQuestionTools.length === 0 && (
+              <>
+                <AgentSpinner toolName={runningToolName} />
+                {sessionRunning && runningSubagents.length > 0 && (
+                  <div className="running-agents-status">
+                    {runningSubagents.map(sub => (
+                      <div key={sub.id} className="running-agent-line">
+                        <span className="subagent-dot subagent-dot-running">◆</span>
+                        <span className="running-agent-name">{sub.name}</span>
+                        <InlineStreamSpinner />
+                      </div>
+                    ))}
+                    {subagents.filter(s => s.status !== 'running').map(sub => (
+                      <div key={sub.id} className="running-agent-line">
+                        <span className={`subagent-dot subagent-dot-${sub.status}`}>◆</span>
+                        <span className="running-agent-name">{sub.name}</span>
+                        <span className="running-agent-done">{sub.status === 'complete' ? '✓' : '✗'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
             {!displayContent && isTerminalStatus && showFailureStatus && (
               <div className="agent-status-indicator">✗ {statusLabel || 'Stopped'}</div>
             )}

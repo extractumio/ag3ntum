@@ -1,0 +1,15 @@
+[run]
+source = src
+omit =
+    src/web_terminal_client/*
+    src/*/migrations/*
+    tests/*
+
+[report]
+show_missing = true
+precision = 1
+# Start with 0 (informational). Set threshold after establishing baseline.
+fail_under = 0
+
+[html]
+directory = /tmp/coverage-html
