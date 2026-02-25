@@ -1,6 +1,6 @@
-# Ag3ntum
+# Ag3ntum: Agentic SysAdmin + DevOps + Webmaster. Sandboxed.
 
-**Your Ops Engineer. SysAdmin + DevOps + Webmaster. Sandboxed.**
+**Your dedicated Ops Engineer — built with security and safety in mind.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.13+-blue.svg" alt="Python 3.13+">
@@ -9,9 +9,9 @@
   <img src="https://img.shields.io/badge/Self--Hosted-Data%20Sovereign-blueviolet.svg" alt="Self-Hosted">
 </p>
 
-Ag3ntum is a self-hosted **Ops Engineer** for Linux servers and websites. It performs server configuration, security hardening, log analysis, website troubleshooting, and routine maintenance — methodically, traceably, and inside a 6-layer security sandbox.
+Ag3ntum is a self-hosted **agentic platform** for Linux servers and websites. It performs server configuration, security hardening, log analysis, website troubleshooting, and routine maintenance — methodically, traceably, and inside a 6-layer security sandbox.
 
-Describe what you need in plain English. Ag3ntum executes with domain expertise, reports every step, and requires your approval before anything destructive runs. Full audit trail. Complete session replay. All data stays on your infrastructure.
+Make an API call, schedule recurring tasks, or submit a job through the web UI. Ag3ntum executes with full transparency and domain expertise, reports every step, and requires your approval before making sensitive changes. Full audit trail. Complete session replay. All data stays on your infrastructure.
 
 **Model-agnostic.** Ships with Anthropic Claude support and a built-in LLM proxy that routes to any OpenAI-compatible API — OpenRouter, Azure OpenAI, Amazon Bedrock (via gateway), Google Vertex AI (via gateway), Ollama, llama.cpp, vLLM, or any local inference server. Swap models per task without code changes.
 
@@ -23,13 +23,19 @@ Describe what you need in plain English. Ag3ntum executes with domain expertise,
 
 ## Install
 
+**Stable release** (recommended):
+```bash
+curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/release/install.sh | bash
+```
+
+**Latest development** (main branch):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/extractumio/ag3ntum/main/install.sh | bash
 ```
 
-Open **https://localhost:50080** after build. See [QUICK-START-GUIDE.md](QUICK-START-GUIDE.md) for API key setup and first user creation.
+Open **http://localhost:50080** after build. See [QUICK-START-GUIDE.md](QUICK-START-GUIDE.md) for API key setup and first user creation.
 
-**Requirements:** Docker + Docker Compose | 2GB+ RAM | Linux or macOS
+**Requirements:** Docker + Docker Compose | 2 GB+ RAM | Linux or macOS
 
 ---
 
@@ -61,14 +67,7 @@ Open **https://localhost:50080** after build. See [QUICK-START-GUIDE.md](QUICK-S
 
 ### Document Processing
 
-Upload and process directly in the web UI:
-
-| Format | Capability |
-|--------|-----------|
-| PDF | Text extraction with page-level access |
-| Office | DOCX, XLSX, PPTX parsing and data extraction |
-| Archives | ZIP, TAR, 7z exploration and content analysis |
-| Tabular | CSV, Excel, Parquet transformation and analysis |
+Supports document upload and processing directly in the web UI — PDF text extraction, Office documents (DOCX, XLSX, PPTX), archives (ZIP, TAR, 7z), and tabular data (CSV, Excel, Parquet).
 
 ---
 
@@ -203,7 +202,7 @@ Tenant separation is enforced by the Linux kernel, not application logic. Bypass
 ./run.sh shell                           # Interactive shell into API container
 ```
 
-**After build:** Web UI at `https://localhost:50080` | API at `https://localhost:40080`
+**After build:** Web UI at `http://localhost:50080` | API at `http://localhost:40080`
 
 ---
 

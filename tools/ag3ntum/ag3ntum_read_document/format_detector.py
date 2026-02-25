@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-import magic  # Required: python-magic
-
 logger = logging.getLogger(__name__)
 
 
@@ -201,8 +199,9 @@ COMPOUND_EXTENSIONS = {
 
 
 def _get_mime_type(path: Path) -> str | None:
-    """Get MIME type using python-magic."""
+    """Get MIME type using python-magic (imported lazily)."""
     try:
+        import magic  # Lazy: python-magic
         mime = magic.Magic(mime=True)
         return mime.from_file(str(path))
     except Exception as e:
