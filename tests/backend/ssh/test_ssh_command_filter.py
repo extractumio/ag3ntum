@@ -500,3 +500,90 @@ class TestSSHCommandFilter:
         assert r.rule == "fail_closed"
         assert r.category == "config_error"
         assert "fail-closed" in r.reason.lower() or "invalid" in r.reason.lower()
+
+    # -----------------------------------------------------------------------
+    # Path matching — no substring false positives
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_path_appears_in_command_exact(self):
+        """Config path '/etc/nginx' matches at word boundary in command."""
+        assert SSHCommandFilter._path_appears_in_command(
+            "/etc/nginx", "cat /etc/nginx/nginx.conf"
+        )
+
+    @pytest.mark.unit
+    def test_path_appears_in_command_no_substring(self):
+        """Config path '/etc/nginx' does NOT match '/notetc/nginx' (substring)."""
+        assert not SSHCommandFilter._path_appears_in_command(
+            "/etc/nginx", "cat /notetc/nginx/nginx.conf"
+        )
+
+    @pytest.mark.unit
+    def test_path_appears_in_command_no_embedded_prefix(self):
+        """Config path '/etc/nginx' does NOT match '/tmp/etc/nginx'."""
+        assert not SSHCommandFilter._path_appears_in_command(
+            "/etc/nginx", "cat /tmp/etc/nginx/conf"
+        )
+
+    @pytest.mark.unit
+    def test_path_appears_in_command_quoted_path(self):
+        """Config path matches inside single or double quotes."""
+        assert SSHCommandFilter._path_appears_in_command(
+            "/etc/nginx", "cat '/etc/nginx/nginx.conf'"
+        )
+        assert SSHCommandFilter._path_appears_in_command(
+            "/etc/nginx", 'cat "/etc/nginx/nginx.conf"'
+        )
+
+    @pytest.mark.unit
+    def test_path_is_under_exact_match(self):
+        """Path equals config directory exactly."""
+        assert SSHCommandFilter._path_is_under("/etc/nginx", "/etc/nginx")
+
+    @pytest.mark.unit
+    def test_path_is_under_subpath(self):
+        """Subpath of config directory matches."""
+        assert SSHCommandFilter._path_is_under(
+            "/etc/nginx/sites/default", "/etc/nginx"
+        )
+
+    @pytest.mark.unit
+    def test_path_is_under_trailing_slash(self):
+        """Config path with trailing slash still matches."""
+        assert SSHCommandFilter._path_is_under(
+            "/etc/nginx/conf.d/app.conf", "/etc/nginx/"
+        )
+
+    @pytest.mark.unit
+    def test_path_is_under_no_false_prefix(self):
+        """'/etc/nginxtra' is NOT under '/etc/nginx' (no separator)."""
+        assert not SSHCommandFilter._path_is_under(
+            "/etc/nginxtra/conf", "/etc/nginx"
+        )
+
+    @pytest.mark.unit
+    def test_path_is_under_unrelated(self):
+        """Completely unrelated path does not match."""
+        assert not SSHCommandFilter._path_is_under(
+            "/opt/app/config.yml", "/etc/nginx"
+        )
+
+    @pytest.mark.unit
+    def test_l2_command_path_no_substring_false_positive(self, command_filter):
+        """L2 check_command doesn't false-positive on substring path in command."""
+        # '/etc/nginx/' is writable, but '/fake/etc/nginx/' should not match
+        r = command_filter.check_command(
+            "echo test > /fake/etc/nginx/site.conf", 2
+        )
+        # Should be blocked (no allowlist match), NOT allowed via writable_path
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_check_path_writable_no_prefix_false_positive(self, command_filter):
+        """check_path_writable doesn't match '/etc/nginxtra' against '/etc/nginx/'."""
+        r = command_filter.check_path_writable("/etc/nginxtra/conf", 2)
+        assert not r.allowed
+        # Should be denied because path is not in writable_paths,
+        # NOT allowed as a writable_path match
+        assert r.rule == "L2_configuration:not_in_writable_paths"

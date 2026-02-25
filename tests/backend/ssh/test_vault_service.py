@@ -6,6 +6,7 @@ defined in tests/backend/ssh/conftest.py. No containers required.
 """
 import pytest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import MagicMock
 
 from src.services.vault_encryption import VaultEncryption
 from src.services.vault_service import VaultService
@@ -446,3 +447,65 @@ class TestVaultService:
 
         for env_name, val in pairs:
             assert env_vars[env_name] == val
+
+
+class TestSSHCredentialVaultKnownHosts:
+    """Tests for SSHCredentialVault._resolve_known_hosts."""
+
+    @pytest.mark.unit
+    def test_resolve_known_hosts_default_is_not_none(self):
+        """Default (no config) returns empty tuple (asyncssh system defaults), never None."""
+        from src.core.ssh.ssh_credential_vault import SSHCredentialVault
+        from src.core.ssh.ssh_config import SSHSecurityConfig
+
+        config = SSHSecurityConfig(enabled=True)
+        vault_svc = MagicMock()
+        cred_vault = SSHCredentialVault(vault_svc, config)
+
+        result = cred_vault._resolve_known_hosts()
+
+        # Must NOT be None (None disables host key verification)
+        assert result is not None
+
+    @pytest.mark.unit
+    def test_resolve_known_hosts_explicit_path(self):
+        """Explicit known_hosts_path in config is returned as-is."""
+        from src.core.ssh.ssh_credential_vault import SSHCredentialVault
+        from src.core.ssh.ssh_config import (
+            SSHCredentialConfig,
+            SSHSecurityConfig,
+        )
+
+        config = SSHSecurityConfig(
+            enabled=True,
+            credentials=SSHCredentialConfig(
+                known_hosts_path="/custom/known_hosts"
+            ),
+        )
+        vault_svc = MagicMock()
+        cred_vault = SSHCredentialVault(vault_svc, config)
+
+        result = cred_vault._resolve_known_hosts()
+
+        assert result == "/custom/known_hosts"
+
+    @pytest.mark.unit
+    def test_resolve_known_hosts_never_returns_none(self):
+        """Even with known_hosts_path=None in config, result is not None."""
+        from src.core.ssh.ssh_credential_vault import SSHCredentialVault
+        from src.core.ssh.ssh_config import (
+            SSHCredentialConfig,
+            SSHSecurityConfig,
+        )
+
+        config = SSHSecurityConfig(
+            enabled=True,
+            credentials=SSHCredentialConfig(known_hosts_path=None),
+        )
+        vault_svc = MagicMock()
+        cred_vault = SSHCredentialVault(vault_svc, config)
+
+        result = cred_vault._resolve_known_hosts()
+
+        # Critical: None would disable host key verification (MITM risk)
+        assert result is not None

@@ -300,6 +300,50 @@ class TestSSHConnectionPool:
         assert pool.total_connections == 0
 
     # -----------------------------------------------------------------------
+    # Watchdog reset
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    async def test_reset_watchdog_creates_new_task(self, pool):
+        """_reset_watchdog cancels old task and starts a new one."""
+        mock_conn = self._make_mock_conn()
+        connect_fn = AsyncMock(return_value=mock_conn)
+        await pool.get_connection("sess1", "profile1", "user1", connect_fn)
+
+        key = "sess1:profile1"
+        entry = pool._connections[key]
+        old_task = entry._watchdog_task
+        assert old_task is not None
+
+        # Reset watchdog — should cancel old and create new task
+        pool._reset_watchdog(key, entry)
+
+        # Old task should be different from new task (cancel + recreate)
+        assert entry._watchdog_task is not old_task
+        assert entry._watchdog_task is not None
+        assert not entry._watchdog_task.done()
+        # Old task was cancel()'d — it enters "cancelling" state
+        assert old_task.cancelling() or old_task.cancelled()
+
+    @pytest.mark.unit
+    async def test_get_connection_reuse_resets_watchdog(self, pool):
+        """Second get_connection call for same key resets watchdog timer."""
+        mock_conn = self._make_mock_conn()
+        connect_fn = AsyncMock(return_value=mock_conn)
+        await pool.get_connection("sess1", "profile1", "user1", connect_fn)
+
+        key = "sess1:profile1"
+        first_task = pool._connections[key]._watchdog_task
+        assert first_task is not None
+
+        # Reuse connection — should reset watchdog
+        await pool.get_connection("sess1", "profile1", "user1", connect_fn)
+
+        second_task = pool._connections[key]._watchdog_task
+        assert first_task.cancelling() or first_task.cancelled()
+        assert second_task is not first_task
+
+    # -----------------------------------------------------------------------
     # SSHCommandResult dataclass
     # -----------------------------------------------------------------------
 
