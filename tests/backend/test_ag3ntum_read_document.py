@@ -66,10 +66,8 @@ from tools.ag3ntum.ag3ntum_read_document.utils import (
     safe_filename,
     truncate_string,
 )
-from tools.ag3ntum.ag3ntum_read_document.extractors import (
-    get_extractor,
-    TextExtractor,
-)
+from tools.ag3ntum.ag3ntum_read_document.extractors import get_extractor
+from tools.ag3ntum.ag3ntum_read_document.extractors.text import TextExtractor
 from tools.ag3ntum.ag3ntum_read_document.extractors.base import (
     BaseExtractor,
     ExtractedContent,
