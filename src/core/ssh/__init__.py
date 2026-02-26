@@ -11,6 +11,7 @@ from .ssh_config import (
     SSHProfile,
     SSHSecurityConfig,
     SSHConnectionLimits,
+    SSHHostKeyVerificationConfig,
     load_ssh_security_config,
     load_ssh_profiles,
 )
@@ -22,11 +23,14 @@ from .ssh_connection_pool import (
     SSHConnectionLimitError,
 )
 from .ssh_credential_vault import SSHCredentialVault
+from .ssh_host_key_resolver import SSHHostKeyResolver, HOST_KEY_SECRET_TYPE
+from .ssh_host_key_scanner import scan_host_key
 
 __all__ = [
     "SSHProfile",
     "SSHSecurityConfig",
     "SSHConnectionLimits",
+    "SSHHostKeyVerificationConfig",
     "load_ssh_security_config",
     "load_ssh_profiles",
     "SSHCommandFilter",
@@ -36,4 +40,7 @@ __all__ = [
     "SSHCommandResult",
     "SSHConnectionLimitError",
     "SSHCredentialVault",
+    "SSHHostKeyResolver",
+    "HOST_KEY_SECRET_TYPE",
+    "scan_host_key",
 ]

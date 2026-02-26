@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from ...services.vault_service import VaultService
     from .ssh_config import SSHProfile, SSHSecurityConfig
+    from .ssh_host_key_resolver import SSHHostKeyResolver
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,11 @@ class SSHCredentialVault:
         self,
         vault_service: VaultService,
         security_config: SSHSecurityConfig,
+        host_key_resolver: SSHHostKeyResolver | None = None,
     ) -> None:
         self._vault = vault_service
         self._config = security_config
+        self._host_key_resolver = host_key_resolver
 
     async def get_connect_fn(
         self,
@@ -69,14 +72,25 @@ class SSHCredentialVault:
         """
         auth_method = profile.auth_method
 
+        # Resolve host key verification under the active db session
+        known_hosts = await self._resolve_host_verification(
+            db, user_id, session_id, profile
+        )
+
         if auth_method == "key":
-            return await self._build_key_connect_fn(db, user_id, session_id, profile)
+            return await self._build_key_connect_fn(
+                db, user_id, session_id, profile, known_hosts
+            )
 
         if auth_method == "certificate":
-            return await self._build_certificate_connect_fn(db, user_id, session_id, profile)
+            return await self._build_certificate_connect_fn(
+                db, user_id, session_id, profile, known_hosts
+            )
 
         if auth_method == "password":
-            return await self._build_password_connect_fn(db, user_id, session_id, profile)
+            return await self._build_password_connect_fn(
+                db, user_id, session_id, profile, known_hosts
+            )
 
         raise ValueError(
             f"Unsupported auth method '{auth_method}' for profile '{profile.name}'. "
@@ -122,21 +136,37 @@ class SSHCredentialVault:
 
         return errors
 
-    # --- Internal builders ---
+    # --- Internal helpers ---
 
-    def _resolve_known_hosts(self) -> str | None:
-        """Resolve the known_hosts setting from security config.
+    async def _resolve_host_verification(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        session_id: str,
+        profile: SSHProfile,
+    ) -> object:
+        """Resolve the known_hosts parameter for asyncssh.
 
-        Returns the path string for asyncssh's known_hosts parameter.
-        - Explicit path from config: use as-is
-        - None/unset in config: use asyncssh default (system known_hosts)
+        Priority:
+        1. Host key resolver (vault-pinned keys) — if configured
+        2. Explicit known_hosts_path from config — legacy fallback
+        3. Empty tuple — asyncssh system defaults
+
         Never returns None — that would disable host key verification.
         """
+        if self._host_key_resolver is not None:
+            return await self._host_key_resolver.resolve(
+                profile, user_id, session_id, db
+            )
+
         configured = self._config.credentials.known_hosts_path
         if configured:
             return configured
-        # Let asyncssh use its default (~/.ssh/known_hosts + system files)
-        return ()  # type: ignore[return-value]  # asyncssh accepts empty tuple = system defaults
+
+        # asyncssh accepts empty tuple = use system defaults
+        return ()
+
+    # --- Connection builders ---
 
     async def _build_key_connect_fn(
         self,
@@ -144,6 +174,7 @@ class SSHCredentialVault:
         user_id: str,
         session_id: str,
         profile: SSHProfile,
+        known_hosts,
     ) -> Callable[[], Awaitable[asyncssh.SSHClientConnection]]:
         """Build a connect_fn for key-based authentication."""
         if not profile.key_ref:
@@ -157,7 +188,6 @@ class SSHCredentialVault:
         host = profile.host
         port = profile.port
         username = profile.username
-        known_hosts = self._resolve_known_hosts()
 
         logger.debug(
             "Built key connect_fn for profile '%s' (user=%s, host=%s:%d)",
@@ -184,6 +214,7 @@ class SSHCredentialVault:
         user_id: str,
         session_id: str,
         profile: SSHProfile,
+        known_hosts,
     ) -> Callable[[], Awaitable[asyncssh.SSHClientConnection]]:
         """Build a connect_fn for certificate-based authentication."""
         if not profile.key_ref:
@@ -205,7 +236,6 @@ class SSHCredentialVault:
         host = profile.host
         port = profile.port
         username = profile.username
-        known_hosts = self._resolve_known_hosts()
 
         logger.debug(
             "Built certificate connect_fn for profile '%s' (user=%s, host=%s:%d)",
@@ -233,6 +263,7 @@ class SSHCredentialVault:
         user_id: str,
         session_id: str,
         profile: SSHProfile,
+        known_hosts,
     ) -> Callable[[], Awaitable[asyncssh.SSHClientConnection]]:
         """Build a connect_fn for password-based authentication."""
         if not self._config.credentials.password_auth_allowed:
@@ -250,7 +281,6 @@ class SSHCredentialVault:
         host = profile.host
         port = profile.port
         username = profile.username
-        known_hosts = self._resolve_known_hosts()
 
         logger.debug(
             "Built password connect_fn for profile '%s' (user=%s, host=%s:%d)",

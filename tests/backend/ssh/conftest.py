@@ -25,6 +25,7 @@ from src.core.ssh.ssh_command_filter import SSHCommandFilter
 from src.core.ssh.ssh_connection_pool import SSHConnectionPool
 from src.services.vault_encryption import VaultEncryption
 from src.services.vault_service import VaultService
+from src.core.ssh.ssh_host_key_resolver import SSHHostKeyResolver
 from src.services.ssh_audit_service import SSHAuditService
 
 
@@ -179,3 +180,9 @@ def connection_pool():
 def audit_service():
     """SSHAuditService instance for unit tests."""
     return SSHAuditService()
+
+
+@pytest.fixture
+def host_key_resolver(vault_service):
+    """SSHHostKeyResolver wired to the test VaultService."""
+    return SSHHostKeyResolver(vault_service)

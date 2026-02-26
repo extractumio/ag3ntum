@@ -29,12 +29,12 @@ from claude_agent_sdk import tool
 
 if TYPE_CHECKING:
     import asyncssh  # noqa: F401 — type annotation only
+    from src.services.ssh_audit_service import SSHAuditService
 
 from src.core.ssh.ssh_config import SSHProfile, SSHSecurityConfig
 from src.core.ssh.ssh_connection_pool import SSHConnectionPool, SSHConnectionLimitError
 from src.core.ssh.ssh_command_filter import SSHCommandFilter
 from src.core.ssh.ssh_credential_vault import SSHCredentialVault
-from src.services.ssh_audit_service import SSHAuditService
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,63 @@ def _resolve_profile(
     return profile, None
 
 
+def _classify_host_key_error(exc: Exception, profile_name: str) -> str | None:
+    """Classify an SSH exception as a host key error, returning a user message.
+
+    Returns None if the exception is not host-key related.
+    """
+    exc_type = type(exc).__name__
+
+    # asyncssh raises HostKeyNotVerifiable when the server key
+    # doesn't match any trusted key in the known_hosts callable
+    if exc_type == "HostKeyNotVerifiable":
+        return (
+            "SSH host key verification failed for profile "
+            f"'{profile_name}'. The server's host key does not match "
+            "the pinned key. Administrator must verify and re-pin "
+            "the host key."
+        )
+
+    # When known_hosts callable returns empty trust list,
+    # asyncssh raises PermissionDenied or DisconnectError
+    exc_str = str(exc).lower()
+    if "host key" in exc_str or "known_hosts" in exc_str:
+        return (
+            f"No pinned host key for profile '{profile_name}'. "
+            "Administrator must scan and pin the host key before connecting."
+        )
+
+    return None
+
+
+async def _audit_host_key_failure(
+    ctx: SSHToolContext,
+    profile_name: str,
+    profile: SSHProfile,
+    exc: Exception,
+) -> None:
+    """Log a host key failure as an audit event (best-effort)."""
+    exc_type = type(exc).__name__
+    event_type = (
+        "host_key_mismatch" if exc_type == "HostKeyNotVerifiable"
+        else "host_key_missing"
+    )
+    try:
+        async with ctx.db_session_factory() as db:
+            await ctx.audit_service.log_host_key_event(
+                db,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                ssh_profile=profile_name,
+                remote_host=profile.host,
+                remote_port=profile.port,
+                event_type=event_type,
+                details=str(exc),
+            )
+    except Exception as audit_exc:
+        logger.error("Failed to log host key audit event: %s", audit_exc)
+
+
 # ---------------------------------------------------------------------------
 # SSHExec — execute a command on a remote server
 # ---------------------------------------------------------------------------
@@ -197,6 +254,10 @@ async def _ssh_exec_impl(
     except ValueError as exc:
         return _error(f"SSH credential error: {exc}")
     except Exception as exc:
+        err_msg = _classify_host_key_error(exc, profile_name)
+        if err_msg:
+            await _audit_host_key_failure(ctx, profile_name, profile, exc)
+            return _error(err_msg)
         logger.error("SSHExec: Connection failed for profile %s: %s", profile_name, exc)
         return _error(f"SSH connection failed: {_sanitise_error(exc)}")
 
@@ -334,6 +395,10 @@ async def _ssh_read_impl(
     except ValueError as exc:
         return _error(f"SSH credential error: {exc}")
     except Exception as exc:
+        err_msg = _classify_host_key_error(exc, profile_name)
+        if err_msg:
+            await _audit_host_key_failure(ctx, profile_name, profile, exc)
+            return _error(err_msg)
         logger.error("SSHRead: Connection failed for profile %s: %s", profile_name, exc)
         return _error(f"SSH connection failed: {_sanitise_error(exc)}")
 
@@ -533,6 +598,10 @@ async def _ssh_connect_connect(
     except ValueError as exc:
         return _error(f"SSH credential error: {exc}")
     except Exception as exc:
+        err_msg = _classify_host_key_error(exc, profile_name)
+        if err_msg:
+            await _audit_host_key_failure(ctx, profile_name, profile, exc)
+            return _error(err_msg)
         logger.error(
             "SSHConnect: Connection failed for profile %s: %s", profile_name, exc
         )

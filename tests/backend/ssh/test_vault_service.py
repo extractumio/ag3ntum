@@ -449,30 +449,45 @@ class TestVaultService:
             assert env_vars[env_name] == val
 
 
-class TestSSHCredentialVaultKnownHosts:
-    """Tests for SSHCredentialVault._resolve_known_hosts."""
+class TestSSHCredentialVaultHostVerification:
+    """Tests for SSHCredentialVault._resolve_host_verification."""
 
     @pytest.mark.unit
-    def test_resolve_known_hosts_default_is_not_none(self):
-        """Default (no config) returns empty tuple (asyncssh system defaults), never None."""
+    async def test_with_resolver_delegates_to_resolver(self):
+        """When host_key_resolver is set, _resolve_host_verification
+        delegates to it."""
+        from unittest.mock import AsyncMock
         from src.core.ssh.ssh_credential_vault import SSHCredentialVault
-        from src.core.ssh.ssh_config import SSHSecurityConfig
+        from src.core.ssh.ssh_config import SSHProfile, SSHSecurityConfig
+
+        mock_resolver = MagicMock()
+        mock_callable = MagicMock()
+        mock_resolver.resolve = AsyncMock(return_value=mock_callable)
 
         config = SSHSecurityConfig(enabled=True)
         vault_svc = MagicMock()
-        cred_vault = SSHCredentialVault(vault_svc, config)
+        cred_vault = SSHCredentialVault(
+            vault_svc, config, host_key_resolver=mock_resolver
+        )
 
-        result = cred_vault._resolve_known_hosts()
+        mock_db = MagicMock()
+        profile = SSHProfile(name="test", host="1.2.3.4", username="u")
+        result = await cred_vault._resolve_host_verification(
+            mock_db, "user-1", "session-1", profile
+        )
 
-        # Must NOT be None (None disables host key verification)
-        assert result is not None
+        assert result is mock_callable
+        mock_resolver.resolve.assert_awaited_once_with(
+            profile, "user-1", "session-1", mock_db
+        )
 
     @pytest.mark.unit
-    def test_resolve_known_hosts_explicit_path(self):
-        """Explicit known_hosts_path in config is returned as-is."""
+    async def test_without_resolver_uses_config_path(self):
+        """Without resolver, explicit known_hosts_path is returned."""
         from src.core.ssh.ssh_credential_vault import SSHCredentialVault
         from src.core.ssh.ssh_config import (
             SSHCredentialConfig,
+            SSHProfile,
             SSHSecurityConfig,
         )
 
@@ -485,19 +500,42 @@ class TestSSHCredentialVaultKnownHosts:
         vault_svc = MagicMock()
         cred_vault = SSHCredentialVault(vault_svc, config)
 
-        result = cred_vault._resolve_known_hosts()
+        profile = SSHProfile(name="test", host="1.2.3.4", username="u")
+        result = await cred_vault._resolve_host_verification(
+            MagicMock(), "user-1", "session-1", profile
+        )
 
         assert result == "/custom/known_hosts"
 
     @pytest.mark.unit
-    def test_resolve_known_hosts_never_returns_none(self):
-        """Even with known_hosts_path=None in config, result is not None."""
+    async def test_without_resolver_no_config_returns_system_default(self):
+        """Without resolver or config path, returns empty tuple
+        (asyncssh system defaults)."""
+        from src.core.ssh.ssh_credential_vault import SSHCredentialVault
+        from src.core.ssh.ssh_config import SSHProfile, SSHSecurityConfig
+
+        config = SSHSecurityConfig(enabled=True)
+        vault_svc = MagicMock()
+        cred_vault = SSHCredentialVault(vault_svc, config)
+
+        profile = SSHProfile(name="test", host="1.2.3.4", username="u")
+        result = await cred_vault._resolve_host_verification(
+            MagicMock(), "user-1", "session-1", profile
+        )
+
+        assert result == ()
+
+    @pytest.mark.unit
+    async def test_never_returns_none(self):
+        """_resolve_host_verification never returns None regardless of config."""
         from src.core.ssh.ssh_credential_vault import SSHCredentialVault
         from src.core.ssh.ssh_config import (
             SSHCredentialConfig,
+            SSHProfile,
             SSHSecurityConfig,
         )
 
+        # No resolver, no config path
         config = SSHSecurityConfig(
             enabled=True,
             credentials=SSHCredentialConfig(known_hosts_path=None),
@@ -505,7 +543,10 @@ class TestSSHCredentialVaultKnownHosts:
         vault_svc = MagicMock()
         cred_vault = SSHCredentialVault(vault_svc, config)
 
-        result = cred_vault._resolve_known_hosts()
+        profile = SSHProfile(name="test", host="1.2.3.4", username="u")
+        result = await cred_vault._resolve_host_verification(
+            MagicMock(), "user-1", "session-1", profile
+        )
 
         # Critical: None would disable host key verification (MITM risk)
         assert result is not None

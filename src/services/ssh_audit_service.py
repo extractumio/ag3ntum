@@ -193,6 +193,44 @@ class SSHAuditService:
         )
         return await self._write(db, event)
 
+    async def log_host_key_event(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+        ssh_profile: str,
+        remote_host: str,
+        remote_port: int,
+        event_type: str,
+        details: str = "",
+    ) -> int:
+        """Log a host key verification event.
+
+        event_type values:
+        - host_key_verified:  Pinned key matched server key
+        - host_key_missing:   No pinned key found (connection rejected)
+        - host_key_mismatch:  Server key does not match pinned key (MITM?)
+        - host_key_pinned:    New host key was pinned to vault
+        """
+        blocked = event_type in ("host_key_missing", "host_key_mismatch")
+        anomaly = event_type == "host_key_mismatch"
+
+        event = SSHAuditEvent(
+            session_id=session_id,
+            user_id=user_id,
+            ssh_profile=ssh_profile,
+            remote_host=remote_host,
+            remote_user="",
+            remote_port=remote_port,
+            operation=event_type,
+            blocked=blocked,
+            block_reason=details if blocked else None,
+            anomaly_detected=anomaly,
+            anomaly_type="host_key_change" if anomaly else None,
+            timestamp=datetime.now(timezone.utc),
+        )
+        return await self._write(db, event)
+
     async def query_by_session(
         self,
         db: AsyncSession,

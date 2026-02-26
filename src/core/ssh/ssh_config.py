@@ -66,6 +66,16 @@ class SSHCredentialConfig:
 
 
 @dataclass
+class SSHHostKeyVerificationConfig:
+    """Host key verification settings.
+
+    Phase 1: Only 'strict' mode — requires pinned host keys from vault.
+    No TOFU, no CA-cert verification (architecture supports adding later).
+    """
+    mode: str = "strict"  # Phase 1: only "strict" supported
+
+
+@dataclass
 class SSHContextIsolationConfig:
     """Context isolation settings for sensitive file handling."""
     enabled: bool = True
@@ -110,6 +120,9 @@ class SSHSecurityConfig:
     audit: SSHAuditConfig = field(default_factory=SSHAuditConfig)
     behavior_monitor: SSHBehaviorMonitorConfig = field(
         default_factory=SSHBehaviorMonitorConfig
+    )
+    host_key_verification: SSHHostKeyVerificationConfig = field(
+        default_factory=SSHHostKeyVerificationConfig
     )
 
 
@@ -168,6 +181,7 @@ def load_ssh_security_config(
     ctx_data = ssh_data.get("context_isolation", {})
     audit_data = ssh_data.get("audit", {})
     monitor_data = ssh_data.get("behavior_monitor", {})
+    hkv_data = ssh_data.get("host_key_verification", {})
 
     return SSHSecurityConfig(
         enabled=ssh_data.get("enabled", False),
@@ -260,6 +274,9 @@ def load_ssh_security_config(
             command_pattern_window_seconds=monitor_data.get(
                 "command_pattern_window_seconds", 60
             ),
+        ),
+        host_key_verification=SSHHostKeyVerificationConfig(
+            mode=hkv_data.get("mode", "strict"),
         ),
     )
 

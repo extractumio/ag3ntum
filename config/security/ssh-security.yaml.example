@@ -58,6 +58,13 @@ ssh:
     # NEVER set to "none" — that disables host key verification (MITM risk).
     known_hosts_path: null
 
+  # Host key verification mode
+  # strict: Only accept connections to hosts with pinned keys in the vault.
+  #         Admin must scan and pin host keys before first connection.
+  #         No TOFU (trust-on-first-use). Fail-closed: no key = rejected.
+  host_key_verification:
+    mode: strict
+
   # Context isolation for sensitive files
   context_isolation:
     enabled: true
