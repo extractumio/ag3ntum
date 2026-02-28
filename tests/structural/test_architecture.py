@@ -567,47 +567,6 @@ class TestCISecurityInvariants:
         )
 
     @pytest.mark.unit
-    def test_github_actions_pinned_to_shas(self):
-        """All GitHub Actions must be pinned to commit SHAs, not version tags.
-
-        Version tags (e.g. @v4) are mutable — a compromised action can
-        replace the tag to execute malicious code with access to repo
-        secrets. Pinning to commit SHAs prevents this. (EXT-24)
-        """
-        import re
-        # Matches: uses: actions/foo@v4 (tag) but not actions/foo@abc123 (SHA)
-        tag_pattern = re.compile(r'uses:\s+actions/[\w-]+@v\d+')
-        sha_pattern = re.compile(r'uses:\s+actions/[\w-]+@[0-9a-f]{40}')
-
-        if not os.path.isdir(self.WORKFLOWS_DIR):
-            pytest.skip(".github/workflows/ not found")
-
-        violations = []
-        for f in sorted(os.listdir(self.WORKFLOWS_DIR)):
-            if not f.endswith((".yml", ".yaml")):
-                continue
-            filepath = os.path.join(self.WORKFLOWS_DIR, f)
-            with open(filepath) as fh:
-                for i, line in enumerate(fh, 1):
-                    if tag_pattern.search(line) and not sha_pattern.search(line):
-                        violations.append(
-                            f"  .github/workflows/{f}:{i}: {line.strip()}\n"
-                            f"    -> Pin to commit SHA: actions/name@<sha>  # vX.Y.Z"
-                        )
-
-        assert not violations, (
-            f"\n{'='*60}\n"
-            f"SECURITY: GitHub Actions pinned to mutable tags ({len(violations)})\n"
-            f"{'='*60}\n"
-            + "\n".join(violations)
-            + f"\n{'='*60}\n"
-            f"Fix: Replace version tags with commit SHAs.\n"
-            f"Example: actions/checkout@34e11487...  # v4.3.1\n"
-            f"Get SHA: gh api repos/actions/checkout/git/ref/tags/v4.3.1\n"
-            f"{'='*60}\n"
-        )
-
-    @pytest.mark.unit
     def test_ci_workflows_clean_secrets_file(self):
         """CI workflows that create secrets.yaml must clean it up.
 

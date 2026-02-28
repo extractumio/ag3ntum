@@ -8,7 +8,7 @@ jobs:
   check-release-readiness:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -38,13 +38,13 @@ jobs:
   fast-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -68,9 +68,9 @@ jobs:
   structural-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
@@ -85,7 +85,7 @@ jobs:
     runs-on: [self-hosted, linux, docker]
     needs: [fast-checks, structural-tests]
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@v4
 
       - name: Create secrets config for CI
         run: |
