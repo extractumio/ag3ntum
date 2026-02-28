@@ -32,6 +32,7 @@ from .ag3ntum_bash import (
     OUTPUT_DIR,
 )
 from .ag3ntum_ask import create_ask_user_question_tool
+from .ag3ntum_ssh import create_ssh_tools, SSHToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def create_ag3ntum_tools_mcp_server(
     workspace_path: Optional[Path] = None,
     sandbox_executor: Optional[Any] = None,
     include_bash: bool = True,
+    ssh_context: Optional[SSHToolContext] = None,
     server_name: str = "ag3ntum",
     version: str = "1.0.0",
 ) -> Any:
@@ -116,6 +118,7 @@ def create_ag3ntum_tools_mcp_server(
         workspace_path: Workspace path for Bash tool (required if include_bash=True).
         sandbox_executor: Sandbox executor for Bash tool security.
         include_bash: Whether to include the Bash tool (default: True).
+        ssh_context: SSHToolContext for SSH tools (default: None = SSH tools disabled).
         server_name: MCP server name (default: "ag3ntum").
         version: Server version.
 
@@ -134,9 +137,12 @@ def create_ag3ntum_tools_mcp_server(
         - mcp__ag3ntum__LS
         - mcp__ag3ntum__WebFetch
         - mcp__ag3ntum__AskUserQuestion
+        - mcp__ag3ntum__SSHExec (if ssh_context provided)
+        - mcp__ag3ntum__SSHRead (if ssh_context provided)
+        - mcp__ag3ntum__SSHConnect (if ssh_context provided)
     """
     tools = []
-    
+
     # Add Bash tool if requested and workspace_path provided
     if include_bash:
         if workspace_path is None:
@@ -159,7 +165,7 @@ def create_ag3ntum_tools_mcp_server(
                 f"Added Bash tool to unified MCP server (timeout={bash_config.timeout}s, "
                 f"kill_after={bash_config.kill_after}s)"
             )
-    
+
     # Add all file tools bound to this session
     # Note: WebFetch doesn't need session_id as it doesn't access filesystem
     tools.extend([
@@ -174,6 +180,15 @@ def create_ag3ntum_tools_mcp_server(
         create_webfetch_tool(),  # No session_id needed
         create_ask_user_question_tool(session_id=session_id),
     ])
+
+    # Add SSH tools if context provided (SSH enabled)
+    if ssh_context is not None:
+        ssh_tool_list = create_ssh_tools(ssh_context)
+        tools.extend(ssh_tool_list)
+        logger.info(
+            f"Added {len(ssh_tool_list)} SSH tools to unified MCP server "
+            f"(session={session_id})"
+        )
 
     # Log each tool for debugging
     tool_names = [getattr(t, '__name__', str(t)) for t in tools]

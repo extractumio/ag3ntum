@@ -6,7 +6,10 @@ Defines User and Session tables for the SQLite database.
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -42,6 +45,9 @@ class User(Base):
     )
     tokens: Mapped[list["Token"]] = relationship(
         "Token", back_populates="user", cascade="all, delete-orphan"
+    )
+    vault_secrets: Mapped[list["VaultSecret"]] = relationship(
+        "VaultSecret", back_populates="user", cascade="all, delete-orphan"
     )
 
 
@@ -209,3 +215,111 @@ class UserQuota(Base):
             self.last_reset = datetime.now(timezone.utc)
             return True
         return False
+
+
+class VaultSecret(Base):
+    """Encrypted credential storage for users (API keys, SSH keys, etc.)."""
+    __tablename__ = "vault_secrets"
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "secret_type", "name", name="uq_vault_user_type_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    secret_type: Mapped[str] = mapped_column(String(50), index=True)
+    # Types: api_key, ssh_private_key, ssh_certificate, ftp_credentials,
+    #        database_url, bearer_token, http_basic_auth, generic
+    name: Mapped[str] = mapped_column(String(255))
+    encrypted_value: Mapped[str] = mapped_column(Text)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    env_var_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ssh_key_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    rotated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_accessed_session_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationship
+    user: Mapped["User"] = relationship("User", back_populates="vault_secrets")
+
+
+class VaultAuditLog(Base):
+    """Immutable audit trail for all vault secret operations."""
+    __tablename__ = "vault_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vault_secret_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("vault_secrets.id"), nullable=True, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(50))
+    # Actions: CREATE, READ, DECRYPT, UPDATE, DELETE, ROTATE, INJECT, FAILED_ACCESS
+    status: Mapped[str] = mapped_column(String(20))
+    # Statuses: SUCCESS, FAILED, DENIED
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, index=True, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SSHAuditEvent(Base):
+    """Audit log for all SSH tool operations."""
+    __tablename__ = "ssh_audit_events"
+
+    __table_args__ = (
+        Index("ix_ssh_audit_user_host", "user_id", "remote_host"),
+        Index("ix_ssh_audit_user_timestamp", "user_id", "timestamp"),
+        Index("ix_ssh_audit_session_timestamp", "session_id", "timestamp"),
+        Index("ix_ssh_audit_blocked_timestamp", "blocked", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(255), index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    ssh_profile: Mapped[str] = mapped_column(String(255))
+    remote_host: Mapped[str] = mapped_column(String(255), index=True)
+    remote_user: Mapped[str] = mapped_column(String(255))
+    remote_port: Mapped[int] = mapped_column(Integer, default=22)
+    operation: Mapped[str] = mapped_column(String(50), index=True)
+    # Operations: exec, read_file, write_file, connect, disconnect
+    privilege_level: Mapped[int] = mapped_column(Integer, default=0)
+    command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    remote_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    exit_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    output_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    mode: Mapped[str] = mapped_column(String(50))
+    # Modes: operations, readonly, filtered_shell
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    block_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    block_rule: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    human_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    context_isolated: Mapped[bool] = mapped_column(Boolean, default=False)
+    anomaly_detected: Mapped[bool] = mapped_column(Boolean, default=False)
+    anomaly_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    relay_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    relay_audit_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, index=True, default=lambda: datetime.now(timezone.utc)
+    )
