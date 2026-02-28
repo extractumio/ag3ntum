@@ -111,6 +111,10 @@ jobs:
       - name: Run frontend tests
         run: ./run.sh test --ui
 
+      - name: Remove secrets file
+        if: always()
+        run: rm -f config/secrets.yaml
+
       - name: Cleanup
         if: always()
         run: ./run.sh cleanup

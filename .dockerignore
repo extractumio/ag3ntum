@@ -25,6 +25,9 @@ node_modules/
 # Tests (mounted separately)
 # tests/
 
+# Secrets (never bake into image layers)
+config/secrets.yaml
+
 # Design docs
 design/
 docs/

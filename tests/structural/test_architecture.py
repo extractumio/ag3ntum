@@ -228,6 +228,8 @@ class TestFileSizeLimits:
         "tests/core-tests/test_agent_core_unit.py": 950,
         "tests/backend/test_ag3ntum_read_document.py": 1100,
         "tests/backend/test_ag3ntum_webfetch.py": 1600,
+        # Structural tests themselves — grows as invariants are added
+        "tests/structural/test_architecture.py": 750,
     }
 
     # Project directories to scan (avoids walking system paths in Docker)
@@ -525,6 +527,83 @@ class TestCoverageMapping:
             + "\n".join(missing)
             + f"\n{'='*60}\n"
             f"Fix: Create test files for untested tools.\n"
+        )
+
+
+class TestCISecurityInvariants:
+    """Verify CI pipeline security invariants.
+
+    These tests prevent regression of security hardening measures
+    in the GitHub Actions workflows and Docker build configuration.
+    """
+
+    WORKFLOWS_DIR = os.path.join(PROJECT_ROOT, ".github", "workflows")
+    DOCKERIGNORE = os.path.join(PROJECT_ROOT, ".dockerignore")
+
+    @pytest.mark.unit
+    def test_secrets_yaml_excluded_from_docker_build(self):
+        """config/secrets.yaml must be in .dockerignore.
+
+        The CI pipeline writes API keys to config/secrets.yaml before
+        docker build. Without .dockerignore exclusion, COPY . / bakes
+        the key into image layers. (EXT-23)
+        """
+        assert os.path.exists(self.DOCKERIGNORE), (
+            f".dockerignore not found at {self.DOCKERIGNORE}"
+        )
+        with open(self.DOCKERIGNORE) as f:
+            content = f.read()
+
+        assert "config/secrets.yaml" in content, (
+            f"\n{'='*60}\n"
+            f"SECURITY: config/secrets.yaml NOT in .dockerignore\n"
+            f"{'='*60}\n"
+            f"CI writes API keys to config/secrets.yaml before docker build.\n"
+            f"Without .dockerignore exclusion, COPY . / bakes the secret\n"
+            f"into Docker image layers.\n"
+            f"\n"
+            f"Fix: Add 'config/secrets.yaml' to .dockerignore\n"
+            f"{'='*60}\n"
+        )
+
+    @pytest.mark.unit
+    def test_ci_workflows_clean_secrets_file(self):
+        """CI workflows that create secrets.yaml must clean it up.
+
+        Self-hosted runner workspaces persist between runs. Any workflow
+        that writes config/secrets.yaml must have an if:always() step
+        to remove it, preventing secrets from lingering on disk.
+        """
+        if not os.path.isdir(self.WORKFLOWS_DIR):
+            pytest.skip(".github/workflows/ not found")
+
+        violations = []
+        for f in sorted(os.listdir(self.WORKFLOWS_DIR)):
+            if not f.endswith((".yml", ".yaml")):
+                continue
+            filepath = os.path.join(self.WORKFLOWS_DIR, f)
+            with open(filepath) as fh:
+                content = fh.read()
+
+            if "config/secrets.yaml" in content and "echo " in content:
+                # This workflow creates secrets.yaml — verify cleanup
+                if "rm -f config/secrets.yaml" not in content:
+                    violations.append(
+                        f"  .github/workflows/{f}: creates config/secrets.yaml "
+                        f"but has no 'rm -f config/secrets.yaml' cleanup step\n"
+                        f"    -> Add: - name: Remove secrets file\\n"
+                        f"             if: always()\\n"
+                        f"             run: rm -f config/secrets.yaml"
+                    )
+
+        assert not violations, (
+            f"\n{'='*60}\n"
+            f"SECURITY: CI workflows missing secrets cleanup ({len(violations)})\n"
+            f"{'='*60}\n"
+            + "\n".join(violations)
+            + f"\n{'='*60}\n"
+            f"Fix: Add an if:always() step to remove config/secrets.yaml.\n"
+            f"{'='*60}\n"
         )
 
 
