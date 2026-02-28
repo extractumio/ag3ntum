@@ -461,7 +461,12 @@ class SSHCommandFilter:
             # All subcommands passed — return allow from the last check
             return self._check_allowlist(subcommands[-1], level, level_key)
         else:
-            # Blocklist mode: no subcommand must match a blocked pattern
+            # Blocklist mode: check full string first (catches multi-part
+            # patterns like fork bombs that span shell operators), then
+            # check each subcommand individually.
+            full_result = self._check_blocklist(command, level, level_key)
+            if not full_result.allowed:
+                return full_result
             for subcmd in subcommands:
                 result = self._check_blocklist(subcmd, level, level_key)
                 if not result.allowed:

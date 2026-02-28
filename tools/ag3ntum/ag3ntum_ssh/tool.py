@@ -57,9 +57,11 @@ _TRUNCATION_NOTICE = "\n[output truncated]"
 # ---------------------------------------------------------------------------
 
 _CREDENTIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'-p\S+'), '-p[REDACTED]'),
+    # --password must be checked before short -p to avoid partial match
     (re.compile(r'--password[=\s]+\S+'), '--password=[REDACTED]'),
-    (re.compile(r'(?i)Authorization:\s*\S+'), 'Authorization: [REDACTED]'),
+    (re.compile(r'(?<!-)-p\S+'), '-p[REDACTED]'),
+    (re.compile(r'(?i)Authorization:\s*\S+(\s+\S+)?'),
+     'Authorization: [REDACTED]'),
     (re.compile(r'(?i)(api[_-]?key|token|secret)[=:]\s*\S+'),
      r'\1=[REDACTED]'),
     (re.compile(r"(?i)IDENTIFIED\s+BY\s+'[^']+'"),

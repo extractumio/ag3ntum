@@ -164,7 +164,7 @@ always_blocked:
       description: "Reverse shell / listener"
     - pattern: '169\.254\.169\.254'
       description: "Cloud metadata endpoint"
-    - pattern: 'base64\s+(-d|--decode)\s*\|\s*(bash|sh|python|perl)'
+    - pattern: 'base64\s+(-d|--decode).*\|\s*(bash|sh|python|perl)'
       description: "Base64 decode piped to interpreter"
     - pattern: '\bbash\s+-c\b'
       description: "Bash inline execution"
