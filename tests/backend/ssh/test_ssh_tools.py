@@ -6,6 +6,7 @@ directly — bypassing the MCP wrapper per CLAUDE.md gotcha #19.
 
 All service dependencies are mocked. No real SSH connections are made.
 """
+import asyncio
 import pytest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
@@ -127,13 +128,30 @@ def ctx_disabled(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_exec_result(stdout="test output", stderr="", exit_status=0):
-    """Build a mock asyncssh run() result."""
-    r = MagicMock()
-    r.stdout = stdout
-    r.stderr = stderr
-    r.exit_status = exit_status
-    return r
+def _make_mock_process(stdout="test output", stderr="", exit_status=0):
+    """Build a mock asyncssh process for create_process().
+
+    The mock process has .stdout/.stderr streams that return data
+    once then empty string, .exit_status, .kill(), and .wait().
+    """
+    process = MagicMock()
+    process.exit_status = exit_status
+    process.kill = MagicMock()
+    process.wait = AsyncMock()
+
+    # Stdout stream: returns data on first read, empty on subsequent
+    stdout_reads = iter([stdout, ""])
+    mock_stdout = AsyncMock()
+    mock_stdout.read = AsyncMock(side_effect=lambda n=32768: next(stdout_reads, ""))
+    process.stdout = mock_stdout
+
+    # Stderr stream: returns data on first read, empty on subsequent
+    stderr_reads = iter([stderr, ""])
+    mock_stderr = AsyncMock()
+    mock_stderr.read = AsyncMock(side_effect=lambda n=32768: next(stderr_reads, ""))
+    process.stderr = mock_stderr
+
+    return process
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +172,7 @@ class TestSSHExecImpl:
     @pytest.mark.unit
     async def test_exec_success(self, mock_services):
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(return_value=_make_exec_result("uptime output"))
+        mock_conn.create_process = AsyncMock(return_value=_make_mock_process("uptime output"))
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
         result = await _ssh_exec_impl(
@@ -169,8 +187,8 @@ class TestSSHExecImpl:
     @pytest.mark.unit
     async def test_exec_captures_stderr(self, mock_services):
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(
-            return_value=_make_exec_result(stdout="", stderr="warning: something", exit_status=1)
+        mock_conn.create_process = AsyncMock(
+            return_value=_make_mock_process(stdout="", stderr="warning: something", exit_status=1)
         )
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
@@ -270,8 +288,8 @@ class TestSSHExecImpl:
     async def test_exec_no_output(self, mock_services):
         """Commands with no stdout/stderr show (no output) placeholder."""
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(
-            return_value=_make_exec_result(stdout="", stderr="", exit_status=0)
+        mock_conn.create_process = AsyncMock(
+            return_value=_make_mock_process(stdout="", stderr="", exit_status=0)
         )
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
@@ -288,8 +306,8 @@ class TestSSHExecImpl:
         # max_output_bytes is 1024 from ssh_security_config fixture
         big_output = "x" * 2000
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(
-            return_value=_make_exec_result(stdout=big_output, stderr="", exit_status=0)
+        mock_conn.create_process = AsyncMock(
+            return_value=_make_mock_process(stdout=big_output, stderr="", exit_status=0)
         )
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
@@ -304,7 +322,7 @@ class TestSSHExecImpl:
     async def test_exec_audit_logged_on_success(self, mock_services):
         """Successful command execution logs to audit service."""
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(return_value=_make_exec_result("output"))
+        mock_conn.create_process = AsyncMock(return_value=_make_mock_process("output"))
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
         await _ssh_exec_impl(
@@ -331,7 +349,7 @@ class TestSSHExecImpl:
     async def test_exec_profile_info_in_output(self, mock_services):
         """Result includes profile name, user, host, and port."""
         mock_conn = AsyncMock()
-        mock_conn.run = AsyncMock(return_value=_make_exec_result("ok"))
+        mock_conn.create_process = AsyncMock(return_value=_make_mock_process("ok"))
         mock_services.connection_pool.get_connection = AsyncMock(return_value=mock_conn)
 
         result = await _ssh_exec_impl(

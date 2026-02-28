@@ -34,8 +34,18 @@ privilege_levels:
         description: "System uptime"
       - pattern: '^uname\s+-[a]+$'
         description: "System info"
-      - pattern: '^ps\s+aux(\s+\|\s+head\s+-\d+)?$'
+      - pattern: '^ps\s+aux$'
         description: "Process list"
+      - pattern: '^head\s+-[n]?\s*\d+$'
+        description: "Head first N lines (pipe target)"
+      - pattern: '^tail\s+-[n]?\s*\d+$'
+        description: "Tail last N lines (pipe target)"
+      - pattern: '^wc\s+-[lwc]+$'
+        description: "Word/line/char count (pipe target)"
+      - pattern: '^sort(\s+-[rnuk]+)*$'
+        description: "Sort output (pipe target)"
+      - pattern: '^uniq(\s+-c)?$'
+        description: "Unique filter (pipe target)"
       - pattern: '^netstat\s+-[tlnup]+$|^ss\s+-[tlnup]+$'
         description: "Network connections"
       - pattern: '^dig\s+[\w.-]+$'
@@ -154,6 +164,30 @@ always_blocked:
       description: "Reverse shell / listener"
     - pattern: '169\.254\.169\.254'
       description: "Cloud metadata endpoint"
+    - pattern: 'base64\s+(-d|--decode).*\|\s*(bash|sh|python|perl)'
+      description: "Base64 decode piped to interpreter"
+    - pattern: '\bbash\s+-c\b'
+      description: "Bash inline execution"
+    - pattern: '\bsh\s+-c\b'
+      description: "Shell inline execution"
+    - pattern: '\bpython3?\s+-c\b'
+      description: "Python inline execution"
+    - pattern: '\bperl\s+-e\b'
+      description: "Perl inline execution"
+
+  shell_expansion:
+    - pattern: '\$\('
+      description: "Command substitution (subshell)"
+    - pattern: '`'
+      description: "Backtick command substitution"
+    - pattern: '\$\{'
+      description: "Variable expansion with braces"
+    - pattern: '\beval\b'
+      description: "Shell eval execution"
+    - pattern: '\bexec\b\s'
+      description: "Shell exec replacement"
+    - pattern: '\bsource\b\s|\.\s+/'
+      description: "Shell source/dot execution"
 
   data_exfiltration_require_approval:
     - pattern: '\bmysqldump\b|\bpg_dump\b'

@@ -20,9 +20,12 @@ Security:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import tool
@@ -51,6 +54,69 @@ _TRUNCATION_NOTICE = "\n[output truncated]"
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction for audit logs
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # --password must be checked before short -p to avoid partial match
+    (re.compile(r'--password[=\s]+\S+'), '--password=[REDACTED]'),
+    (re.compile(r'(?<!-)-p\S+'), '-p[REDACTED]'),
+    (re.compile(r'(?i)Authorization:\s*\S+(\s+\S+)?'),
+     'Authorization: [REDACTED]'),
+    (re.compile(r'(?i)(api[_-]?key|token|secret)[=:]\s*\S+'),
+     r'\1=[REDACTED]'),
+    (re.compile(r"(?i)IDENTIFIED\s+BY\s+'[^']+'"),
+     "IDENTIFIED BY '[REDACTED]'"),
+]
+
+
+def _redact_credentials(command: str) -> str:
+    """Redact known credential patterns from command for audit logging."""
+    result = command
+    for pattern, replacement in _CREDENTIAL_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Approval state for requires_approval commands
+# ---------------------------------------------------------------------------
+
+class SSHApprovalStore:
+    """Session-scoped store for approved SSH commands.
+
+    When a command triggers 'requires_approval', the user must explicitly
+    approve it. Approved command hashes are stored per-session and checked
+    on retry.
+    """
+
+    def __init__(self) -> None:
+        # {session_id: {command_hash: approval_time}}
+        self._approvals: dict[str, dict[str, float]] = {}
+
+    def approve(self, session_id: str, command: str) -> str:
+        """Approve a command for a session. Returns the approval ID."""
+        cmd_hash = hashlib.sha256(command.encode()).hexdigest()[:16]
+        session_store = self._approvals.setdefault(session_id, {})
+        session_store[cmd_hash] = time.monotonic()
+        logger.info(
+            "SSHApprovalStore: Approved command hash=%s session=%s",
+            cmd_hash, session_id[:8],
+        )
+        return cmd_hash
+
+    def is_approved(self, session_id: str, command: str) -> bool:
+        """Check if a command was previously approved for this session."""
+        cmd_hash = hashlib.sha256(command.encode()).hexdigest()[:16]
+        session_store = self._approvals.get(session_id, {})
+        return cmd_hash in session_store
+
+    def clear_session(self, session_id: str) -> None:
+        """Clear all approvals for a session."""
+        self._approvals.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
 # SSHToolContext — binds all services to a session
 # ---------------------------------------------------------------------------
 
@@ -66,6 +132,9 @@ class SSHToolContext:
     audit_service: SSHAuditService
     profiles: dict[str, SSHProfile]
     db_session_factory: Any  # async context manager returning AsyncSession
+    rate_limiter: Any = field(default=None)   # SSHRateLimiter, optional
+    approval_store: Any = field(default=None)  # SSHApprovalStore, optional
+    command_semaphore: Any = field(default=None)  # asyncio.Semaphore, optional
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +251,88 @@ async def _audit_host_key_failure(
 # SSHExec — execute a command on a remote server
 # ---------------------------------------------------------------------------
 
+async def _stream_process_output(
+    conn: Any,
+    command: str,
+    timeout: int,
+    max_bytes: int,
+) -> tuple[str, str, int, bool]:
+    """Execute command via create_process with streaming byte budget.
+
+    Reads stdout/stderr incrementally, killing the process when the
+    byte budget is exhausted. This prevents OOM from commands that
+    produce unbounded output (e.g., ``cat /dev/urandom``).
+
+    Returns:
+        (stdout, stderr, exit_code, was_truncated)
+    """
+    process = await conn.create_process(command)
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    total_bytes = 0
+    truncated = False
+
+    async def _read_stream(
+        stream: Any, chunks: list[bytes],
+    ) -> None:
+        nonlocal total_bytes, truncated
+        while True:
+            chunk = await stream.read(32768)
+            if not chunk:
+                break
+            encoded = chunk.encode("utf-8", errors="replace") \
+                if isinstance(chunk, str) else chunk
+            remaining = max_bytes - total_bytes
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(encoded) > remaining:
+                chunks.append(encoded[:remaining])
+                total_bytes += remaining
+                truncated = True
+                break
+            chunks.append(encoded)
+            total_bytes += len(encoded)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read_stream(process.stdout, stdout_chunks),
+                _read_stream(process.stderr, stderr_chunks),
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        truncated = True
+    finally:
+        # Ensure process is terminated if still running
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            await process.wait()
+        except Exception:
+            pass
+
+    stdout_bytes = b"".join(stdout_chunks)
+    stderr_bytes = b"".join(stderr_chunks)
+    stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+    stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+
+    exit_code = process.exit_status
+    if exit_code is None:
+        exit_code = -1
+
+    if truncated:
+        if stdout_str:
+            stdout_str += _TRUNCATION_NOTICE
+        elif stderr_str:
+            stderr_str += _TRUNCATION_NOTICE
+
+    return stdout_str, stderr_str, exit_code, truncated
+
+
 async def _ssh_exec_impl(
     args: dict[str, Any],
     *,
@@ -193,6 +344,7 @@ async def _ssh_exec_impl(
 
     profile_name: str = args.get("profile_name", "")
     command: str = args.get("command", "").strip()
+    dry_run: bool = args.get("dry_run", False)
 
     if not command:
         return _error("command is required")
@@ -201,6 +353,15 @@ async def _ssh_exec_impl(
     if err is not None:
         return err
     assert profile is not None  # guaranteed by _resolve_profile when err is None
+
+    # Rate limit check
+    if ctx.rate_limiter is not None:
+        if not ctx.rate_limiter.check(ctx.session_id, profile_name):
+            return _error(
+                "SSH command rate limit exceeded. "
+                f"Maximum {ctx.security_config.limits.rate_limit_commands_per_minute}"
+                " commands per minute."
+            )
 
     # Command filter check
     filter_result = ctx.command_filter.check_command(command, profile.privilege_level)
@@ -217,7 +378,7 @@ async def _ssh_exec_impl(
                     remote_host=profile.host,
                     remote_user=profile.username,
                     remote_port=profile.port,
-                    command=command,
+                    command=_redact_credentials(command),
                     reason=filter_result.reason,
                     rule=filter_result.rule,
                     privilege_level=profile.privilege_level,
@@ -226,19 +387,86 @@ async def _ssh_exec_impl(
         except Exception as audit_exc:
             logger.error("SSHExec: Failed to log blocked command: %s", audit_exc)
 
+        if dry_run:
+            return _result(
+                f"[DRY RUN] Command BLOCKED.\n"
+                f"Command: {command}\n"
+                f"Reason:  {filter_result.reason}\n"
+                f"Profile: {profile_name} (L{profile.privilege_level})"
+            )
+
         return _error(
             f"Command blocked by security filter. "
             f"Reason: {filter_result.reason}"
         )
 
     if filter_result.action == "requires_approval":
-        return _error(
-            f"Command requires human approval before execution. "
-            f"Reason: {filter_result.reason}. "
-            "Use SSHConnect with action='status' to check connection state, "
-            "then request approval from the user before retrying."
+        # Check if this command was previously approved
+        if ctx.approval_store and ctx.approval_store.is_approved(
+            ctx.session_id, command
+        ):
+            pass  # Approved — proceed with execution
+        else:
+            cmd_hash = hashlib.sha256(
+                command.encode()
+            ).hexdigest()[:16]
+            if dry_run:
+                return _result(
+                    f"[DRY RUN] Command REQUIRES APPROVAL.\n"
+                    f"Command:     {command}\n"
+                    f"Reason:      {filter_result.reason}\n"
+                    f"Approval ID: {cmd_hash}\n"
+                    f"Profile:     {profile_name} (L{profile.privilege_level})"
+                )
+            return _error(
+                f"Command requires human approval before execution. "
+                f"Reason: {filter_result.reason}. "
+                f"Approval ID: {cmd_hash}. "
+                "Use SSHConnect with action='approve' and the approval_id "
+                "to approve this command, then retry."
+            )
+
+    # Dry-run: command passed filter — return preview without executing
+    if dry_run:
+        return _result(
+            f"[DRY RUN] Command ALLOWED.\n"
+            f"Command: {command}\n"
+            f"Profile: {profile_name} (L{profile.privilege_level})\n"
+            "Command would execute on "
+            f"{profile.username}@{profile.host}:{profile.port}"
         )
 
+    # Acquire concurrent command semaphore
+    semaphore = ctx.command_semaphore
+    if semaphore is not None:
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=5.0)
+        except asyncio.TimeoutError:
+            return _error(
+                "Too many concurrent SSH commands. "
+                f"Maximum {ctx.security_config.limits.max_concurrent_commands}"
+                " concurrent commands allowed. Try again shortly."
+            )
+
+    try:
+        return await _ssh_exec_inner(
+            command, profile_name, profile, ctx
+        )
+    finally:
+        if semaphore is not None:
+            try:
+                semaphore.release()
+            except ValueError:
+                pass  # Already released or never acquired
+
+
+async def _ssh_exec_inner(
+    command: str,
+    profile_name: str,
+    profile: SSHProfile,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """Inner execution logic after filter checks and semaphore acquisition."""
     # Get or establish connection
     start_ms = int(time.monotonic() * 1000)
     try:
@@ -261,11 +489,12 @@ async def _ssh_exec_impl(
         logger.error("SSHExec: Connection failed for profile %s: %s", profile_name, exc)
         return _error(f"SSH connection failed: {_sanitise_error(exc)}")
 
-    # Execute command
+    # Execute command with streaming byte budget
+    max_bytes = ctx.security_config.limits.max_output_bytes
+    timeout = ctx.security_config.limits.command_timeout_seconds
     try:
-        result = await conn.run(
-            command,
-            timeout=ctx.security_config.limits.command_timeout_seconds,
+        stdout, stderr, exit_code, _ = await _stream_process_output(
+            conn, command, timeout, max_bytes
         )
     except Exception as exc:
         logger.warning(
@@ -275,14 +504,6 @@ async def _ssh_exec_impl(
         return _error(f"SSH command execution failed: {_sanitise_error(exc)}")
 
     duration_ms = int(time.monotonic() * 1000) - start_ms
-
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    exit_code = result.exit_status if result.exit_status is not None else -1
-
-    max_bytes = ctx.security_config.limits.max_output_bytes
-    stdout = _truncate_output(stdout, max_bytes)
-    stderr = _truncate_output(stderr, max_bytes)
 
     # Record activity on pool
     ctx.connection_pool.record_activity(ctx.session_id, profile_name)
@@ -299,7 +520,7 @@ async def _ssh_exec_impl(
                 remote_host=profile.host,
                 remote_user=profile.username,
                 remote_port=profile.port,
-                command=command,
+                command=_redact_credentials(command),
                 exit_code=exit_code,
                 output_bytes=output_bytes,
                 duration_ms=duration_ms,
@@ -335,18 +556,22 @@ def create_ssh_exec_tool(ctx: SSHToolContext):
 Args:
     profile_name: SSH profile name (configured in ssh-profiles.yaml)
     command:      Shell command to run on the remote server
+    dry_run:      If true, preview filter result without executing (default: false)
 
 Returns:
     Exit code, stdout, stderr, and execution duration.
+    In dry_run mode: filter result preview (ALLOWED/BLOCKED/REQUIRES APPROVAL).
 
 Notes:
     - Commands are filtered by the privilege level set in the profile.
     - Blocked or unapproved commands return an error — never execute.
-    - Output is truncated at the configured max_output_bytes limit.
+    - Output is streamed with a byte budget — large outputs are truncated.
+    - Use dry_run=true to preview whether a command would be allowed.
 
 Examples:
     SSHExec(profile_name="prod-web", command="uptime")
     SSHExec(profile_name="db-primary", command="df -h /var/lib/postgresql")
+    SSHExec(profile_name="prod-web", command="rm -rf /tmp/*", dry_run=true)
 """,
         {"profile_name": str, "command": str},
     )
@@ -420,7 +645,23 @@ async def _ssh_read_impl(
                 # stat failed — still attempt the read; let the read fail naturally
                 pass
 
-            remote_file = await sftp.open(remote_path, "r")
+            # Resolve symlinks and check target path for L2
+            try:
+                real_path = await sftp.realpath(remote_path)
+                if real_path != remote_path:
+                    # Symlink detected — verify target is allowed
+                    path_check = ctx.command_filter.check_path_writable(
+                        real_path, profile.privilege_level
+                    )
+                    if not path_check.allowed and profile.privilege_level <= 2:
+                        return _error(
+                            f"Symlink target '{real_path}' is outside "
+                            "allowed paths for this privilege level."
+                        )
+            except Exception:
+                pass  # realpath failed — proceed with the original path
+
+            remote_file = await sftp.open(remote_path, "rb")
             try:
                 raw: bytes = await remote_file.read()
             finally:
@@ -432,6 +673,17 @@ async def _ssh_read_impl(
             remote_path, profile_name, exc,
         )
         return _error(f"Failed to read remote file: {_sanitise_error(exc)}")
+
+    # Binary file detection — check first 8KB for null bytes
+    sample = raw[:8192]
+    if sample:
+        null_count = sample.count(b'\x00')
+        if null_count > len(sample) * 0.01:
+            return _error(
+                f"File appears to be binary ({null_count} null bytes "
+                f"in first {len(sample)} bytes). "
+                "Use SSHExec with 'file' or 'xxd' to inspect binary files."
+            )
 
     if len(raw) > max_bytes:
         raw = raw[:max_bytes]
@@ -523,14 +775,20 @@ async def _ssh_connect_impl(
     profile_name: str = args.get("profile_name", "")
 
     if not action:
-        return _error("action is required. Valid actions: connect, disconnect, status, list")
+        return _error(
+            "action is required. Valid actions: connect, disconnect, status, list, approve"
+        )
 
     if action == "list":
         return _ssh_connect_list(ctx)
 
+    if action == "approve":
+        return _ssh_connect_approve(args, ctx)
+
     if action not in ("connect", "disconnect", "status"):
         return _error(
-            f"Invalid action '{action}'. Valid actions: connect, disconnect, status, list"
+            f"Invalid action '{action}'. "
+            "Valid actions: connect, disconnect, status, list, approve"
         )
 
     # All other actions need a profile
@@ -547,6 +805,26 @@ async def _ssh_connect_impl(
 
     # action == "status"
     return _ssh_connect_status(profile_name, ctx)
+
+
+def _ssh_connect_approve(
+    args: dict[str, Any], ctx: SSHToolContext
+) -> dict[str, Any]:
+    """Approve a command that requires human approval."""
+    command = args.get("command", "").strip()
+    if not command:
+        return _error(
+            "command is required for approve action. "
+            "Provide the exact command that needs approval."
+        )
+    if ctx.approval_store is None:
+        return _error("Approval store not configured.")
+
+    approval_id = ctx.approval_store.approve(ctx.session_id, command)
+    return _result(
+        f"Command approved. Approval ID: {approval_id}\n"
+        "You can now retry the command."
+    )
 
 
 def _ssh_connect_list(ctx: SSHToolContext) -> dict[str, Any]:
@@ -707,24 +985,29 @@ def create_ssh_connect_tool(ctx: SSHToolContext):
 
 Args:
     profile_name: SSH profile name (required for connect, disconnect, status)
-    action:       One of: connect | disconnect | status | list
+    action:       One of: connect | disconnect | status | list | approve
+    command:      Exact command to approve (required for approve action)
 
 Actions:
     connect:    Establish an SSH connection for the profile
     disconnect: Close an active SSH connection
     status:     Check connection state for a specific profile
     list:       List all configured profiles and active connections
+    approve:    Approve a command requiring human approval (requires 'command' parameter)
 
 Notes:
     - SSHExec and SSHRead connect automatically; explicit connect is optional.
     - Connections persist for the session and have an idle timeout.
     - 'list' does not require profile_name.
+    - 'approve' grants one-time approval for a command that was blocked with
+      requires_approval. Provide the exact command string to approve.
 
 Examples:
     SSHConnect(action="list")
     SSHConnect(profile_name="prod-web", action="connect")
     SSHConnect(profile_name="prod-web", action="status")
     SSHConnect(profile_name="prod-web", action="disconnect")
+    SSHConnect(action="approve", command="mysqldump mydb > /backup/mydb.sql")
 """,
         {"profile_name": str, "action": str},
     )

