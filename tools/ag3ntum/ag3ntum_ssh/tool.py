@@ -20,9 +20,11 @@ Security:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import tool
@@ -51,6 +53,67 @@ _TRUNCATION_NOTICE = "\n[output truncated]"
 
 
 # ---------------------------------------------------------------------------
+# Credential redaction for audit logs
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'-p\S+'), '-p[REDACTED]'),
+    (re.compile(r'--password[=\s]+\S+'), '--password=[REDACTED]'),
+    (re.compile(r'(?i)Authorization:\s*\S+'), 'Authorization: [REDACTED]'),
+    (re.compile(r'(?i)(api[_-]?key|token|secret)[=:]\s*\S+'),
+     r'\1=[REDACTED]'),
+    (re.compile(r"(?i)IDENTIFIED\s+BY\s+'[^']+'"),
+     "IDENTIFIED BY '[REDACTED]'"),
+]
+
+
+def _redact_credentials(command: str) -> str:
+    """Redact known credential patterns from command for audit logging."""
+    result = command
+    for pattern, replacement in _CREDENTIAL_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Approval state for requires_approval commands
+# ---------------------------------------------------------------------------
+
+class SSHApprovalStore:
+    """Session-scoped store for approved SSH commands.
+
+    When a command triggers 'requires_approval', the user must explicitly
+    approve it. Approved command hashes are stored per-session and checked
+    on retry.
+    """
+
+    def __init__(self) -> None:
+        # {session_id: {command_hash: approval_time}}
+        self._approvals: dict[str, dict[str, float]] = {}
+
+    def approve(self, session_id: str, command: str) -> str:
+        """Approve a command for a session. Returns the approval ID."""
+        cmd_hash = hashlib.sha256(command.encode()).hexdigest()[:16]
+        session_store = self._approvals.setdefault(session_id, {})
+        session_store[cmd_hash] = time.monotonic()
+        logger.info(
+            "SSHApprovalStore: Approved command hash=%s session=%s",
+            cmd_hash, session_id[:8],
+        )
+        return cmd_hash
+
+    def is_approved(self, session_id: str, command: str) -> bool:
+        """Check if a command was previously approved for this session."""
+        cmd_hash = hashlib.sha256(command.encode()).hexdigest()[:16]
+        session_store = self._approvals.get(session_id, {})
+        return cmd_hash in session_store
+
+    def clear_session(self, session_id: str) -> None:
+        """Clear all approvals for a session."""
+        self._approvals.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
 # SSHToolContext — binds all services to a session
 # ---------------------------------------------------------------------------
 
@@ -66,6 +129,8 @@ class SSHToolContext:
     audit_service: SSHAuditService
     profiles: dict[str, SSHProfile]
     db_session_factory: Any  # async context manager returning AsyncSession
+    rate_limiter: Any = field(default=None)   # SSHRateLimiter, optional
+    approval_store: Any = field(default=None)  # SSHApprovalStore, optional
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +267,15 @@ async def _ssh_exec_impl(
         return err
     assert profile is not None  # guaranteed by _resolve_profile when err is None
 
+    # Rate limit check
+    if ctx.rate_limiter is not None:
+        if not ctx.rate_limiter.check(ctx.session_id, profile_name):
+            return _error(
+                "SSH command rate limit exceeded. "
+                f"Maximum {ctx.security_config.limits.rate_limit_commands_per_minute}"
+                " commands per minute."
+            )
+
     # Command filter check
     filter_result = ctx.command_filter.check_command(command, profile.privilege_level)
 
@@ -217,7 +291,7 @@ async def _ssh_exec_impl(
                     remote_host=profile.host,
                     remote_user=profile.username,
                     remote_port=profile.port,
-                    command=command,
+                    command=_redact_credentials(command),
                     reason=filter_result.reason,
                     rule=filter_result.rule,
                     privilege_level=profile.privilege_level,
@@ -232,12 +306,22 @@ async def _ssh_exec_impl(
         )
 
     if filter_result.action == "requires_approval":
-        return _error(
-            f"Command requires human approval before execution. "
-            f"Reason: {filter_result.reason}. "
-            "Use SSHConnect with action='status' to check connection state, "
-            "then request approval from the user before retrying."
-        )
+        # Check if this command was previously approved
+        if ctx.approval_store and ctx.approval_store.is_approved(
+            ctx.session_id, command
+        ):
+            pass  # Approved — proceed with execution
+        else:
+            cmd_hash = hashlib.sha256(
+                command.encode()
+            ).hexdigest()[:16]
+            return _error(
+                f"Command requires human approval before execution. "
+                f"Reason: {filter_result.reason}. "
+                f"Approval ID: {cmd_hash}. "
+                "Use SSHConnect with action='approve' and the approval_id "
+                "to approve this command, then retry."
+            )
 
     # Get or establish connection
     start_ms = int(time.monotonic() * 1000)
@@ -299,7 +383,7 @@ async def _ssh_exec_impl(
                 remote_host=profile.host,
                 remote_user=profile.username,
                 remote_port=profile.port,
-                command=command,
+                command=_redact_credentials(command),
                 exit_code=exit_code,
                 output_bytes=output_bytes,
                 duration_ms=duration_ms,
@@ -420,6 +504,22 @@ async def _ssh_read_impl(
                 # stat failed — still attempt the read; let the read fail naturally
                 pass
 
+            # Resolve symlinks and check target path for L2
+            try:
+                real_path = await sftp.realpath(remote_path)
+                if real_path != remote_path:
+                    # Symlink detected — verify target is allowed
+                    path_check = ctx.command_filter.check_path_writable(
+                        real_path, profile.privilege_level
+                    )
+                    if not path_check.allowed and profile.privilege_level <= 2:
+                        return _error(
+                            f"Symlink target '{real_path}' is outside "
+                            "allowed paths for this privilege level."
+                        )
+            except Exception:
+                pass  # realpath failed — proceed with the original path
+
             remote_file = await sftp.open(remote_path, "r")
             try:
                 raw: bytes = await remote_file.read()
@@ -523,14 +623,20 @@ async def _ssh_connect_impl(
     profile_name: str = args.get("profile_name", "")
 
     if not action:
-        return _error("action is required. Valid actions: connect, disconnect, status, list")
+        return _error(
+            "action is required. Valid actions: connect, disconnect, status, list, approve"
+        )
 
     if action == "list":
         return _ssh_connect_list(ctx)
 
+    if action == "approve":
+        return _ssh_connect_approve(args, ctx)
+
     if action not in ("connect", "disconnect", "status"):
         return _error(
-            f"Invalid action '{action}'. Valid actions: connect, disconnect, status, list"
+            f"Invalid action '{action}'. "
+            "Valid actions: connect, disconnect, status, list, approve"
         )
 
     # All other actions need a profile
@@ -547,6 +653,26 @@ async def _ssh_connect_impl(
 
     # action == "status"
     return _ssh_connect_status(profile_name, ctx)
+
+
+def _ssh_connect_approve(
+    args: dict[str, Any], ctx: SSHToolContext
+) -> dict[str, Any]:
+    """Approve a command that requires human approval."""
+    command = args.get("command", "").strip()
+    if not command:
+        return _error(
+            "command is required for approve action. "
+            "Provide the exact command that needs approval."
+        )
+    if ctx.approval_store is None:
+        return _error("Approval store not configured.")
+
+    approval_id = ctx.approval_store.approve(ctx.session_id, command)
+    return _result(
+        f"Command approved. Approval ID: {approval_id}\n"
+        "You can now retry the command."
+    )
 
 
 def _ssh_connect_list(ctx: SSHToolContext) -> dict[str, Any]:
@@ -707,24 +833,29 @@ def create_ssh_connect_tool(ctx: SSHToolContext):
 
 Args:
     profile_name: SSH profile name (required for connect, disconnect, status)
-    action:       One of: connect | disconnect | status | list
+    action:       One of: connect | disconnect | status | list | approve
+    command:      Exact command to approve (required for approve action)
 
 Actions:
     connect:    Establish an SSH connection for the profile
     disconnect: Close an active SSH connection
     status:     Check connection state for a specific profile
     list:       List all configured profiles and active connections
+    approve:    Approve a command requiring human approval (requires 'command' parameter)
 
 Notes:
     - SSHExec and SSHRead connect automatically; explicit connect is optional.
     - Connections persist for the session and have an idle timeout.
     - 'list' does not require profile_name.
+    - 'approve' grants one-time approval for a command that was blocked with
+      requires_approval. Provide the exact command string to approve.
 
 Examples:
     SSHConnect(action="list")
     SSHConnect(profile_name="prod-web", action="connect")
     SSHConnect(profile_name="prod-web", action="status")
     SSHConnect(profile_name="prod-web", action="disconnect")
+    SSHConnect(action="approve", command="mysqldump mydb > /backup/mydb.sql")
 """,
         {"profile_name": str, "action": str},
     )

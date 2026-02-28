@@ -20,6 +20,10 @@ import yaml
 
 from .ssh_config import SSHSecurityConfig
 
+# Regex to split compound commands on shell operators.
+# Ported from command_security.py for SSH command filtering.
+_SSH_COMPOUND_SPLIT_RE = re.compile(r'\s*(?:&&|\|\||[;|])\s*')
+
 logger = logging.getLogger(__name__)
 
 # Primary and fallback config paths
@@ -157,9 +161,9 @@ class SSHCommandFilter:
             )
             return
 
-        # --- always_blocked: persistence + lateral_movement ---
+        # --- always_blocked: persistence + lateral_movement + shell_expansion ---
         always_blocked_cfg = config.get("always_blocked", {})
-        for category in ("persistence", "lateral_movement"):
+        for category in ("persistence", "lateral_movement", "shell_expansion"):
             for rule_data in always_blocked_cfg.get(category, []):
                 pattern = rule_data.get("pattern", "")
                 desc = rule_data.get("description", "")
@@ -355,6 +359,10 @@ class SSHCommandFilter:
     ) -> SSHFilterResult:
         """Check a command against the 5-tier privilege model.
 
+        Compound commands (joined by ;, |, &&, ||) are split and each
+        subcommand is checked individually.  This prevents injection attacks
+        such as ``uptime; rm -rf /`` from bypassing allowlist patterns.
+
         Args:
             command: Full command string (may include pipes, redirects).
             privilege_level: Integer 0-4 corresponding to L0-L4.
@@ -375,7 +383,10 @@ class SSHCommandFilter:
                 category="config_error",
             )
 
-        # 2. Always-blocked: persistence + lateral_movement (all levels)
+        # 2. Always-blocked check on FULL command string first.
+        # This runs before splitting so cross-subcommand patterns such as
+        # ``curl ... | bash`` are caught regardless of how the command is
+        # structured.
         for category, rule in self._always_blocked:
             if rule.compiled.search(command):
                 logger.warning(
@@ -390,7 +401,7 @@ class SSHCommandFilter:
                     category=category,
                 )
 
-        # 3. Requires human approval (data exfiltration, all levels)
+        # 3. Requires human approval — full-string check (all levels)
         for rule in self._requires_approval:
             if rule.compiled.search(command):
                 logger.info(
@@ -405,14 +416,70 @@ class SSHCommandFilter:
                     category="data_exfiltration",
                 )
 
-        # 4. Privilege-level check
+        # 4. Split compound commands and check each subcommand individually.
+        # Splitting prevents ``uptime; rm -rf /`` from matching ``^uptime$``
+        # because we check each part in isolation.
+        subcommands = [
+            s.strip()
+            for s in _SSH_COMPOUND_SPLIT_RE.split(command)
+            if s.strip()
+        ]
+        if not subcommands:
+            logger.info(
+                f"SSHCommandFilter: BLOCK empty command cmd={command[:80]}"
+            )
+            return SSHFilterResult(
+                allowed=False,
+                action="block",
+                reason="Empty command",
+                rule="empty",
+                category="empty",
+            )
+
+        # 5. Privilege-level check applied per subcommand
         level = max(0, min(4, privilege_level))
         level_key = _LEVEL_KEYS.get(level, f"L{level}")
 
         if level <= 2:
-            return self._check_allowlist(command, level, level_key)
+            # Allowlist mode: every subcommand must individually match
+            for subcmd in subcommands:
+                result = self._check_allowlist(subcmd, level, level_key)
+                if not result.allowed:
+                    if len(subcommands) > 1:
+                        result = SSHFilterResult(
+                            allowed=False,
+                            action=result.action,
+                            reason=(
+                                result.reason
+                                + f" (in compound command, failing part:"
+                                f" '{subcmd[:60]}')"
+                            ),
+                            rule=result.rule,
+                            category=result.category,
+                        )
+                    return result
+            # All subcommands passed — return allow from the last check
+            return self._check_allowlist(subcommands[-1], level, level_key)
         else:
-            return self._check_blocklist(command, level, level_key)
+            # Blocklist mode: no subcommand must match a blocked pattern
+            for subcmd in subcommands:
+                result = self._check_blocklist(subcmd, level, level_key)
+                if not result.allowed:
+                    if len(subcommands) > 1:
+                        result = SSHFilterResult(
+                            allowed=False,
+                            action=result.action,
+                            reason=(
+                                result.reason
+                                + f" (in compound command, failing part:"
+                                f" '{subcmd[:60]}')"
+                            ),
+                            rule=result.rule,
+                            category=result.category,
+                        )
+                    return result
+            # No subcommand blocked — allow
+            return self._check_blocklist(subcommands[-1], level, level_key)
 
     def _check_allowlist(
         self, command: str, level: int, level_key: str
