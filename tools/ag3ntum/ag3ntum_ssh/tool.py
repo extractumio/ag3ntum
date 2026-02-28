@@ -20,6 +20,7 @@ Security:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -133,6 +134,7 @@ class SSHToolContext:
     db_session_factory: Any  # async context manager returning AsyncSession
     rate_limiter: Any = field(default=None)   # SSHRateLimiter, optional
     approval_store: Any = field(default=None)  # SSHApprovalStore, optional
+    command_semaphore: Any = field(default=None)  # asyncio.Semaphore, optional
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +251,88 @@ async def _audit_host_key_failure(
 # SSHExec — execute a command on a remote server
 # ---------------------------------------------------------------------------
 
+async def _stream_process_output(
+    conn: Any,
+    command: str,
+    timeout: int,
+    max_bytes: int,
+) -> tuple[str, str, int, bool]:
+    """Execute command via create_process with streaming byte budget.
+
+    Reads stdout/stderr incrementally, killing the process when the
+    byte budget is exhausted. This prevents OOM from commands that
+    produce unbounded output (e.g., ``cat /dev/urandom``).
+
+    Returns:
+        (stdout, stderr, exit_code, was_truncated)
+    """
+    process = await conn.create_process(command)
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    total_bytes = 0
+    truncated = False
+
+    async def _read_stream(
+        stream: Any, chunks: list[bytes],
+    ) -> None:
+        nonlocal total_bytes, truncated
+        while True:
+            chunk = await stream.read(32768)
+            if not chunk:
+                break
+            encoded = chunk.encode("utf-8", errors="replace") \
+                if isinstance(chunk, str) else chunk
+            remaining = max_bytes - total_bytes
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(encoded) > remaining:
+                chunks.append(encoded[:remaining])
+                total_bytes += remaining
+                truncated = True
+                break
+            chunks.append(encoded)
+            total_bytes += len(encoded)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read_stream(process.stdout, stdout_chunks),
+                _read_stream(process.stderr, stderr_chunks),
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        truncated = True
+    finally:
+        # Ensure process is terminated if still running
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            await process.wait()
+        except Exception:
+            pass
+
+    stdout_bytes = b"".join(stdout_chunks)
+    stderr_bytes = b"".join(stderr_chunks)
+    stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+    stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+
+    exit_code = process.exit_status
+    if exit_code is None:
+        exit_code = -1
+
+    if truncated:
+        if stdout_str:
+            stdout_str += _TRUNCATION_NOTICE
+        elif stderr_str:
+            stderr_str += _TRUNCATION_NOTICE
+
+    return stdout_str, stderr_str, exit_code, truncated
+
+
 async def _ssh_exec_impl(
     args: dict[str, Any],
     *,
@@ -260,6 +344,7 @@ async def _ssh_exec_impl(
 
     profile_name: str = args.get("profile_name", "")
     command: str = args.get("command", "").strip()
+    dry_run: bool = args.get("dry_run", False)
 
     if not command:
         return _error("command is required")
@@ -302,6 +387,14 @@ async def _ssh_exec_impl(
         except Exception as audit_exc:
             logger.error("SSHExec: Failed to log blocked command: %s", audit_exc)
 
+        if dry_run:
+            return _result(
+                f"[DRY RUN] Command BLOCKED.\n"
+                f"Command: {command}\n"
+                f"Reason:  {filter_result.reason}\n"
+                f"Profile: {profile_name} (L{profile.privilege_level})"
+            )
+
         return _error(
             f"Command blocked by security filter. "
             f"Reason: {filter_result.reason}"
@@ -317,6 +410,14 @@ async def _ssh_exec_impl(
             cmd_hash = hashlib.sha256(
                 command.encode()
             ).hexdigest()[:16]
+            if dry_run:
+                return _result(
+                    f"[DRY RUN] Command REQUIRES APPROVAL.\n"
+                    f"Command:     {command}\n"
+                    f"Reason:      {filter_result.reason}\n"
+                    f"Approval ID: {cmd_hash}\n"
+                    f"Profile:     {profile_name} (L{profile.privilege_level})"
+                )
             return _error(
                 f"Command requires human approval before execution. "
                 f"Reason: {filter_result.reason}. "
@@ -325,6 +426,47 @@ async def _ssh_exec_impl(
                 "to approve this command, then retry."
             )
 
+    # Dry-run: command passed filter — return preview without executing
+    if dry_run:
+        return _result(
+            f"[DRY RUN] Command ALLOWED.\n"
+            f"Command: {command}\n"
+            f"Profile: {profile_name} (L{profile.privilege_level})\n"
+            "Command would execute on "
+            f"{profile.username}@{profile.host}:{profile.port}"
+        )
+
+    # Acquire concurrent command semaphore
+    semaphore = ctx.command_semaphore
+    if semaphore is not None:
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=5.0)
+        except asyncio.TimeoutError:
+            return _error(
+                "Too many concurrent SSH commands. "
+                f"Maximum {ctx.security_config.limits.max_concurrent_commands}"
+                " concurrent commands allowed. Try again shortly."
+            )
+
+    try:
+        return await _ssh_exec_inner(
+            command, profile_name, profile, ctx
+        )
+    finally:
+        if semaphore is not None:
+            try:
+                semaphore.release()
+            except ValueError:
+                pass  # Already released or never acquired
+
+
+async def _ssh_exec_inner(
+    command: str,
+    profile_name: str,
+    profile: SSHProfile,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """Inner execution logic after filter checks and semaphore acquisition."""
     # Get or establish connection
     start_ms = int(time.monotonic() * 1000)
     try:
@@ -347,11 +489,12 @@ async def _ssh_exec_impl(
         logger.error("SSHExec: Connection failed for profile %s: %s", profile_name, exc)
         return _error(f"SSH connection failed: {_sanitise_error(exc)}")
 
-    # Execute command
+    # Execute command with streaming byte budget
+    max_bytes = ctx.security_config.limits.max_output_bytes
+    timeout = ctx.security_config.limits.command_timeout_seconds
     try:
-        result = await conn.run(
-            command,
-            timeout=ctx.security_config.limits.command_timeout_seconds,
+        stdout, stderr, exit_code, _ = await _stream_process_output(
+            conn, command, timeout, max_bytes
         )
     except Exception as exc:
         logger.warning(
@@ -361,14 +504,6 @@ async def _ssh_exec_impl(
         return _error(f"SSH command execution failed: {_sanitise_error(exc)}")
 
     duration_ms = int(time.monotonic() * 1000) - start_ms
-
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    exit_code = result.exit_status if result.exit_status is not None else -1
-
-    max_bytes = ctx.security_config.limits.max_output_bytes
-    stdout = _truncate_output(stdout, max_bytes)
-    stderr = _truncate_output(stderr, max_bytes)
 
     # Record activity on pool
     ctx.connection_pool.record_activity(ctx.session_id, profile_name)
@@ -421,18 +556,22 @@ def create_ssh_exec_tool(ctx: SSHToolContext):
 Args:
     profile_name: SSH profile name (configured in ssh-profiles.yaml)
     command:      Shell command to run on the remote server
+    dry_run:      If true, preview filter result without executing (default: false)
 
 Returns:
     Exit code, stdout, stderr, and execution duration.
+    In dry_run mode: filter result preview (ALLOWED/BLOCKED/REQUIRES APPROVAL).
 
 Notes:
     - Commands are filtered by the privilege level set in the profile.
     - Blocked or unapproved commands return an error — never execute.
-    - Output is truncated at the configured max_output_bytes limit.
+    - Output is streamed with a byte budget — large outputs are truncated.
+    - Use dry_run=true to preview whether a command would be allowed.
 
 Examples:
     SSHExec(profile_name="prod-web", command="uptime")
     SSHExec(profile_name="db-primary", command="df -h /var/lib/postgresql")
+    SSHExec(profile_name="prod-web", command="rm -rf /tmp/*", dry_run=true)
 """,
         {"profile_name": str, "command": str},
     )
@@ -522,7 +661,7 @@ async def _ssh_read_impl(
             except Exception:
                 pass  # realpath failed — proceed with the original path
 
-            remote_file = await sftp.open(remote_path, "r")
+            remote_file = await sftp.open(remote_path, "rb")
             try:
                 raw: bytes = await remote_file.read()
             finally:
@@ -534,6 +673,17 @@ async def _ssh_read_impl(
             remote_path, profile_name, exc,
         )
         return _error(f"Failed to read remote file: {_sanitise_error(exc)}")
+
+    # Binary file detection — check first 8KB for null bytes
+    sample = raw[:8192]
+    if sample:
+        null_count = sample.count(b'\x00')
+        if null_count > len(sample) * 0.01:
+            return _error(
+                f"File appears to be binary ({null_count} null bytes "
+                f"in first {len(sample)} bytes). "
+                "Use SSHExec with 'file' or 'xxd' to inspect binary files."
+            )
 
     if len(raw) > max_bytes:
         raw = raw[:max_bytes]
