@@ -204,6 +204,61 @@ class AgentRunner:
                 await db.commit()
                 logger.debug(f"Updated session {session_id} status to {status}")
 
+    async def _record_usage(
+        self,
+        session_id: str,
+        user_id: str,
+        model: str,
+        metrics: Optional[Any] = None,
+        usage: Optional[dict] = None,
+    ) -> None:
+        """Record session usage for billing/reporting (fire-and-forget).
+
+        Called after session completion. Failures are logged but never
+        propagated — session completion must not be affected.
+        """
+        from .usage_service import usage_service
+        from .reseller_quota_service import reseller_quota_service
+
+        async with AsyncSessionLocal() as db:
+            # Look up user to get reseller_id
+            result = await db.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one_or_none()
+            reseller_id = user.reseller_id if user else None
+
+            input_tokens = usage.get("input_tokens", 0) if usage else 0
+            output_tokens = usage.get("output_tokens", 0) if usage else 0
+            cache_creation = usage.get("cache_creation_input_tokens", 0) if usage else 0
+            cache_read = usage.get("cache_read_input_tokens", 0) if usage else 0
+            cost_usd = metrics.total_cost_usd if metrics and metrics.total_cost_usd else 0.0
+            duration_ms = metrics.duration_ms if metrics and metrics.duration_ms else 0
+            num_turns = metrics.num_turns if metrics and metrics.num_turns else 0
+
+            await usage_service.record_session_usage(
+                db=db,
+                session_id=session_id,
+                user_id=user_id,
+                reseller_id=reseller_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                duration_ms=duration_ms,
+                num_turns=num_turns,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
+            )
+
+            # Update reseller quota counters if applicable
+            if reseller_id:
+                await reseller_quota_service.record_cost(
+                    db, reseller_id, cost_usd, input_tokens, output_tokens
+                )
+
+            logger.debug(f"Usage recorded for session {session_id} (cost=${cost_usd:.4f})")
+
     async def start_task(self, params: TaskParams) -> None:
         """
         Start agent execution in background.
@@ -520,6 +575,19 @@ class AgentRunner:
             )
 
             logger.info(f"Agent completed for session: {session_id} (status: {final_status})")
+
+            # Fire-and-forget: record usage for billing/reporting
+            # Failure must NOT affect session completion (spec 1.6.3)
+            try:
+                await self._record_usage(
+                    session_id=session_id,
+                    user_id=params.user_id,
+                    model=metrics.model if metrics else (params.model or "unknown"),
+                    metrics=metrics,
+                    usage=usage_dict,
+                )
+            except Exception as e:
+                logger.warning(f"Usage recording failed for {session_id} (non-fatal): {e}")
 
         except asyncio.CancelledError:
             logger.info(f"Agent cancelled for session: {session_id}")

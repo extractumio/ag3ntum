@@ -157,6 +157,8 @@ class TestFileSizeLimits:
         # API routes
         "src/api/routes/files.py": 1700,
         "src/api/routes/sessions.py": 1500,
+        "src/api/routes/reseller.py": 1900,
+        "src/api/routes/admin.py": 1000,
         "src/api/security_middleware.py": 700,
         # Services
         "src/services/session_service.py": 1100,
@@ -201,6 +203,8 @@ class TestFileSizeLimits:
         "tests/backend/test_ask_user_question.py": 1250,
         "tests/backend/test_dynamic_mounts.py": 1700,
         "tests/backend/test_user_service.py": 900,
+        "tests/backend/test_reseller.py": 800,
+        "tests/backend/test_admin.py": 650,
         "tests/backend/test_sandbox.py": 1100,
         "tests/backend/test_sandbox_path_resolver.py": 850,
         "tests/core-tests/test_prompt_engine.py": 850,
@@ -224,12 +228,13 @@ class TestFileSizeLimits:
         "skills/.claude/skills/create_image/image_gen.py": 800,
         # Services
         "src/services/user_service.py": 1200,
-        "src/services/agent_runner.py": 750,
+        "src/services/agent_runner.py": 850,  # usage recording hook for reseller billing
         "src/services/mount_service.py": 1200,
         # Core (additional)
         "src/core/output.py": 700,
         "src/core/skills.py": 750,
         # Large test files (comprehensive test suites)
+        "tests/security/test_reseller_security.py": 650,
         "tests/core-tests/test_agent_core_unit.py": 950,
         "tests/backend/test_ag3ntum_read_document.py": 1100,
         "tests/backend/test_ag3ntum_webfetch.py": 1600,

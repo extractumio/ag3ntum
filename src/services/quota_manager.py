@@ -95,9 +95,33 @@ class QuotaManager:
                 f"User concurrent limit reached ({self._config.per_user_max_concurrent} tasks)",
             )
 
-        # Check 3: Per-user daily limit (if enabled and db provided)
+        # Pre-fetch User once for checks 3 and 5 to avoid duplicate queries.
+        user = None
+        if db is not None:
+            from sqlalchemy import select as _sa_select
+            from ..db.models import User as _User
+            _result = await db.execute(_sa_select(_User).where(_User.id == user_id))
+            user = _result.scalar_one_or_none()
+
+        # Check 3: Reseller-level quota (if user belongs to a reseller)
+        if db is not None:
+            from .reseller_quota_service import reseller_quota_service
+            can_start, reason = await reseller_quota_service.check_reseller_quota(
+                db, user_id, user=user
+            )
+            if not can_start:
+                return (False, reason)
+
+        # Check 4: Per-user daily limit (if enabled and db provided)
         if self._config.per_user_daily_limit > 0 and db is not None:
             can_start, reason = await self._check_daily_limit(user_id, db)
+            if not can_start:
+                return (False, reason)
+
+        # Check 5: Spending budget (if user has spending limits)
+        if db is not None:
+            from .spending_guard import spending_guard
+            can_start, reason = await spending_guard.check_budget(db, user_id, user=user)
             if not can_start:
                 return (False, reason)
 
