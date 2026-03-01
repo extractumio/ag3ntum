@@ -195,8 +195,9 @@ class AuthService:
                 return None
 
             # Phase 3: Validate user's filesystem environment
-            # This prevents authentication for users with missing home/venv
-            self.validate_user_environment(user.username)
+            # Skip for API-only roles (admin, reseller) that don't use sandboxes
+            if user.role not in ("admin", "reseller"):
+                self.validate_user_environment(user.username)
 
             # Verify with user's secret
             payload = jwt.decode(token, user.jwt_secret, algorithms=[JWT_ALGORITHM])
@@ -255,8 +256,9 @@ class AuthService:
             raise ValueError("Invalid credentials")
 
         # Validate user's filesystem environment before issuing token
-        # This prevents login for users with missing home/venv
-        self.validate_user_environment(user.username)
+        # Skip for API-only roles (admin, reseller) that don't use sandboxes
+        if user.role not in ("admin", "reseller"):
+            self.validate_user_environment(user.username)
 
         token, expires_in = self.generate_token(user.id, user.jwt_secret, user.token_version)
         return user, token, expires_in
@@ -363,4 +365,3 @@ class AuthService:
 
 # Global auth service instance
 auth_service = AuthService()
-

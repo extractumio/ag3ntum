@@ -28,7 +28,15 @@ Project/
 │   ├── core/                      # Agent logic (40 files)
 │   │   └── tracers/               # 7 files: base, cli, backend, eventing, null, quiet
 │   ├── api/                       # FastAPI
-│   ├── services/                  # Business logic (18 files)
+│   │   ├── routes/reseller.py     # Reseller API endpoints
+│   │   ├── routes/admin.py        # Admin API endpoints
+│   │   └── reseller_models.py     # Reseller/admin Pydantic models
+│   ├── services/                  # Business logic (25 files, +7 reseller)
+│   │   ├── api_key_service.py     # API key CRUD
+│   │   ├── reseller_service.py    # Reseller CRUD
+│   │   ├── feature_flag_service.py # Flag resolution
+│   │   ├── spending_guard.py      # Spending caps
+│   │   └── usage_service.py       # Usage recording
 │   ├── security/                  # Secrets scanner
 │   ├── db/                        # SQLAlchemy models + retry.py
 │   ├── cli/                       # User management CLI
@@ -72,8 +80,8 @@ Project/
 ## Source Code
 
 - **Core** (`src/core/`, 40 files) — Agent orchestration, sandbox, security, prompts, tracers
-- **API** (`src/api/`) — FastAPI app, routes (sessions, auth, files, health), middleware, WAF
-- **Services** (`src/services/`, 18 files) — Session, event, auth, user, mount, Redis pub/sub
+- **API** (`src/api/`) — FastAPI app, routes (sessions, auth, files, health, reseller, admin), middleware, WAF
+- **Services** (`src/services/`, 25 files) — Session, event, auth, user, mount, API keys, reseller, spending, usage, Redis pub/sub
 - **MCP Tools** (`tools/ag3ntum/`, 11 tools) — Sandboxed replacements for native tools (Read/Write/Edit/Bash/Glob/Grep/LS/WebFetch/AskUserQuestion/ReadDocument/MultiEdit)
 - **Web Terminal** (`src/web_terminal_client/`) — React 18.3 + TypeScript 5.6 + Vite 5.4
 

@@ -30,6 +30,21 @@ class User(Base):
     queue_priority: Mapped[int] = mapped_column(Integer, default=0)  # Higher = higher priority
     token_version: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Reseller association (null = admin-managed direct user)
+    reseller_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=True, index=True
+    )
+
+    # Per-user configuration (reseller-managed)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    features_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    settings_mode: Mapped[str] = mapped_column(String(20), default="readonly", server_default="readonly")
+    allowed_overrides: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    security_overrides_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    spending_limit_monthly_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spending_limit_daily_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spending_limit_per_session_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -40,6 +55,9 @@ class User(Base):
     )
 
     # Relationships
+    reseller: Mapped[Optional["Reseller"]] = relationship(
+        "Reseller", back_populates="users", foreign_keys=[reseller_id]
+    )
     sessions: Mapped[list["Session"]] = relationship(
         "Session", back_populates="user", cascade="all, delete-orphan"
     )
@@ -322,4 +340,256 @@ class SSHAuditEvent(Base):
     relay_audit_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, index=True, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+# =============================================================================
+# Reseller Models
+# =============================================================================
+
+class Reseller(Base):
+    """Reseller organization that manages end-users."""
+    __tablename__ = "resellers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    company: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    contact_email: Mapped[str] = mapped_column(String(255), unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # The user account that acts as reseller (role="reseller")
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), unique=True
+    )
+
+    # Quota limits
+    max_users: Mapped[int] = mapped_column(Integer, default=50)
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, default=10)
+    max_daily_tasks: Mapped[int] = mapped_column(Integer, default=500)
+
+    # Spending caps
+    max_monthly_spending_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_daily_spending_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spending_alert_threshold_pct: Mapped[int] = mapped_column(Integer, default=80)
+
+    # LLM provider (from llm-api-proxy.yaml); null = platform default
+    llm_provider: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Feature flags (JSON blob)
+    features_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Admin notes
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Suspension tracking
+    suspended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    suspended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pre_suspend_user_states: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    owner: Mapped["User"] = relationship(
+        "User", foreign_keys=[owner_user_id]
+    )
+    users: Mapped[list["User"]] = relationship(
+        "User", back_populates="reseller", foreign_keys="User.reseller_id"
+    )
+    api_keys: Mapped[list["APIKey"]] = relationship(
+        "APIKey", back_populates="reseller", cascade="all, delete-orphan"
+    )
+    quota: Mapped[Optional["ResellerQuota"]] = relationship(
+        "ResellerQuota", back_populates="reseller", uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+
+class APIKey(Base):
+    """API key for machine-to-machine authentication."""
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reseller_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=True, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    key_prefix: Mapped[str] = mapped_column(String(20), index=True)
+    key_hash: Mapped[str] = mapped_column(String(128))
+    scopes: Mapped[str] = mapped_column(Text)  # JSON array
+    ip_allowlist: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON array
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_used_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    reseller: Mapped[Optional["Reseller"]] = relationship(
+        "Reseller", back_populates="api_keys"
+    )
+
+
+class APIKeyAuditLog(Base):
+    """Immutable audit log for API key usage."""
+    __tablename__ = "api_key_audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("api_keys.id"), nullable=True, index=True
+    )
+    reseller_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=True, index=True
+    )
+    action: Mapped[str] = mapped_column(String(50))
+    target_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    ip_address: Mapped[str] = mapped_column(String(45))
+    status_code: Mapped[int] = mapped_column(Integer)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, index=True, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class UsageRecord(Base):
+    """Per-session usage record for billing and reporting."""
+    __tablename__ = "usage_records"
+
+    __table_args__ = (
+        Index("ix_usage_reseller_period", "reseller_id", "period_start"),
+        Index("ix_usage_user_period", "user_id", "period_start"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    reseller_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=True, index=True
+    )
+    session_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    model: Mapped[str] = mapped_column(String(100))
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    num_turns: Mapped[int] = mapped_column(Integer, default=0)
+    ssh_commands_executed: Mapped[int] = mapped_column(Integer, default=0)
+    files_uploaded: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ResellerQuota(Base):
+    """Aggregate quota tracking for a reseller across all their users."""
+    __tablename__ = "reseller_quotas"
+
+    reseller_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("resellers.id"), primary_key=True
+    )
+    current_user_count: Mapped[int] = mapped_column(Integer, default=0)
+    tasks_today: Mapped[int] = mapped_column(Integer, default=0)
+    last_reset: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    monthly_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    monthly_reset: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    daily_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_cost_reset: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationship
+    reseller: Mapped["Reseller"] = relationship(
+        "Reseller", back_populates="quota"
+    )
+
+    def should_reset_daily(self) -> bool:
+        """Check if daily counter should be reset."""
+        now = datetime.now(timezone.utc)
+        return self.daily_cost_reset.date() < now.date()
+
+    def should_reset_monthly(self) -> bool:
+        """Check if monthly counters should be reset."""
+        now = datetime.now(timezone.utc)
+        return (self.monthly_reset.year < now.year or
+                self.monthly_reset.month < now.month)
+
+    def reset_if_needed(self) -> None:
+        """Reset counters if new period."""
+        now = datetime.now(timezone.utc)
+        if self.should_reset_daily():
+            self.tasks_today = 0
+            self.daily_cost_usd = 0.0
+            self.daily_cost_reset = now
+        if self.should_reset_monthly():
+            self.monthly_input_tokens = 0
+            self.monthly_output_tokens = 0
+            self.monthly_cost_usd = 0.0
+            self.monthly_reset = now
+
+
+class UserSkill(Base):
+    """Tracks skills assigned to a user."""
+    __tablename__ = "user_skills"
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_skill_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False, index=True
+    )
+    reseller_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    source: Mapped[str] = mapped_column(String(20))  # "library", "uploaded", "custom"
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ResellerSkillLibrary(Base):
+    """Reseller-curated skill library for assignment to users."""
+    __tablename__ = "reseller_skill_library"
+
+    __table_args__ = (
+        UniqueConstraint("reseller_id", "name", name="uq_reseller_skill_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reseller_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
     )

@@ -4,6 +4,7 @@ FastAPI dependencies for Ag3ntum API.
 Provides dependency injection for authentication, database sessions, etc.
 """
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Query, Request, status
@@ -266,6 +267,158 @@ async def validate_sse_token(
     )
 
 
+@dataclass
+class AuthContext:
+    """Unified authentication context for reseller/admin endpoints."""
+
+    user_id: str
+    role: str  # "admin", "reseller", "user"
+    reseller_id: Optional[str] = None
+    api_key_id: Optional[str] = None
+    api_key_scopes: list = field(default_factory=list)
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+    @property
+    def is_reseller(self) -> bool:
+        return self.role == "reseller"
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if auth context has a specific API key scope.
+
+        JWT auth (no API key) has all scopes implicitly.
+        """
+        if not self.api_key_id:
+            return True  # JWT auth = all scopes
+        return scope in self.api_key_scopes
+
+
+async def get_auth_context(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme_optional),
+    db: AsyncSession = Depends(get_db),
+) -> AuthContext:
+    """Unified auth: accepts JWT Bearer OR API key in X-API-Key header.
+
+    For JWT: extracts user from token, determines role from User.role,
+    if role=reseller, looks up reseller_id.
+
+    For API key: validates via APIKeyService, returns context with
+    key's scopes and reseller_id.
+    """
+    # Try API key first (X-API-Key header)
+    api_key_header = request.headers.get("x-api-key")
+    if api_key_header and (
+        api_key_header.startswith("ag3_res_") or api_key_header.startswith("ag3_adm_")
+    ):
+        from ..services.api_key_service import api_key_service
+        import json
+
+        key = await api_key_service.validate_key(db, api_key_header)
+        if not key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired API key",
+            )
+
+        # Check IP allowlist
+        client_ip = request.client.host if request.client else "unknown"
+        if not api_key_service.check_ip_allowed(key, client_ip):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="IP address not in allowlist",
+            )
+
+        # Check per-key rate limit
+        from ..services.api_key_rate_limiter import check_api_key_rate_limit
+        if not await check_api_key_rate_limit(key.id, key.rate_limit_per_minute):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="API key rate limit exceeded",
+            )
+
+        # Update last used
+        await api_key_service.update_last_used(db, key.id, client_ip)
+
+        scopes = json.loads(key.scopes) if key.scopes else []
+
+        # Determine role from key prefix
+        role = "admin" if api_key_header.startswith("ag3_adm_") else "reseller"
+
+        return AuthContext(
+            user_id=key.user_id,
+            role=role,
+            reseller_id=key.reseller_id,
+            api_key_id=key.id,
+            api_key_scopes=scopes,
+        )
+
+    # Fall back to JWT Bearer auth
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+    try:
+        user_id = await auth_service.validate_token(token, db)
+    except UserEnvironmentError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await auth_service.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    # reseller_id is stored directly on the User row (set during reseller creation)
+    reseller_id = user.reseller_id if user.role == "reseller" else None
+
+    return AuthContext(
+        user_id=user.id,
+        role=user.role,
+        reseller_id=reseller_id,
+    )
+
+
+async def require_reseller(
+    auth: AuthContext = Depends(get_auth_context),
+) -> AuthContext:
+    """Require reseller role (or admin for override access)."""
+    if auth.role not in ("reseller", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Reseller access required",
+        )
+    return auth
+
+
+def require_scope(scope: str):
+    """Factory for scope-checking dependencies."""
+
+    async def _check(auth: AuthContext = Depends(get_auth_context)) -> AuthContext:
+        if not auth.has_scope(scope):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required scope: {scope}",
+            )
+        return auth
+
+    return _check
+
+
 def configure_sandbox_path_resolver_if_needed(
     session_id: str,
     username: str,
@@ -296,4 +449,3 @@ def configure_sandbox_path_resolver_if_needed(
         )
     except Exception as e:
         logger.warning(f"Failed to configure SandboxPathResolver on-demand: {e}")
-

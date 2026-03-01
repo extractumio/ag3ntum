@@ -30,3 +30,14 @@ Read @`../DOCUMENTS/TECHNICAL/layers_of_security_for_filesystem.md` for the full
 - **Token revocation**: `token_version` field on User model. Logout increments version, invalidating all outstanding JWTs server-side.
 - **Fail-closed**: Security load/validate failure → operation denied. Never catch silently.
 - **Secrets scanning**: `src/security/sensitive_data_scanner.py` + `sensitive-data-scanner.yaml` → auto-redacts in File Explorer
+
+---
+
+## API Key Security
+
+- **Storage**: Keys bcrypt-hashed; key prefix (e.g., `ag3_res_abc123`) stored for lookup, full key never persisted
+- **Rate limiting**: Per-key rate limits enforced by `APIKeyRateLimiter` (default 100 req/min)
+- **IP allowlist**: Optional per-key IP allowlisting; requests from non-allowlisted IPs rejected
+- **Scope control**: Each key has a scope (user, organization, admin) restricting API access
+- **Audit logging**: All API key usage logged to `APIKeyAuditLog` for compliance
+- **Spending caps**: 3-tier enforcement (platform, reseller, user) prevents cost overruns at usage recording time

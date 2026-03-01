@@ -21,6 +21,7 @@ After ANY session failure, error, or unexpected behavior:
 - Each gotcha: max 2 lines, cause AND prevention
 - No duplicate facts — single source of truth per fact
 - No vague instructions ("be careful with X") — state what to do
+- Every feature development shall be followed by /simplify skill to unbload the updated code, improve code quality and readability
 
 ---
 
@@ -182,6 +183,14 @@ Design plans: `docs/plans/`
 
 ---
 
+## Reselling (Phase 1)
+
+Three-tier hierarchy: Admin (`ag3_adm_`) → Reseller (`ag3_res_`) → End-User. Routes: `/api/v1/reseller/*`, `/api/v1/admin/*`. Services: `APIKeyService`, `ResellerService`, `ResellerQuotaService`, `FeatureFlagService`, `SpendingGuard`, `UsageService`. Spending caps: Platform → Reseller → User (daily/monthly/per-session). Feature flags: Platform → Reseller → User (null = inherit). Settings mode: "readonly" | "configurable". IDOR prevention: `_get_owned_user()` on all reseller endpoints.
+
+→ See `docs/plans/enable-reselling/` for detailed design.
+
+---
+
 ## Configuration
 
 **CRITICAL**: Never delete, move, or overwrite `config/*.yaml`. Gitignored, instance-specific, may have credentials. Use temp dirs or mocks.
@@ -190,19 +199,11 @@ Design plans: `docs/plans/`
 
 ---
 
-## Diagnostics
+## Diagnostics & Versioning
 
-Logs: `logs/backend.log` (API, 10MB rotation) | `logs/agent_cli.log` (CLI) | `logs/latest-test-results.log` (last test run)
+Logs: `logs/backend.log` (API, 10MB rotation) | `logs/agent_cli.log` (CLI) | `logs/latest-test-results.log` (last test run). → See [docs/troubleshooting.md](docs/troubleshooting.md)
 
-→ See [docs/troubleshooting.md](docs/troubleshooting.md) for DB queries, debug script, flowcharts.
-
----
-
-## Versioning
-
-Version: `VERSION` file (semver). Branch model: `main` (dev) | `release` (stable). Release: update VERSION + CHANGELOG → PR to release → auto-tag + GitHub Release.
-
-→ See [docs/plans/release-workflow.md](docs/plans/release-workflow.md) for full process.
+Version: `VERSION` file (semver). Branch: `main` (dev) | `release` (stable). → See [docs/plans/release-workflow.md](docs/plans/release-workflow.md)
 
 ---
 
@@ -239,3 +240,4 @@ Version: `VERSION` file (semver). Branch model: `main` (dev) | `release` (stable
 29. **External mount dirs may be empty** — A configured mount pointing to an empty host dir is valid. Report "no files found", do not error or retry.
 30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
 31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
+32. **Reseller user creation = role=user only** — Reseller API hardcodes role='user'. Reseller cannot create admin or reseller accounts.

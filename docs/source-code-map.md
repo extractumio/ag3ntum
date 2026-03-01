@@ -33,7 +33,7 @@ Detailed file/class/purpose tables for all subsystems.
 
 ## API (`src/api/`)
 
-`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `deps.py` (DI)
+`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `routes/reseller.py` (reseller API) | `routes/admin.py` (admin API) | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `reseller_models.py` (reseller/admin Pydantic) | `deps.py` (DI)
 
 **Auth endpoints**:
 - `POST /auth/token` — login (rate-limited: 5 failed/account/min, 20 failed/IP/min)
@@ -41,13 +41,16 @@ Detailed file/class/purpose tables for all subsystems.
 - `POST /auth/connection-token` — short-lived single-use token for SSE auth
 - `POST /auth/logout` — server-side token revocation (increments `token_version`)
 
+**Reseller endpoints** (`/api/v1/reseller/*`): User CRUD (role=user only), API key management, usage stats, feature flags, settings, skills
+**Admin endpoints** (`/api/v1/admin/*`): Reseller CRUD, platform statistics, audit log
+
 ---
 
 ## Services (`src/services/`)
 
-`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting)
+`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting) | `api_key_service.py` (create/validate/rotate/revoke) | `api_key_rate_limiter.py` (per-key rate limiting) | `reseller_service.py` (reseller CRUD) | `reseller_quota_service.py` (reseller-level quotas) | `feature_flag_service.py` (3-tier flag resolution) | `spending_guard.py` (3-tier spending cap enforcement) | `usage_service.py` (session usage recording)
 
-**DB utilities** (`src/db/`): `models.py` (SQLAlchemy) | `retry.py` (`with_db_retry` decorator, extracted from event/session services)
+**DB utilities** (`src/db/`): `models.py` (SQLAlchemy, includes Reseller, APIKey, APIKeyAuditLog, UsageRecord, ResellerQuota, UserSkill, ResellerSkillLibrary) | `retry.py` (`with_db_retry` decorator)
 
 ---
 
