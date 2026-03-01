@@ -11,6 +11,7 @@ Provides fixtures for:
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -124,7 +125,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 def temp_sessions_dir() -> Generator[Path, None, None]:
     """
     Create a temporary directory for test sessions.
-    
+
     This directory is automatically cleaned up after each test,
     preventing session folder artifacts from accumulating.
     """
@@ -232,7 +233,7 @@ async def test_user_manager(
 def test_session_service(temp_sessions_dir):
     """
     Create a session service that uses temp directory.
-    
+
     This prevents test sessions from being created in the real sessions folder.
     """
     from src.services.session_service import SessionService
@@ -485,3 +486,113 @@ def cleanup_test_artifacts():
                             pass
         except Exception:
             pass  # getent might not be available
+
+
+@pytest.fixture
+def test_reseller(client, admin_auth_headers) -> dict:
+    """Create a reseller via POST /admin/resellers."""
+    unique = uuid.uuid4().hex[:8]
+    email = f"res_{unique}@test.com"
+    resp = client.post(
+        "/api/v1/admin/resellers",
+        headers=admin_auth_headers,
+        json={
+            "name": f"TestCo {unique}",
+            "company": "TestCo Ltd",
+            "contact_email": email,
+            "password": "ResellerPass123",
+            "max_users": 10,
+            "max_monthly_spending_usd": 100.0,
+            "max_daily_spending_usd": 20.0,
+        },
+    )
+    assert resp.status_code == 201, f"Create reseller failed: {resp.text}"
+    data = resp.json()
+    return {
+        "id": data["id"],
+        "name": data["name"],
+        "contact_email": email,
+        "password": "ResellerPass123",
+        "owner_user_id": data["owner_user_id"],
+    }
+
+
+@pytest.fixture
+def reseller_auth_headers(client, test_reseller) -> dict:
+    """Login as reseller owner, return JWT auth headers."""
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": test_reseller["contact_email"],
+            "password": test_reseller["password"],
+        },
+    )
+    assert resp.status_code == 200, f"Reseller login failed: {resp.text}"
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def reseller_user(client, reseller_auth_headers) -> dict:
+    """Create a user via POST /reseller/users."""
+    unique = uuid.uuid4().hex[:8]
+    email = f"user_{unique}@test.com"
+    resp = client.post(
+        "/api/v1/reseller/users",
+        headers=reseller_auth_headers,
+        json={
+            "username": f"usr{unique}",
+            "email": email,
+            "password": "UserPass1234",
+        },
+    )
+    assert resp.status_code == 201, f"Create reseller user failed: {resp.text}"
+    data = resp.json()
+    return {
+        "id": data["id"],
+        "username": data["username"],
+        "email": email,
+        "password": "UserPass1234",
+    }
+
+
+@pytest.fixture
+def second_reseller(client, admin_auth_headers) -> dict:
+    """Second reseller for IDOR cross-tenant tests."""
+    unique = uuid.uuid4().hex[:8]
+    email = f"evil_{unique}@test.com"
+    resp = client.post(
+        "/api/v1/admin/resellers",
+        headers=admin_auth_headers,
+        json={
+            "name": f"EvilCo {unique}",
+            "company": "Evil Inc",
+            "contact_email": email,
+            "password": "EvilPass12345",
+            "max_users": 5,
+        },
+    )
+    assert resp.status_code == 201, f"Create 2nd reseller failed: {resp.text}"
+    data = resp.json()
+    return {
+        "id": data["id"],
+        "name": data["name"],
+        "contact_email": email,
+        "password": "EvilPass12345",
+        "owner_user_id": data["owner_user_id"],
+    }
+
+
+@pytest.fixture
+def second_reseller_auth_headers(client, second_reseller) -> dict:
+    """JWT auth headers for second reseller."""
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": second_reseller["contact_email"],
+            "password": second_reseller["password"],
+        },
+    )
+    assert resp.status_code == 200, f"2nd reseller login failed: {resp.text}"
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
