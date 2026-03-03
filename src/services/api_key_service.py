@@ -4,6 +4,7 @@ API key service for reseller machine-to-machine authentication.
 Handles creation, validation, rotation, and revocation of API keys.
 Keys are stored as bcrypt hashes; the full key is shown only once at creation.
 """
+import ipaddress
 import json
 import logging
 import uuid
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import bcrypt
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import APIKey, APIKeyAuditLog
@@ -250,20 +251,17 @@ class APIKeyService:
     ) -> None:
         """Update last_used_at and last_used_ip on a key.
 
-        Args:
-            db: Database session.
-            key_id: The API key ID to update.
-            ip_address: The IP address of the request.
+        Uses a direct UPDATE to avoid an unnecessary SELECT round-trip.
         """
-        result = await db.execute(select(APIKey).where(APIKey.id == key_id))
-        key = result.scalar_one_or_none()
-        if key is None:
-            logger.warning("update_last_used: key not found id=%s", key_id)
-            return
-
-        key.last_used_at = datetime.now(timezone.utc)
-        key.last_used_ip = ip_address
         try:
+            await db.execute(
+                update(APIKey)
+                .where(APIKey.id == key_id)
+                .values(
+                    last_used_at=datetime.now(timezone.utc),
+                    last_used_ip=ip_address,
+                )
+            )
             await db.commit()
         except Exception as e:
             logger.error("Failed to update last_used for key %s: %s", key_id, e)
@@ -272,7 +270,8 @@ class APIKeyService:
     def check_ip_allowed(self, key: APIKey, ip_address: str) -> bool:
         """Check if an IP address is permitted by the key's allowlist.
 
-        An empty or null allowlist allows all IPs.
+        An empty or null allowlist allows all IPs. Supports both exact
+        IP addresses and CIDR notation (e.g. "10.0.0.0/8").
 
         Args:
             key: The APIKey record.
@@ -293,7 +292,41 @@ class APIKeyService:
         if not allowlist:
             return True
 
-        return ip_address in allowlist
+        try:
+            client_ip = ipaddress.ip_address(ip_address)
+        except ValueError:
+            logger.warning("Invalid client IP '%s' for key id=%s", ip_address, key.id)
+            return False
+
+        # Normalise IPv4-mapped IPv6 (::ffff:1.2.3.4 → 1.2.3.4) so
+        # allowlist entries like "10.0.0.0/8" match mapped addresses.
+        # Also build a list of candidate IPs to check — for pure IPv6
+        # loopback (::1) we additionally check the IPv4 loopback
+        # (127.0.0.1) since they are semantically equivalent.
+        candidates = [client_ip]
+        if isinstance(client_ip, ipaddress.IPv6Address):
+            if client_ip.ipv4_mapped:
+                candidates = [client_ip.ipv4_mapped]
+            elif client_ip == ipaddress.ip_address("::1"):
+                candidates.append(ipaddress.ip_address("127.0.0.1"))
+
+        for entry in allowlist:
+            try:
+                if "/" in entry:
+                    net = ipaddress.ip_network(entry, strict=False)
+                    for cand in candidates:
+                        if cand in net:
+                            return True
+                else:
+                    addr = ipaddress.ip_address(entry)
+                    for cand in candidates:
+                        if cand == addr:
+                            return True
+            except ValueError:
+                logger.warning("Invalid allowlist entry '%s' on key id=%s", entry, key.id)
+                continue
+
+        return False
 
     def has_scope(self, key: APIKey, required_scope: str) -> bool:
         """Check if the key has a required scope.

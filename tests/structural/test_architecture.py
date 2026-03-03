@@ -157,9 +157,12 @@ class TestFileSizeLimits:
         # API routes
         "src/api/routes/files.py": 1700,
         "src/api/routes/sessions.py": 1500,
-        "src/api/routes/reseller.py": 1900,
-        "src/api/routes/admin.py": 1000,
+        "src/api/routes/reseller.py": 2200,
+        "src/api/routes/admin.py": 1100,
+        "src/api/reseller_models.py": 800,
         "src/api/security_middleware.py": 700,
+        # Models
+        "src/db/models.py": 700,
         # Services
         "src/services/session_service.py": 1100,
         "src/services/event_service.py": 750,

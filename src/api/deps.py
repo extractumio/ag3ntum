@@ -316,16 +316,25 @@ async def get_auth_context(
         from ..services.api_key_service import api_key_service
         import json
 
+        client_ip = request.client.host if request.client else "unknown"
+
         key = await api_key_service.validate_key(db, api_key_header)
         if not key:
+            await api_key_service.log_usage(
+                db, None, None, "auth_failed",
+                None, client_ip, 401, error="Invalid or expired API key",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired API key",
             )
 
         # Check IP allowlist
-        client_ip = request.client.host if request.client else "unknown"
         if not api_key_service.check_ip_allowed(key, client_ip):
+            await api_key_service.log_usage(
+                db, key.id, key.reseller_id, "ip_denied",
+                key.user_id, client_ip, 403, error="IP not in allowlist",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="IP address not in allowlist",
@@ -334,6 +343,10 @@ async def get_auth_context(
         # Check per-key rate limit
         from ..services.api_key_rate_limiter import check_api_key_rate_limit
         if not await check_api_key_rate_limit(key.id, key.rate_limit_per_minute):
+            await api_key_service.log_usage(
+                db, key.id, key.reseller_id, "rate_limited",
+                key.user_id, client_ip, 429, error="Rate limit exceeded",
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="API key rate limit exceeded",

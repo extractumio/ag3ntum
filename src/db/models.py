@@ -574,6 +574,77 @@ class UserSkill(Base):
     )
 
 
+class PlatformConfig(Base):
+    """Key-value store for mutable platform-level defaults.
+
+    Admins update via PUT /admin/config. FeatureFlagService reads these
+    on startup and caches them in memory.
+    """
+    __tablename__ = "platform_config"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+    updated_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
+class WebhookEndpoint(Base):
+    """Reseller webhook endpoint for event notifications."""
+    __tablename__ = "webhook_endpoints"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reseller_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("resellers.id"), nullable=False, index=True
+    )
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    secret: Mapped[str] = mapped_column(String(128), nullable=False)
+    events: Mapped[str] = mapped_column(Text, nullable=False)  # JSON array
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    deliveries: Mapped[list["WebhookDeliveryLog"]] = relationship(
+        "WebhookDeliveryLog", back_populates="endpoint",
+        cascade="all, delete-orphan",
+    )
+
+
+class WebhookDeliveryLog(Base):
+    """Delivery log entry for a webhook notification attempt."""
+    __tablename__ = "webhook_delivery_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    endpoint_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("webhook_endpoints.id"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    response_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    endpoint: Mapped["WebhookEndpoint"] = relationship(
+        "WebhookEndpoint", back_populates="deliveries"
+    )
+
+
 class ResellerSkillLibrary(Base):
     """Reseller-curated skill library for assignment to users."""
     __tablename__ = "reseller_skill_library"

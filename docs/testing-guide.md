@@ -106,6 +106,32 @@ Setup: `setup.ts` (MSW, jest-dom, window mocks). Mocks: `mocks/handlers.ts`.
 
 ---
 
+## Reseller/Admin Integration Tests
+
+Backend test suites for reselling features follow a pattern of HTTP integration tests using the FastAPI test client with fixtures from `conftest.py`.
+
+**Key fixtures** (`tests/backend/conftest.py`): `client` (TestClient), `admin_auth_headers` (admin JWT), `reseller_auth_headers` (reseller JWT), `second_reseller_auth_headers` (for IDOR tests), `db` (async session).
+
+**Test files** (Phase 1 + Phase 2):
+- `test_reseller.py` — Service-layer reseller tests (CRUD, quotas, flags, spending)
+- `test_reseller_http.py` — HTTP integration tests for reseller endpoints
+- `test_reseller_config_http.py` — HTTP tests for reseller config/security/ssh endpoints
+- `test_reseller_metrics_http.py` — WHMCS metrics + usage export HTTP tests
+- `test_admin.py` — Admin service-layer tests + platform config
+- `test_admin_http.py` — Admin HTTP integration tests (reseller lifecycle, suspension)
+- `test_admin_config_http.py` — Platform config GET/PUT HTTP tests
+- `test_cidr_and_audit.py` — CIDR IP allowlisting + audit log tests
+- `test_webhook_service.py` — Webhook service unit tests (HMAC, delivery, retry)
+- `test_webhook_http.py` — Webhook CRUD HTTP integration tests + IDOR
+- `test_processor_lifecycle.py` — WebhookProcessor + RetentionProcessor lifecycle
+- `test_feature_flag_service.py` — FeatureFlagService unit tests (defaults, overrides, DB ops)
+- `test_data_retention.py` — Data retention config + purge tests
+- `test_simplify_fixes.py` — Regression tests for code quality fixes
+
+**QA playbooks** (manual testing): `docs/plans/enable-reselling/qa-test-playbook.md` (Phase 1, 96 tests), `docs/plans/enable-reselling/qa-test-stage2.md` (Phase 2/3, 81 tests).
+
+---
+
 ## Test Output
 
 `logs/latest-test-results.log` (overwritten each run):

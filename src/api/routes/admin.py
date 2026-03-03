@@ -23,11 +23,13 @@ from ..reseller_models import (
     AuditLogEntry, AuditLogResponse, ChangePasswordRequest,
     CreateResellerRequest, CreateResellerUserRequest,
     DeleteResellerResponse, DeleteUserResponse, PaginationInfo,
-    PasswordChangedResponse, PlatformStats,
+    PasswordChangedResponse, PlatformConfigResponse, PlatformStats,
     ResellerLimits, ResellerListResponse, ResellerResponse,
-    ResellerSpending, ResellerStats, SpendingCurrent, SpendingLimits,
+    ResellerSpending, ResellerStats, RetentionConfigResponse,
+    RetentionRunResponse, SpendingCurrent, SpendingLimits,
     SuspendResellerResponse, SuspendRequest, SuspendUserResponse,
-    UnsuspendResellerResponse, UpdateResellerRequest,
+    UnsuspendResellerResponse, UpdatePlatformConfigRequest,
+    UpdateResellerRequest, UpdateRetentionRequest,
     UsagePeriod, UsageResponse, UsageTotals,
 )
 
@@ -658,33 +660,60 @@ async def admin_delete_user(
 # Platform configuration
 # =============================================================================
 
-@router.get("/config")
+@router.get("/config", response_model=PlatformConfigResponse)
 async def get_platform_config(
+    db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(_require_admin),
-) -> dict:
+) -> PlatformConfigResponse:
     """Return platform-level default configuration.
 
-    Exposes the baseline settings that resellers and users inherit from.
+    Exposes the effective settings (hardcoded + DB overrides) that
+    resellers and users inherit from.
     """
-    from ...services.feature_flag_service import DEFAULT_FEATURES
+    from ...services.feature_flag_service import feature_flag_service
 
-    return {
-        "default_features": dict(DEFAULT_FEATURES),
-        "default_quotas": {
-            "global_max_concurrent": 4,
-            "per_user_max_concurrent": 2,
-            "per_user_daily_limit": 50,
-        },
-        "default_spending_limits": {
-            "reseller_monthly_usd": None,
-            "reseller_daily_usd": None,
-            "user_monthly_usd": None,
-            "user_daily_usd": None,
-            "user_per_session_usd": None,
-        },
-        "default_settings_mode": "readonly",
-        "default_allowed_overrides": [],
-    }
+    await feature_flag_service.ensure_loaded(db)
+
+    return PlatformConfigResponse(
+        default_features=feature_flag_service.get_platform_features(),
+        default_quotas=feature_flag_service.get_platform_quotas(),
+        default_spending_limits=feature_flag_service.get_platform_spending(),
+    )
+
+
+@router.put("/config", response_model=PlatformConfigResponse)
+async def update_platform_config(
+    body: UpdatePlatformConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+) -> PlatformConfigResponse:
+    """Update platform-level default configuration.
+
+    Updates the DB-stored overrides. Null values in the body reset
+    individual keys back to hardcoded defaults.
+    """
+    from ...services.feature_flag_service import feature_flag_service
+
+    await feature_flag_service.ensure_loaded(db)
+
+    if body.features is not None:
+        await feature_flag_service.update_platform_defaults(
+            db, "features", body.features, updated_by=auth.user_id,
+        )
+    if body.quotas is not None:
+        await feature_flag_service.update_platform_defaults(
+            db, "quotas", body.quotas, updated_by=auth.user_id,
+        )
+    if body.spending is not None:
+        await feature_flag_service.update_platform_defaults(
+            db, "spending", body.spending, updated_by=auth.user_id,
+        )
+
+    return PlatformConfigResponse(
+        default_features=feature_flag_service.get_platform_features(),
+        default_quotas=feature_flag_service.get_platform_quotas(),
+        default_spending_limits=feature_flag_service.get_platform_spending(),
+    )
 
 
 # =============================================================================
@@ -967,3 +996,48 @@ async def audit_log(
             total_pages=total_pages,
         ),
     )
+
+
+# =============================================================================
+# Data retention
+# =============================================================================
+
+@router.get("/retention", response_model=RetentionConfigResponse)
+async def get_retention_config(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+) -> RetentionConfigResponse:
+    """Return current data retention configuration (days per table)."""
+    from ...services.data_retention_service import data_retention_service
+    config = await data_retention_service.get_retention_config(db)
+    return RetentionConfigResponse(**config)
+
+
+@router.put("/retention", response_model=RetentionConfigResponse)
+async def update_retention_config(
+    body: UpdateRetentionRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+) -> RetentionConfigResponse:
+    """Update data retention periods. Values in days (minimum 1)."""
+    from ...services.data_retention_service import data_retention_service
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        config = await data_retention_service.get_retention_config(db)
+    else:
+        config = await data_retention_service.update_retention_config(
+            db, updates, updated_by=auth.user_id,
+        )
+    return RetentionConfigResponse(**config)
+
+
+@router.post("/retention/run", response_model=RetentionRunResponse)
+async def run_retention(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+) -> RetentionRunResponse:
+    """Manually trigger a data retention purge and return results."""
+    from ...services.data_retention_service import data_retention_service
+    results = await data_retention_service.run_all(db)
+    total = results.pop("total_purged", 0)
+    return RetentionRunResponse(total_purged=total, tables=results)

@@ -27,6 +27,7 @@ class UserResponse(BaseModel):
     username: str = Field(description="Username")
     email: str = Field(description="Email address")
     role: str = Field(description="User role (admin/user)")
+    reseller_id: Optional[str] = Field(default=None, description="Reseller ID if user belongs to a reseller")
     created_at: datetime = Field(description="Account creation timestamp")
 
 
@@ -215,7 +216,7 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="Claude model to use (overrides config)"
     )
-    
+
     @field_validator("task")
     @classmethod
     def truncate_task(cls, v: str) -> str:
@@ -257,7 +258,7 @@ class StartTaskRequest(BaseModel):
         default_factory=AgentConfigOverrides,
         description="Agent configuration overrides"
     )
-    
+
     @field_validator("task")
     @classmethod
     def truncate_task(cls, v: Optional[str]) -> Optional[str]:

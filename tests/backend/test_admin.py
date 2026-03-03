@@ -576,31 +576,31 @@ class TestPlatformConfig:
     """Test GET /admin/config endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_platform_config_returns_defaults(self, admin_user):
+    async def test_get_platform_config_returns_defaults(self, admin_user, db):
         """Platform config returns default features, quotas, and spending."""
         from src.api.routes.admin import get_platform_config
 
         auth = _mock_admin_auth(admin_user)
-        result = await get_platform_config(auth=auth)
+        result = await get_platform_config(db=db, auth=auth)
 
-        assert "default_features" in result
-        assert "default_quotas" in result
-        assert "default_spending_limits" in result
-        assert "default_settings_mode" in result
-        assert "default_allowed_overrides" in result
+        assert hasattr(result, "default_features")
+        assert hasattr(result, "default_quotas")
+        assert hasattr(result, "default_spending_limits")
+        assert hasattr(result, "default_settings_mode")
+        assert hasattr(result, "default_allowed_overrides")
 
         # Features should match DEFAULT_FEATURES
         from src.services.feature_flag_service import DEFAULT_FEATURES
-        assert result["default_features"] == DEFAULT_FEATURES
+        assert result.default_features == DEFAULT_FEATURES
 
         # Quotas
-        assert result["default_quotas"]["global_max_concurrent"] == 4
-        assert result["default_quotas"]["per_user_max_concurrent"] == 2
-        assert result["default_quotas"]["per_user_daily_limit"] == 50
+        assert result.default_quotas["global_max_concurrent"] == 4
+        assert result.default_quotas["per_user_max_concurrent"] == 2
+        assert result.default_quotas["per_user_daily_limit"] == 50
 
         # Settings mode
-        assert result["default_settings_mode"] == "readonly"
-        assert result["default_allowed_overrides"] == []
+        assert result.default_settings_mode == "readonly"
+        assert result.default_allowed_overrides == []
 
 
 class TestAuthContext:

@@ -25,6 +25,7 @@
 @import './login.css';
 @import './session-list.css';
 @import './overlays.css';
+@import './dashboard.css';
 
 /* Responsive (media queries) - must come after component styles */
 @import './responsive.css';

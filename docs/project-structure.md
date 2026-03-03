@@ -31,18 +31,28 @@ Project/
 │   │   ├── routes/reseller.py     # Reseller API endpoints
 │   │   ├── routes/admin.py        # Admin API endpoints
 │   │   └── reseller_models.py     # Reseller/admin Pydantic models
-│   ├── services/                  # Business logic (25 files, +7 reseller)
-│   │   ├── api_key_service.py     # API key CRUD
-│   │   ├── reseller_service.py    # Reseller CRUD
-│   │   ├── feature_flag_service.py # Flag resolution
-│   │   ├── spending_guard.py      # Spending caps
-│   │   └── usage_service.py       # Usage recording
+│   ├── services/                  # Business logic (32 files)
+│   │   ├── api_key_service.py     # API key CRUD, CIDR allowlisting, audit
+│   │   ├── reseller_service.py    # Reseller CRUD, suspension cascading
+│   │   ├── feature_flag_service.py # 3-tier flag resolution, DB-backed config
+│   │   ├── spending_guard.py      # 3-tier spending caps, webhook alerts
+│   │   ├── usage_service.py       # Usage recording, WHMCS metrics, export
+│   │   ├── webhook_service.py     # Webhook CRUD, HMAC delivery, retry
+│   │   ├── webhook_processor.py   # Background retry loop (30s)
+│   │   ├── data_retention_service.py # Configurable record purging
+│   │   └── retention_processor.py # Background daily purge job
 │   ├── security/                  # Secrets scanner
-│   ├── db/                        # SQLAlchemy models + retry.py
+│   ├── db/                        # SQLAlchemy models + retry.py + alembic migrations
 │   ├── cli/                       # User management CLI
 │   ├── config.py
 │   └── web_terminal_client/       # React 18 + TS + Vite
-│       └── src/styles/            # 17 component-scoped CSS files
+│       └── src/
+│           ├── adminApi.ts        # Admin/reseller API client
+│           ├── types/admin.ts     # Admin/reseller TypeScript interfaces
+│           ├── components/dashboard/ # Dashboard shared components
+│           ├── pages/admin/       # Admin dashboard pages
+│           ├── pages/reseller/    # Reseller dashboard pages
+│           └── styles/            # 18 component-scoped CSS files
 ├── tools/ag3ntum/                 # 11 MCP tools
 ├── prompts/                       # Prompt templates (${VAR} + Jinja2)
 │   ├── system-prompts/            # 10 numbered .md system prompt modules
@@ -53,7 +63,7 @@ Project/
 │   ├── roles/                     # Role definitions (.md)
 │   └── user.md                    # User task prompt template
 ├── tests/
-│   ├── backend/ (29 files)        # API, services, routes
+│   ├── backend/ (65+ files)       # API, services, routes
 │   │   └── redis/ (3 files)       # EventHub, streaming
 │   ├── core-tests/                # Agent core
 │   ├── security/ (5 files)        # Cmd filter, UID, isolation
@@ -81,7 +91,7 @@ Project/
 
 - **Core** (`src/core/`, 40 files) — Agent orchestration, sandbox, security, prompts, tracers
 - **API** (`src/api/`) — FastAPI app, routes (sessions, auth, files, health, reseller, admin), middleware, WAF
-- **Services** (`src/services/`, 25 files) — Session, event, auth, user, mount, API keys, reseller, spending, usage, Redis pub/sub
+- **Services** (`src/services/`, 32 files) — Session, event, auth, user, mount, API keys, reseller, spending, usage, webhooks, data retention, Redis pub/sub
 - **MCP Tools** (`tools/ag3ntum/`, 11 tools) — Sandboxed replacements for native tools (Read/Write/Edit/Bash/Glob/Grep/LS/WebFetch/AskUserQuestion/ReadDocument/MultiEdit)
 - **Web Terminal** (`src/web_terminal_client/`) — React 18.3 + TypeScript 5.6 + Vite 5.4
 

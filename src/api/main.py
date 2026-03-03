@@ -225,6 +225,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # NOTE: Linux user sync happens in entrypoint-api.sh BEFORE this process starts.
     # This ensures the process inherits correct supplementary groups (shared GID model).
 
+    # Load platform defaults from DB into FeatureFlagService
+    try:
+        from ..services.feature_flag_service import feature_flag_service
+        from ..db.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            await feature_flag_service.load_platform_defaults(db)
+    except Exception as e:
+        logger.warning("Could not load platform defaults: %s", e)
+
+    # Start WebhookProcessor for retry deliveries
+    webhook_processor = None
+    try:
+        from ..services.webhook_processor import WebhookProcessor
+        webhook_processor = WebhookProcessor(interval_seconds=30)
+        await webhook_processor.start()
+    except Exception as e:
+        logger.warning("Could not start WebhookProcessor: %s", e)
+
+    # Start RetentionProcessor for daily data purge
+    retention_processor = None
+    try:
+        from ..services.retention_processor import RetentionProcessor
+        retention_processor = RetentionProcessor()
+        await retention_processor.start()
+    except Exception as e:
+        logger.warning("Could not start RetentionProcessor: %s", e)
+
     # Initialize SubagentManager singleton
     # This loads config/subagents.yaml and renders all prompt templates ONCE.
     # The same subagent definitions are shared across ALL users and sessions.
@@ -294,6 +321,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    if retention_processor:
+        await retention_processor.stop()
+        logger.info("RetentionProcessor stopped")
+
+    if webhook_processor:
+        await webhook_processor.stop()
+        logger.info("WebhookProcessor stopped")
+
+    # Close the httpx connection pool used by webhook delivery
+    try:
+        from ..services.webhook_service import webhook_service
+        await webhook_service.close()
+    except Exception:
+        pass
+
     if queue_processor:
         await queue_processor.stop()
         logger.info("Queue processor stopped")

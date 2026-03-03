@@ -257,6 +257,18 @@ class AgentRunner:
                     db, reseller_id, cost_usd, input_tokens, output_tokens
                 )
 
+            # Fire webhook for session completion
+            if reseller_id:
+                from .webhook_service import webhook_service
+                await webhook_service.fire_best_effort(db, reseller_id, "session.completed", {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "model": model,
+                    "cost_usd": cost_usd,
+                    "duration_ms": duration_ms,
+                    "num_turns": num_turns,
+                })
+
             logger.debug(f"Usage recorded for session {session_id} (cost=${cost_usd:.4f})")
 
     async def start_task(self, params: TaskParams) -> None:

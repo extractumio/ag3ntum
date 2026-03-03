@@ -111,7 +111,7 @@ Design plans: `docs/plans/`
 |------|---------|
 | `src/core/` (40 files) | Agent orchestration, sandbox, security, prompts, tracers |
 | `src/api/` | FastAPI routes (sessions, auth, files, health), middleware, WAF |
-| `src/services/` (18 files) | Session, event, auth, user, mount, Redis pub/sub |
+| `src/services/` (32 files) | Session, event, auth, user, mount, reseller, webhooks, retention, Redis pub/sub |
 | `tools/ag3ntum/` (11 tools) | MCP tools: Read/Write/Edit/Bash/Glob/Grep/LS/WebFetch/AskUser/ReadDoc/MultiEdit |
 | `src/web_terminal_client/` | React 18.3 + TypeScript 5.6 + Vite 5.4 |
 
@@ -183,9 +183,11 @@ Design plans: `docs/plans/`
 
 ---
 
-## Reselling (Phase 1)
+## Reselling (Phase 1 + Phase 2)
 
-Three-tier hierarchy: Admin (`ag3_adm_`) → Reseller (`ag3_res_`) → End-User. Routes: `/api/v1/reseller/*`, `/api/v1/admin/*`. Services: `APIKeyService`, `ResellerService`, `ResellerQuotaService`, `FeatureFlagService`, `SpendingGuard`, `UsageService`. Spending caps: Platform → Reseller → User (daily/monthly/per-session). Feature flags: Platform → Reseller → User (null = inherit). Settings mode: "readonly" | "configurable". IDOR prevention: `_get_owned_user()` on all reseller endpoints.
+Three-tier hierarchy: Admin (`ag3_adm_`) → Reseller (`ag3_res_`) → End-User. Routes: `/api/v1/reseller/*`, `/api/v1/admin/*`. Services: `APIKeyService`, `ResellerService`, `ResellerQuotaService`, `FeatureFlagService`, `SpendingGuard`, `UsageService`, `WebhookService`, `DataRetentionService`. Spending caps: Platform → Reseller → User (daily/monthly/per-session). Feature flags: Platform → Reseller → User (null = inherit). Settings mode: "readonly" | "configurable". IDOR prevention: `_get_owned_user()` on all reseller endpoints.
+
+**Phase 2 additions**: CIDR IP allowlisting on API keys. Audit logging (`GET /admin/audit`). Platform config mutation (`PUT /admin/config` for features/quotas/spending, null resets to default). WHMCS metrics (`GET /reseller/usage/metrics`). Usage export (`GET /reseller/usage/export` JSON/CSV). Webhook CRUD with HMAC-SHA256 signing + exponential retry (`/reseller/webhooks`). Data retention with configurable purge periods (`GET/PUT /admin/retention`, `POST /admin/retention/run`). Background processors: `WebhookProcessor` (30s retry), `RetentionProcessor` (24h purge). Admin/reseller dashboard pages (frontend).
 
 → See `docs/plans/enable-reselling/` for detailed design.
 
