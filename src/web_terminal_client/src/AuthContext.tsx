@@ -48,7 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const user = await getCurrentUser(baseUrl, token);
       setUser(user);
       setToken(token);
-    } catch (err) {
+    } catch {
       remove('auth_token');
       setError('Session expired. Please login again.');
     } finally {
@@ -107,6 +107,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) throw new Error('useAuth must be used within AuthProvider');
