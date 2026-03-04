@@ -12,8 +12,19 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import text
 
-from ..helpers import table_exists
+
+def _table_exists(conn, table_name: str) -> bool:
+    """Return True if the named table exists in the database."""
+    result = conn.execute(
+        text(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name=:name"
+        ),
+        {"name": table_name},
+    )
+    return result.scalar() > 0
 
 # ---------------------------------------------------------------------------
 # Revision identifiers
@@ -31,7 +42,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
 
-    if not table_exists(bind, "webhook_endpoints"):
+    if not _table_exists(bind, "webhook_endpoints"):
         op.create_table(
             "webhook_endpoints",
             sa.Column("id", sa.String(36), primary_key=True),
@@ -54,7 +65,7 @@ def upgrade() -> None:
             ),
         )
 
-    if not table_exists(bind, "webhook_delivery_log"):
+    if not _table_exists(bind, "webhook_delivery_log"):
         op.create_table(
             "webhook_delivery_log",
             sa.Column(
