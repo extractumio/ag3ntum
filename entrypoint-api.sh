@@ -28,6 +28,10 @@ fi
 
 python3 /scripts/sync_linux_users.py
 
+# Run database migrations (Alembic) — idempotent, handles fresh + existing DBs
+echo "Running database migrations..."
+python3 -c "from src.db.migrations import run_migrations_sync; run_migrations_sync()"
+
 # Drop to ag3ntum_api with refreshed supplementary groups.
 # --init-groups reads /etc/group to set the correct group list.
 exec setpriv --reuid=45045 --regid=45045 --init-groups \

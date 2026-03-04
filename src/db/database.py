@@ -48,9 +48,11 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     """
-    Initialize the database.
+    Initialize the database by creating all tables via create_all().
 
-    Creates the database directory and all tables if they don't exist.
+    NOTE: For production API startup, schema is managed by Alembic migrations
+    in entrypoint-api.sh (see src/db/migrations.py). This function is retained
+    for CLI tools (create_user.py, delete_user.py) and test fixtures.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -74,4 +76,3 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
-
