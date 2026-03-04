@@ -4,6 +4,7 @@ sessions/
 
 # Environment and Secrets
 .env
+.ag3ntum-version
 config/secrets.yaml
 config/user_secrets.yaml
 .venv/
@@ -18,6 +19,7 @@ config/llm-api-proxy.yaml
 
 # Auto-generated files (created by run.sh)
 auto-generated/
+backups/
 
 docs/plans/
 docs/internals/

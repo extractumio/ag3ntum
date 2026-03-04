@@ -95,6 +95,10 @@ Design plans: `docs/plans/`
 ./run.sh test --ui                     # Frontend vitest
 ./run.sh lint                          # flake8 + bandit + mypy + eslint + tsc + structural tests
 ./run.sh audit                         # pip-audit dependency vulnerability scan
+./upgrade.sh                           # Safe upgrade: backup → pull → migrate → build → validate
+./upgrade.sh --dry-run                 # Preview upgrade without making changes
+./upgrade.sh --check                   # Health diagnostics only
+./upgrade.sh --rollback                # Restore from most recent backup
 ```
 
 **New developer?** Run `./run.sh setup` then `./run.sh build`. That's it.
@@ -243,3 +247,4 @@ Version: `VERSION` file (semver). Branch: `main` (dev) | `release` (stable). →
 30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
 31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
 32. **Reseller user creation = role=user only** — Reseller API hardcodes role='user'. Reseller cannot create admin or reseller accounts.
+33. **Use `./upgrade.sh` for upgrades** — not `git pull` + `./run.sh build`. Direct build skips DB migration, config migration, and backup.

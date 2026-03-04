@@ -204,6 +204,21 @@ Tenant separation is enforced by the Linux kernel, not application logic. Bypass
 
 **After build:** Web UI at `http://localhost:50080` | API at `http://localhost:40080`
 
+## Upgrading
+
+Use `upgrade.sh` for safe, automated upgrades with backup and migration:
+
+```bash
+./upgrade.sh                             # Full upgrade: backup, pull, migrate, build, validate
+./upgrade.sh --dry-run                   # Preview changes without modifying anything
+./upgrade.sh --check                     # Health diagnostics only
+./upgrade.sh --rollback                  # Restore from most recent backup
+```
+
+The upgrade script handles backup creation, dependency change detection, database migration (via Alembic), config schema migration, and post-upgrade health validation. Backups are stored in `backups/` (3 retained).
+
+**Do not use** `git pull && ./run.sh build` directly — it skips backup, config migration, and dependency change detection. See [docs/how-to-upgrade.md](docs/how-to-upgrade.md) for full details.
+
 ---
 
 ## License

@@ -210,6 +210,8 @@ function validate_and_provision_configs() {
         # Special case: .example contains sample paths that fail mount validation.
         # Create a minimal empty config instead.
         cat > "${cfg}" <<'EXTMOUNTS'
+_version: "0.2.0"
+
 # External mounts configuration
 # See external-mounts.yaml.example for documentation and examples.
 original_paths:
@@ -1959,6 +1961,23 @@ if [[ -f "${ROOT_DIR}/VERSION" ]]; then
 else
   APP_VERSION="dev"
 fi
+
+# Warn if installed version doesn't match codebase
+if [[ -f ".ag3ntum-version" ]]; then
+  INSTALLED_VERSION="$(tr -d '[:space:]' < .ag3ntum-version)"
+  if [[ "${INSTALLED_VERSION}" != "${APP_VERSION}" ]]; then
+    echo ""
+    echo "WARNING: Version mismatch detected:"
+    echo "  Installed: ${INSTALLED_VERSION}"
+    echo "  Codebase:  ${APP_VERSION}"
+    echo ""
+    echo "  Recommended: Run ./upgrade.sh for a safe upgrade with backup and migration."
+    echo "  Continuing with build in 5 seconds... (Ctrl+C to cancel)"
+    echo ""
+    sleep 5
+  fi
+fi
+
 IMAGE_TAG="${APP_VERSION}-$(date +%Y%m%d%H%M%S)"
 BACKUP_ENV="$(mktemp)"
 ROLLBACK_ENV=0
@@ -1982,6 +2001,8 @@ if [[ -n "${NO_CACHE}" ]]; then
   echo "  (Using --no-cache for fresh build)"
 fi
 docker build ${NO_CACHE} --build-arg APP_VERSION="${APP_VERSION}" -t "ag3ntum:${IMAGE_TAG}" .
+docker tag "ag3ntum:${IMAGE_TAG}" "ag3ntum:${APP_VERSION}"
+docker tag "ag3ntum:${IMAGE_TAG}" "ag3ntum:latest"
 
 ROLLBACK_ENV=1
 cat > .env <<EOF
@@ -2003,6 +2024,9 @@ if ! check_services; then
 fi
 
 ROLLBACK_ENV=0
+
+# Track installed version
+echo "${APP_VERSION}" > .ag3ntum-version
 
 # Validate frontend build (catches module resolution failures early)
 echo ""

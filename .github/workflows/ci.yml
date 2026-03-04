@@ -112,6 +112,10 @@ jobs:
       - name: Run frontend tests
         run: ./run.sh test --ui
 
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --tail=100 ag3ntum-api 2>/dev/null || true
+
       - name: Remove secrets file
         if: always()
         run: rm -f config/secrets.yaml

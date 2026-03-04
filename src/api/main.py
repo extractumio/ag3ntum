@@ -198,6 +198,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup
     logger.info("Starting Ag3ntum API...")
+    # In production, Alembic migrations run in entrypoint-api.sh before this
+    # process starts. init_db() is kept as an idempotent fallback for cases
+    # where the entrypoint doesn't run (E2E tests, direct uvicorn invocation).
     await init_db()
     logger.info("Database initialized")
 

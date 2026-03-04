@@ -34,6 +34,28 @@ Both modes use two ports: **Web UI** http://localhost:50080 | **API** http://loc
 
 Mode is persisted in `.env` as `AG3NTUM_MODE`. `install.sh` defaults to prod/release; use `install.sh --dev` for development.
 
+## Upgrade
+
+```bash
+./upgrade.sh                           # Full upgrade: backup → pull → migrate → build → validate
+./upgrade.sh --dry-run                 # Preview upgrade plan without making changes
+./upgrade.sh --force                   # Skip confirmation prompts
+./upgrade.sh --skip-backup             # Skip backup step (for CI/CD)
+./upgrade.sh --rollback                # Restore from most recent backup
+./upgrade.sh --check                   # Health diagnostics only
+```
+
+The upgrade script handles:
+- **Pre-flight checks**: git clean, Docker running, disk space, active sessions
+- **Backup**: `data/ config/ .env .ag3ntum-version` → `backups/` (keeps 3)
+- **Dependency detection**: auto-uses `--no-cache` if `requirements.txt`, `package.json`, or `Dockerfile` changed
+- **Config migration**: runs `scripts/migrate_config.py` for config schema changes
+- **Database migration**: Alembic runs automatically in the entrypoint on container start
+- **Post-validation**: health check, DB verify, version match
+- **Rollback**: `--rollback` restores from latest backup and rebuilds
+
+**Do not use** `git pull && ./run.sh build` directly — it skips backup, config migration, and dependency change detection.
+
 ## User Management
 
 ```bash

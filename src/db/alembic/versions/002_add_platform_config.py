@@ -12,8 +12,19 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import text
 
-from ..helpers import table_exists
+
+def _table_exists(conn, table_name: str) -> bool:
+    """Return True if the named table exists in the database."""
+    result = conn.execute(
+        text(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name=:name"
+        ),
+        {"name": table_name},
+    )
+    return result.scalar() > 0
 
 # ---------------------------------------------------------------------------
 # Revision identifiers
@@ -31,7 +42,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
 
-    if not table_exists(bind, "platform_config"):
+    if not _table_exists(bind, "platform_config"):
         op.create_table(
             "platform_config",
             sa.Column("key", sa.String(100), primary_key=True),

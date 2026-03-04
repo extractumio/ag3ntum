@@ -1,3 +1,5 @@
+_version: "0.2.0"
+
 # Ag3ntum Agent Configuration
 # Override via CLI: --set agent.model=... or --model ...
 
