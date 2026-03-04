@@ -16,7 +16,11 @@ from sqlalchemy import text
 
 
 def _table_exists(conn, table_name: str) -> bool:
-    """Return True if the named table exists in the database."""
+    """Return True if the named table exists in the database.
+
+    Inlined here because Alembic loads migration files as standalone modules,
+    not as part of a Python package — relative imports fail at runtime.
+    """
     result = conn.execute(
         text(
             "SELECT COUNT(*) FROM sqlite_master "

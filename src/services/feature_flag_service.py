@@ -202,27 +202,25 @@ class FeatureFlagService:
         """
         effective = self.get_platform_features()
 
-        # Layer 2: Reseller overrides
-        if reseller_features_json:
-            try:
-                reseller_features = json.loads(reseller_features_json)
-                for k, v in reseller_features.items():
-                    if v is not None and k in effective:
-                        effective[k] = v
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Invalid reseller features JSON")
-
-        # Layer 3: User overrides (within reseller ceiling)
-        if user_features_json:
-            try:
-                user_features = json.loads(user_features_json)
-                for k, v in user_features.items():
-                    if v is not None and k in effective:
-                        effective[k] = v
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Invalid user features JSON")
+        # Layer 2: Reseller overrides, Layer 3: User overrides
+        self._apply_json_overrides(effective, reseller_features_json, "reseller")
+        self._apply_json_overrides(effective, user_features_json, "user")
 
         return effective
+
+    @staticmethod
+    def _apply_json_overrides(effective: dict, json_str: Optional[str],
+                              label: str) -> None:
+        """Apply JSON overrides to an effective feature dict."""
+        if not json_str:
+            return
+        try:
+            overrides = json.loads(json_str)
+            for k, v in overrides.items():
+                if v is not None and k in effective:
+                    effective[k] = v
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Invalid %s features JSON", label)
 
     def validate_override(self, key: str, value: Any,
                           ceiling: dict[str, Any]) -> tuple[bool, str]:
@@ -243,7 +241,7 @@ class FeatureFlagService:
                 return (False, f"Cannot enable {key}: restricted by parent")
             return (True, "")
 
-        if isinstance(ceil_val, (int, float)) and ceil_val is not None:
+        if isinstance(ceil_val, (int, float)):
             if isinstance(value, (int, float)) and value > ceil_val:
                 return (False, f"{key} cannot exceed {ceil_val}")
             return (True, "")

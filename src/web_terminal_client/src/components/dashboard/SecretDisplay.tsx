@@ -11,8 +11,6 @@ export function SecretDisplay({ value, label = 'Secret' }: SecretDisplayProps) {
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     } catch {
       // Fallback for non-HTTPS contexts
       const el = document.createElement('textarea');
@@ -21,9 +19,9 @@ export function SecretDisplay({ value, label = 'Secret' }: SecretDisplayProps) {
       el.select();
       document.execCommand('copy');
       document.body.removeChild(el);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (

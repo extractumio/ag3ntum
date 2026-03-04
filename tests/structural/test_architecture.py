@@ -456,7 +456,7 @@ class TestCoverageMapping:
 
         route_files = [
             f for f in os.listdir(routes_dir)
-            if f.endswith(".py") and f != "__init__.py"
+            if f.endswith(".py") and not f.startswith("_")
         ]
 
         # Get all test files

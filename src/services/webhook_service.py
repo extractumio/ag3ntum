@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -68,7 +69,7 @@ class WebhookService:
         The secret is generated and stored; returned once for the caller
         to save. It's used for HMAC-SHA256 signature verification.
         """
-        secret = uuid.uuid4().hex + uuid.uuid4().hex  # 64-char hex
+        secret = secrets.token_hex(32)  # 64-char hex, cryptographically safe
         endpoint = WebhookEndpoint(
             id=str(uuid.uuid4()),
             reseller_id=reseller_id,
@@ -318,15 +319,17 @@ class WebhookService:
 
         # Mark dead-endpoint deliveries as failed in a single batch
         live_deliveries = []
+        any_failed = False
         for delivery in deliveries:
             endpoint = endpoints_by_id.get(delivery.endpoint_id)
             if endpoint is None or not endpoint.is_active:
                 delivery.status = "failed"
                 delivery.error = "Endpoint deleted or inactive"
+                any_failed = True
             else:
                 live_deliveries.append((delivery, endpoint))
 
-        if any(d.status == "failed" for d in deliveries):
+        if any_failed:
             await db.commit()
 
         count = 0

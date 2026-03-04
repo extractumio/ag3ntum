@@ -23,6 +23,15 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function toQS(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [key, val] of Object.entries(params)) {
+    if (val !== undefined && val !== '') qs.set(key, String(val));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
 async function adminRequest<T>(
   baseUrl: string,
   path: string,
@@ -81,13 +90,7 @@ export async function listResellers(
   baseUrl: string, token: string,
   params: { page?: number; per_page?: number; status?: string; search?: string } = {},
 ): Promise<ResellerListResponse> {
-  const qs = new URLSearchParams();
-  if (params.page) qs.set('page', String(params.page));
-  if (params.per_page) qs.set('per_page', String(params.per_page));
-  if (params.status) qs.set('status', params.status);
-  if (params.search) qs.set('search', params.search);
-  const suffix = qs.toString() ? `?${qs}` : '';
-  return adminRequest(baseUrl, `/api/v1/admin/resellers${suffix}`, token);
+  return adminRequest(baseUrl, `/api/v1/admin/resellers${toQS(params)}`, token);
 }
 
 export async function getReseller(baseUrl: string, token: string, id: string): Promise<Reseller> {
@@ -132,15 +135,7 @@ export async function listAllUsers(
   baseUrl: string, token: string,
   params: { page?: number; per_page?: number; reseller_id?: string; status?: string; role?: string; search?: string } = {},
 ): Promise<AdminUserListResponse> {
-  const qs = new URLSearchParams();
-  if (params.page) qs.set('page', String(params.page));
-  if (params.per_page) qs.set('per_page', String(params.per_page));
-  if (params.reseller_id) qs.set('reseller_id', params.reseller_id);
-  if (params.status) qs.set('status', params.status);
-  if (params.role) qs.set('role', params.role);
-  if (params.search) qs.set('search', params.search);
-  const suffix = qs.toString() ? `?${qs}` : '';
-  return adminRequest(baseUrl, `/api/v1/admin/users${suffix}`, token);
+  return adminRequest(baseUrl, `/api/v1/admin/users${toQS(params)}`, token);
 }
 
 export async function suspendUser(baseUrl: string, token: string, id: string) {
@@ -159,24 +154,14 @@ export async function getPlatformUsage(
   baseUrl: string, token: string,
   params: { period?: string; reseller_id?: string } = {},
 ): Promise<UsageResponse> {
-  const qs = new URLSearchParams();
-  if (params.period) qs.set('period', params.period);
-  if (params.reseller_id) qs.set('reseller_id', params.reseller_id);
-  const suffix = qs.toString() ? `?${qs}` : '';
-  return adminRequest(baseUrl, `/api/v1/admin/usage${suffix}`, token);
+  return adminRequest(baseUrl, `/api/v1/admin/usage${toQS(params)}`, token);
 }
 
 export async function getAuditLog(
   baseUrl: string, token: string,
   params: { page?: number; per_page?: number; reseller_id?: string; action?: string } = {},
 ): Promise<AuditLogResponse> {
-  const qs = new URLSearchParams();
-  if (params.page) qs.set('page', String(params.page));
-  if (params.per_page) qs.set('per_page', String(params.per_page));
-  if (params.reseller_id) qs.set('reseller_id', params.reseller_id);
-  if (params.action) qs.set('action', params.action);
-  const suffix = qs.toString() ? `?${qs}` : '';
-  return adminRequest(baseUrl, `/api/v1/admin/audit${suffix}`, token);
+  return adminRequest(baseUrl, `/api/v1/admin/audit${toQS(params)}`, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,13 +196,7 @@ export async function listResellerUsers(
   baseUrl: string, token: string,
   params: { page?: number; per_page?: number; status?: string; search?: string } = {},
 ) {
-  const qs = new URLSearchParams();
-  if (params.page) qs.set('page', String(params.page));
-  if (params.per_page) qs.set('per_page', String(params.per_page));
-  if (params.status) qs.set('status', params.status);
-  if (params.search) qs.set('search', params.search);
-  const suffix = qs.toString() ? `?${qs}` : '';
-  return adminRequest(baseUrl, `/api/v1/reseller/users${suffix}`, token);
+  return adminRequest(baseUrl, `/api/v1/reseller/users${toQS(params)}`, token);
 }
 
 export async function getResellerUser(

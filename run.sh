@@ -1972,9 +1972,14 @@ if [[ -f ".ag3ntum-version" ]]; then
     echo "  Codebase:  ${APP_VERSION}"
     echo ""
     echo "  Recommended: Run ./upgrade.sh for a safe upgrade with backup and migration."
-    echo "  Continuing with build in 5 seconds... (Ctrl+C to cancel)"
-    echo ""
-    sleep 5
+    if [[ -z "${CI:-}" ]]; then
+      echo "  Continuing with build in 5 seconds... (Ctrl+C to cancel)"
+      echo ""
+      sleep 5
+    else
+      echo "  (CI detected — skipping countdown)"
+      echo ""
+    fi
   fi
 fi
 
