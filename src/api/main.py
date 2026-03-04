@@ -28,7 +28,7 @@ from ..config import CONFIG_DIR, ConfigNotFoundError, ConfigValidationError
 from ..services.session_service import InvalidSessionIdError, SessionNotFoundError
 from ..core.logging_config import setup_backend_logging
 from ..core.subagent_manager import get_subagent_manager
-from ..db.database import engine, DATABASE_PATH
+from ..db.database import engine, init_db, DATABASE_PATH
 from .routes import admin_router, auth_router, config_router, files_router, health_router, llm_proxy_router, llm_proxy_session_router, queue_router, reseller_router, sessions_router, skills_router
 from .metrics import setup_metrics
 from .waf_filter import WAFMiddleware
@@ -198,9 +198,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup
     logger.info("Starting Ag3ntum API...")
-    # Database schema is managed by Alembic migrations in entrypoint-api.sh
-    # (runs before this process starts, as root, with write access to /data/)
-    logger.info("Database schema managed by entrypoint migrations")
+    # In production, Alembic migrations run in entrypoint-api.sh before this
+    # process starts. init_db() is kept as an idempotent fallback for cases
+    # where the entrypoint doesn't run (E2E tests, direct uvicorn invocation).
+    await init_db()
+    logger.info("Database initialized")
 
     # Verify database is writable (fail fast instead of silent 500 on every write)
     try:
