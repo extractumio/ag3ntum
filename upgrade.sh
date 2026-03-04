@@ -68,6 +68,30 @@ print_dim() {
     printf "${DIM}%s${NC}\n" "$1"
 }
 
+confirm_or_exit() {
+    # Usage: confirm_or_exit "Prompt text" "Cancel message"
+    local prompt="$1"
+    local cancel_msg="$2"
+    printf "${YELLOW}?${NC} %s [y/N]: " "${prompt}"
+    local answer
+    read -r answer < /dev/tty
+    if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
+        print_info "${cancel_msg}"
+        exit 0
+    fi
+}
+
+_get_hash_cmd() {
+    # Detect available hash command. Sets HASH_CMD global.
+    if command -v sha256sum > /dev/null 2>&1; then
+        HASH_CMD="sha256sum"
+    elif command -v shasum > /dev/null 2>&1; then
+        HASH_CMD="shasum -a 256"
+    else
+        HASH_CMD=""
+    fi
+}
+
 # =============================================================================
 # SHOW HELP
 # =============================================================================
@@ -249,13 +273,8 @@ PYEOF
         print_warning "${active_count} active agent session(s) detected."
         print_warning "Upgrading now will interrupt running tasks."
         if [[ "${FORCE}" -eq 0 ]]; then
-            printf "${YELLOW}?${NC} Continue anyway? [y/N]: "
-            local answer
-            read -r answer < /dev/tty
-            if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
-                print_info "Upgrade cancelled. Wait for sessions to finish or use --force."
-                exit 0
-            fi
+            confirm_or_exit "Continue anyway?" \
+                "Upgrade cancelled. Wait for sessions to finish or use --force."
         else
             print_warning "--force specified. Proceeding despite active sessions."
         fi
@@ -280,9 +299,7 @@ create_backup() {
 
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
-    local backup_version
-    backup_version=$(get_current_version)
-    local archive="${BACKUPS_DIR}/upgrade-${backup_version}-${timestamp}.tar.gz"
+    local archive="${BACKUPS_DIR}/upgrade-${CURRENT_VERSION}-${timestamp}.tar.gz"
 
     # Build list of items to back up (skip missing items gracefully)
     local items=()
@@ -370,13 +387,7 @@ check_version_compatibility() {
         print_warning "Major version jump: ${cur_major} → ${tgt_major}"
         print_warning "Breaking changes are expected. Review the changelog before proceeding."
         if [[ "${FORCE}" -eq 0 ]]; then
-            printf "${YELLOW}?${NC} Continue with major upgrade? [y/N]: "
-            local answer
-            read -r answer < /dev/tty
-            if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
-                print_info "Upgrade cancelled."
-                exit 0
-            fi
+            confirm_or_exit "Continue with major upgrade?" "Upgrade cancelled."
         fi
     fi
 
@@ -406,12 +417,8 @@ stop_services() {
 # =============================================================================
 
 capture_dependency_hashes() {
-    local hash_cmd
-    if command -v sha256sum > /dev/null 2>&1; then
-        hash_cmd="sha256sum"
-    elif command -v shasum > /dev/null 2>&1; then
-        hash_cmd="shasum -a 256"
-    else
+    _get_hash_cmd
+    if [[ -z "${HASH_CMD}" ]]; then
         # No hash tool — treat everything as changed
         HASH_REQUIREMENTS="none"
         HASH_PACKAGE_JSON="none"
@@ -424,13 +431,13 @@ capture_dependency_hashes() {
     HASH_DOCKERFILE=""
 
     [[ -f "${ROOT_DIR}/requirements.txt" ]] && \
-        HASH_REQUIREMENTS=$(${hash_cmd} "${ROOT_DIR}/requirements.txt" | awk '{print $1}')
+        HASH_REQUIREMENTS=$(${HASH_CMD} "${ROOT_DIR}/requirements.txt" | awk '{print $1}')
 
     [[ -f "${ROOT_DIR}/src/web_terminal_client/package.json" ]] && \
-        HASH_PACKAGE_JSON=$(${hash_cmd} "${ROOT_DIR}/src/web_terminal_client/package.json" | awk '{print $1}')
+        HASH_PACKAGE_JSON=$(${HASH_CMD} "${ROOT_DIR}/src/web_terminal_client/package.json" | awk '{print $1}')
 
     [[ -f "${ROOT_DIR}/Dockerfile" ]] && \
-        HASH_DOCKERFILE=$(${hash_cmd} "${ROOT_DIR}/Dockerfile" | awk '{print $1}')
+        HASH_DOCKERFILE=$(${HASH_CMD} "${ROOT_DIR}/Dockerfile" | awk '{print $1}')
 }
 
 # =============================================================================
@@ -465,12 +472,8 @@ detect_dependency_changes() {
         return 0
     fi
 
-    local hash_cmd
-    if command -v sha256sum > /dev/null 2>&1; then
-        hash_cmd="sha256sum"
-    elif command -v shasum > /dev/null 2>&1; then
-        hash_cmd="shasum -a 256"
-    else
+    _get_hash_cmd
+    if [[ -z "${HASH_CMD}" ]]; then
         NEEDS_NO_CACHE=1
         print_warning "No hash tool found — will use --no-cache build."
         return 0
@@ -480,7 +483,7 @@ detect_dependency_changes() {
 
     if [[ -f "${ROOT_DIR}/requirements.txt" ]]; then
         local new_hash
-        new_hash=$(${hash_cmd} "${ROOT_DIR}/requirements.txt" | awk '{print $1}')
+        new_hash=$(${HASH_CMD} "${ROOT_DIR}/requirements.txt" | awk '{print $1}')
         if [[ "${new_hash}" != "${HASH_REQUIREMENTS}" ]]; then
             changed+=("requirements.txt")
         fi
@@ -488,7 +491,7 @@ detect_dependency_changes() {
 
     if [[ -f "${ROOT_DIR}/src/web_terminal_client/package.json" ]]; then
         local new_hash
-        new_hash=$(${hash_cmd} "${ROOT_DIR}/src/web_terminal_client/package.json" | awk '{print $1}')
+        new_hash=$(${HASH_CMD} "${ROOT_DIR}/src/web_terminal_client/package.json" | awk '{print $1}')
         if [[ "${new_hash}" != "${HASH_PACKAGE_JSON}" ]]; then
             changed+=("package.json")
         fi
@@ -496,7 +499,7 @@ detect_dependency_changes() {
 
     if [[ -f "${ROOT_DIR}/Dockerfile" ]]; then
         local new_hash
-        new_hash=$(${hash_cmd} "${ROOT_DIR}/Dockerfile" | awk '{print $1}')
+        new_hash=$(${HASH_CMD} "${ROOT_DIR}/Dockerfile" | awk '{print $1}')
         if [[ "${new_hash}" != "${HASH_DOCKERFILE}" ]]; then
             changed+=("Dockerfile")
         fi
@@ -542,19 +545,8 @@ run_config_migration() {
 
     print_step "Running config migration"
 
-    # Back up each config file before migration
-    if [[ -d "${ROOT_DIR}/config" ]]; then
-        for cfg_file in "${ROOT_DIR}/config"/*.yaml; do
-            [[ -f "${cfg_file}" ]] || continue
-            local base
-            base="$(basename "${cfg_file}" .yaml)"
-            local bak="${ROOT_DIR}/config/${base}.pre-${CURRENT_VERSION}.bak"
-            if [[ ! -f "${bak}" ]]; then
-                cp "${cfg_file}" "${bak}"
-                print_dim "  Backed up: config/${base}.yaml → config/${base}.pre-${CURRENT_VERSION}.bak"
-            fi
-        done
-    fi
+    # Per-file backups handled by Python's migrate_file() before writing.
+    # Full config/ is already archived in create_backup() for rollback safety.
 
     local dry_run_flag=""
     [[ "${DRY_RUN}" -eq 1 ]] && dry_run_flag="--dry-run"
@@ -664,13 +656,9 @@ do_rollback() {
     print_info "Restoring from: $(basename "${latest_backup}")"
 
     if [[ "${FORCE}" -eq 0 ]]; then
-        printf "${YELLOW}?${NC} This will overwrite data/ and config/ with the backup. Continue? [y/N]: "
-        local answer
-        read -r answer < /dev/tty
-        if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
-            print_info "Rollback cancelled."
-            exit 0
-        fi
+        confirm_or_exit \
+            "This will overwrite data/ and config/ with the backup. Continue?" \
+            "Rollback cancelled."
     fi
 
     # Stop running services
@@ -746,7 +734,7 @@ run_health_check() {
 
     # Versions
     local installed_version
-    installed_version=$(get_current_version)
+    installed_version="${CURRENT_VERSION:-$(get_current_version)}"
     local codebase_version="(unknown)"
     [[ -f "${ROOT_DIR}/VERSION" ]] && codebase_version=$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")
 
@@ -882,6 +870,7 @@ main() {
 
     # --- Check-only mode ---
     if [[ "${MODE}" == "check" ]]; then
+        CURRENT_VERSION=$(get_current_version)
         run_health_check
         exit 0
     fi
@@ -898,9 +887,10 @@ main() {
     # Capture dependency hashes BEFORE pull so we can compare after
     capture_dependency_hashes
 
+    CURRENT_VERSION=$(get_current_version)
+
     check_prerequisites
 
-    CURRENT_VERSION=$(get_current_version)
     print_info "Current version: ${CURRENT_VERSION}"
 
     if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -922,13 +912,8 @@ main() {
 
     # Interactive confirmation
     if [[ "${FORCE}" -eq 0 ]]; then
-        printf "${CYAN}?${NC} This will pull the latest code and rebuild. Continue? [y/N]: "
-        local answer
-        read -r answer < /dev/tty
-        if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
-            print_info "Upgrade cancelled."
-            exit 0
-        fi
+        confirm_or_exit "This will pull the latest code and rebuild. Continue?" \
+            "Upgrade cancelled."
     fi
 
     check_active_sessions

@@ -9,6 +9,7 @@ Usage:
     python3 scripts/migrate_config.py --from 0.2.0 --to 0.3.0 --dry-run
 """
 import argparse
+import copy
 import shutil
 import sys
 from pathlib import Path
@@ -30,12 +31,15 @@ CONFIG_FILES = [
     "secrets.yaml",
 ]
 
-# Keys in secrets.yaml that must never be logged or displayed
+# Keys in secrets.yaml that must never be logged or displayed by migrations
 SENSITIVE_KEYS = frozenset({
     "anthropic_api_key",
     "fernet_key",
     "jwt_secret",
 })
+
+# Default version for configs that predate the _version tracking system
+DEFAULT_VERSION = "0.2.0"
 
 
 def get_config_version(config_dir: Path) -> str:
@@ -64,7 +68,7 @@ def get_config_version(config_dir: Path) -> str:
     if version_file.exists():
         return version_file.read_text().strip()
 
-    return "0.2.0"
+    return DEFAULT_VERSION
 
 
 def backup_config(fpath: Path, version: str) -> Path | None:
@@ -106,7 +110,7 @@ def migrate_file(
     # Apply each migration in chain
     modified = False
     for from_ver, to_ver, migrate_fn in migrations:
-        original = dict(config)  # shallow copy for comparison
+        original = copy.deepcopy(config)  # deep copy for nested change detection
         config = migrate_fn(config, fpath.name)
         if config != original:
             modified = True

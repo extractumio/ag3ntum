@@ -72,17 +72,9 @@ def _reload_migrations():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_table_exists(has_alembic: bool, has_users: bool):
-    """
-    Return a replacement for _table_exists that answers based on table name.
-    """
-    def _table_exists(connection, table_name: str) -> bool:
-        if table_name == "alembic_version":
-            return has_alembic
-        if table_name == "users":
-            return has_users
-        return False
-    return _table_exists
+def _make_check_tables(has_alembic: bool, has_users: bool):
+    """Return the fixed (has_alembic, has_users) tuple for patching."""
+    return (has_alembic, has_users)
 
 
 def _make_mock_engine():
@@ -115,8 +107,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(tmp_path)), \
              patch.object(mig, "_DB_PATH", str(tmp_path / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=fake_cfg), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=False, has_users=False)), \
              patch.object(mig, "_create_all_sync") as mock_create_all, \
              patch("alembic.command.stamp") as mock_stamp, \
@@ -143,8 +135,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(tmp_path)), \
              patch.object(mig, "_DB_PATH", str(tmp_path / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=fake_cfg), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=False, has_users=True)), \
              patch.object(mig, "_create_all_sync") as mock_create_all, \
              patch("alembic.command.stamp") as mock_stamp, \
@@ -171,8 +163,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(tmp_path)), \
              patch.object(mig, "_DB_PATH", str(tmp_path / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=fake_cfg), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=True, has_users=True)), \
              patch.object(mig, "_create_all_sync") as mock_create_all, \
              patch("alembic.command.stamp") as mock_stamp, \
@@ -201,8 +193,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(data_dir)), \
              patch.object(mig, "_DB_PATH", str(data_dir / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=MagicMock()), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=True, has_users=True)), \
              patch.object(mig, "_create_all_sync"), \
              patch("alembic.command.stamp"), \
@@ -226,8 +218,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(tmp_path)), \
              patch.object(mig, "_DB_PATH", str(tmp_path / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=MagicMock()), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=True, has_users=True)), \
              patch.object(mig, "_create_all_sync"), \
              patch("alembic.command.stamp"), \
@@ -260,8 +252,8 @@ class TestRunMigrationsSync:
         with patch.object(mig, "_DATA_DIR", str(tmp_path)), \
              patch.object(mig, "_DB_PATH", str(tmp_path / "ag3ntum.db")), \
              patch.object(mig, "_get_alembic_config", return_value=fake_cfg), \
-             patch.object(mig, "_table_exists",
-                          side_effect=_make_table_exists(
+             patch.object(mig, "_check_tables",
+                          return_value=_make_check_tables(
                               has_alembic=False, has_users=True)), \
              patch.object(mig, "_create_all_sync"), \
              patch("alembic.command.stamp", side_effect=record_stamp), \
@@ -277,29 +269,47 @@ class TestRunMigrationsSync:
 # TestTableExists (pure-logic unit tests — no SQLite required)
 # ---------------------------------------------------------------------------
 
-class TestTableExists:
-    """Unit tests for _table_exists() using a mock connection."""
+class TestCheckTables:
+    """Unit tests for _check_tables() using a mock connection."""
 
     @pytest.mark.unit
-    def test_returns_true_when_table_found(self):
-        """_table_exists returns True when sqlite_master count is 1."""
-        from src.db.migrations import _table_exists
+    def test_returns_both_true_when_found(self):
+        """_check_tables returns (True, True) when both tables exist."""
+        from src.db.migrations import _check_tables
 
         mock_conn = MagicMock()
         mock_result = MagicMock()
-        mock_result.scalar.return_value = 1
+        mock_result.__iter__ = lambda s: iter([("alembic_version",), ("users",)])
         mock_conn.execute.return_value = mock_result
 
-        assert _table_exists(mock_conn, "users") is True
+        has_alembic, has_users = _check_tables(mock_conn)
+        assert has_alembic is True
+        assert has_users is True
 
     @pytest.mark.unit
-    def test_returns_false_when_table_not_found(self):
-        """_table_exists returns False when sqlite_master count is 0."""
-        from src.db.migrations import _table_exists
+    def test_returns_both_false_when_empty(self):
+        """_check_tables returns (False, False) when no tables exist."""
+        from src.db.migrations import _check_tables
 
         mock_conn = MagicMock()
         mock_result = MagicMock()
-        mock_result.scalar.return_value = 0
+        mock_result.__iter__ = lambda s: iter([])
         mock_conn.execute.return_value = mock_result
 
-        assert _table_exists(mock_conn, "no_such_table") is False
+        has_alembic, has_users = _check_tables(mock_conn)
+        assert has_alembic is False
+        assert has_users is False
+
+    @pytest.mark.unit
+    def test_returns_partial_match(self):
+        """_check_tables returns correct partial results."""
+        from src.db.migrations import _check_tables
+
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.__iter__ = lambda s: iter([("users",)])
+        mock_conn.execute.return_value = mock_result
+
+        has_alembic, has_users = _check_tables(mock_conn)
+        assert has_alembic is False
+        assert has_users is True

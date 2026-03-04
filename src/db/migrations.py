@@ -37,16 +37,19 @@ def _get_alembic_config() -> Config:
     return cfg
 
 
-def _table_exists(connection, table_name: str) -> bool:
-    """Check if a table exists in the SQLite database."""
+def _check_tables(connection) -> tuple[bool, bool]:
+    """Check which tables exist in a single query.
+
+    Returns (has_alembic_version, has_users).
+    """
     result = connection.execute(
         text(
-            "SELECT COUNT(*) FROM sqlite_master "
-            "WHERE type='table' AND name=:name"
-        ),
-        {"name": table_name},
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name IN ('alembic_version', 'users')"
+        )
     )
-    return result.scalar() > 0
+    found = {row[0] for row in result}
+    return "alembic_version" in found, "users" in found
 
 
 def run_migrations_sync() -> None:
@@ -63,36 +66,42 @@ def run_migrations_sync() -> None:
     engine = create_engine(f"sqlite:///{_DB_PATH}")
     cfg = _get_alembic_config()
 
-    with engine.connect() as conn:
-        has_alembic = _table_exists(conn, "alembic_version")
-        has_users = _table_exists(conn, "users")
+    try:
+        with engine.connect() as conn:
+            has_alembic, has_users = _check_tables(conn)
 
-    if not has_users:
-        # --- Case 1: Fresh database — no tables at all ---
-        logger.info("Fresh database detected — creating schema via create_all()")
-        _create_all_sync(engine)
-        command.stamp(cfg, "head")
-        logger.info("Database stamped at head revision")
+        if not has_users:
+            # --- Case 1: Fresh database — no tables at all ---
+            logger.info(
+                "Fresh database detected — creating schema via create_all()"
+            )
+            _create_all_sync(engine)
+            command.stamp(cfg, "head")
+            logger.info("Database stamped at head revision")
 
-    elif not has_alembic:
-        # --- Case 2: Existing DB created by create_all(), no Alembic tracking ---
-        # Stamp at "001" (the first migration that matches the existing schema)
-        # then upgrade to head to apply any subsequent migrations.
-        logger.info(
-            "Existing database without Alembic tracking — "
-            "stamping at 001 and upgrading to head"
-        )
-        command.stamp(cfg, "001")
-        command.upgrade(cfg, "head")
-        logger.info("Database migrated to head revision")
+        elif not has_alembic:
+            # --- Case 2: Existing DB created by create_all(), no Alembic ---
+            # Stamp at "001" (first migration matching existing schema)
+            # then upgrade to head to apply subsequent migrations.
+            logger.info(
+                "Existing database without Alembic tracking — "
+                "stamping at 001 and upgrading to head"
+            )
+            command.stamp(cfg, "001")
+            command.upgrade(cfg, "head")
+            logger.info("Database migrated to head revision")
 
-    else:
-        # --- Case 3: Alembic-managed DB — run pending migrations ---
-        logger.info("Running pending database migrations...")
-        command.upgrade(cfg, "head")
-        logger.info("Database migrations complete")
+        else:
+            # --- Case 3: Alembic-managed DB — run pending migrations ---
+            logger.info("Running pending database migrations...")
+            command.upgrade(cfg, "head")
+            logger.info("Database migrations complete")
 
-    engine.dispose()
+    except Exception:
+        logger.exception("Database migration failed")
+        raise
+    finally:
+        engine.dispose()
 
 
 def _create_all_sync(engine) -> None:

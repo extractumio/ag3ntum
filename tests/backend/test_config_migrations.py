@@ -324,6 +324,12 @@ class TestGetConfigVersion:
 class TestMigrateFile:
     """Tests for migrate_file() in scripts/migrate_config.py."""
 
+    @staticmethod
+    def _add_version(config, filename):
+        """Test migration: add _version key."""
+        config["_version"] = "0.3.0"
+        return config
+
     @pytest.mark.unit
     def test_applies_migration_and_modifies_file(self, tmp_path):
         """migrate_file() should apply the migration and write the result."""
@@ -332,11 +338,7 @@ class TestMigrateFile:
         fpath = tmp_path / "api.yaml"
         fpath.write_text(yaml.dump({"host": "localhost"}))
 
-        def _add_version(config, filename):
-            config["_version"] = "0.3.0"
-            return config
-
-        migrations = [("0.2.0", "0.3.0", _add_version)]
+        migrations = [("0.2.0", "0.3.0", self._add_version)]
         changed = migrate_file(fpath, migrations, dry_run=False,
                                from_version="0.2.0")
 
@@ -354,11 +356,7 @@ class TestMigrateFile:
         fpath = tmp_path / "api.yaml"
         fpath.write_text(original_content)
 
-        def _add_version(config, filename):
-            config["_version"] = "0.3.0"
-            return config
-
-        migrations = [("0.2.0", "0.3.0", _add_version)]
+        migrations = [("0.2.0", "0.3.0", self._add_version)]
         changed = migrate_file(fpath, migrations, dry_run=True,
                                from_version="0.2.0")
 
@@ -401,11 +399,7 @@ class TestMigrateFile:
         fpath = tmp_path / "api.yaml"
         fpath.write_text(yaml.dump({"host": "localhost"}))
 
-        def _add_version(config, filename):
-            config["_version"] = "0.3.0"
-            return config
-
-        migrate_file(fpath, [("0.2.0", "0.3.0", _add_version)],
+        migrate_file(fpath, [("0.2.0", "0.3.0", self._add_version)],
                      dry_run=False, from_version="0.2.0")
 
         backup = tmp_path / "api.pre-0.2.0.bak"
@@ -419,11 +413,7 @@ class TestMigrateFile:
         fpath = tmp_path / "api.yaml"
         fpath.write_text(yaml.dump({"host": "localhost"}))
 
-        def _add_version(config, filename):
-            config["_version"] = "0.3.0"
-            return config
-
-        migrate_file(fpath, [("0.2.0", "0.3.0", _add_version)],
+        migrate_file(fpath, [("0.2.0", "0.3.0", self._add_version)],
                      dry_run=True, from_version="0.2.0")
 
         backup = tmp_path / "api.pre-0.2.0.bak"

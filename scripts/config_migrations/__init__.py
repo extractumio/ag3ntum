@@ -47,6 +47,13 @@ def discover_migrations(
         if m:
             fv = _version_to_str(m.group(1))
             tv = _version_to_str(m.group(2))
+            if fv in available:
+                existing_tv, existing_mod = available[fv]
+                raise ValueError(
+                    f"Duplicate migration from {fv}: "
+                    f"{existing_mod} -> {existing_tv} and "
+                    f"{f.stem} -> {tv}"
+                )
             available[fv] = (tv, f.stem)
 
     # Chain from from_version to to_version

@@ -5,13 +5,6 @@ Changes:
 - Adds _version key to all config files (config versioning support)
 """
 
-# Sensitive keys that must NEVER be modified by migrations
-SENSITIVE_KEYS = frozenset({
-    "anthropic_api_key",
-    "fernet_key",
-    "jwt_secret",
-})
-
 
 def migrate(config: dict, filename: str) -> dict:
     """
