@@ -2,14 +2,13 @@
 import json
 import logging
 import math
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.database import get_db
@@ -36,10 +35,7 @@ from ..reseller_models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-# Path to VERSION file relative to project root
-_VERSION_FILE = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "..", "VERSION"
-)
+from src.api.routes._helpers import _read_version
 
 
 # =============================================================================
@@ -61,14 +57,6 @@ async def _require_admin(
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _read_version() -> str:
-    """Read the platform version from the VERSION file."""
-    try:
-        with open(_VERSION_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return "unknown"
 
 
 def _build_reseller_response(reseller: Reseller) -> ResellerResponse:
@@ -634,14 +622,11 @@ async def admin_delete_user(
 
     username = user.username
 
-    # Delete sessions first
-    sessions_result = await db.execute(
-        select(Session).where(Session.user_id == user_id)
+    # Delete sessions first (bulk)
+    del_result = await db.execute(
+        delete(Session).where(Session.user_id == user_id)
     )
-    sessions_deleted = 0
-    for session in sessions_result.scalars().all():
-        await db.delete(session)
-        sessions_deleted += 1
+    sessions_deleted = del_result.rowcount
 
     await db.delete(user)
     await db.commit()
@@ -895,7 +880,11 @@ async def platform_usage(
         if user_ids:
             query = query.where(Session.user_id.in_(user_ids))
         else:
-            query = query.where(Session.user_id == "no-match")
+            # Reseller has no users — return empty immediately
+            return UsageResponse(
+                period=UsagePeriod(start=period_start, end=now),
+                totals=UsageTotals(),
+            )
 
     result = await db.execute(query)
     sessions = list(result.scalars().all())

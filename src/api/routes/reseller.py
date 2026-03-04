@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import math
-import os
 import uuid
 from calendar import monthrange
 from datetime import datetime, timezone
@@ -50,19 +49,37 @@ from ..reseller_models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reseller", tags=["reseller"])
 
-# Path to VERSION file relative to project root
-_VERSION_FILE = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "..", "VERSION"
-)
+from src.api.routes._helpers import _read_version
 
 
-def _read_version() -> str:
-    """Read the platform version from the VERSION file."""
+def _parse_json_field(value: Optional[str], default=None):
+    """Parse a JSON string field, returning default on failure."""
+    if default is None:
+        default = {}
+    if not value:
+        return default
     try:
-        with open(_VERSION_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return "unknown"
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _spending_response_from_guard(spending_data: dict) -> SpendingStatusResponse:
+    """Build SpendingStatusResponse from spending_guard.get_spending_status()."""
+    sp_limits = spending_data.get("limits", {})
+    sp_current = spending_data.get("current", {})
+    return SpendingStatusResponse(
+        limits=SpendingLimits(
+            monthly_usd=sp_limits.get("monthly_usd"),
+            daily_usd=sp_limits.get("daily_usd"),
+            per_session_usd=sp_limits.get("per_session_usd"),
+        ),
+        current=SpendingCurrent(
+            monthly_usd=sp_current.get("monthly_usd", 0.0),
+            daily_usd=sp_current.get("daily_usd", 0.0),
+        ),
+        status=spending_data.get("status", "ok"),
+    )
 
 
 def _safe_metadata(metadata_json: Optional[str]) -> Optional[dict]:
@@ -1148,10 +1165,7 @@ async def get_user_config(
         reseller.features_json, user.features_json
     )
 
-    try:
-        security = json.loads(user.security_overrides_json) if user.security_overrides_json else {}
-    except (json.JSONDecodeError, TypeError):
-        security = {}
+    security = _parse_json_field(user.security_overrides_json)
 
     try:
         allowed_overrides = json.loads(user.allowed_overrides) if user.allowed_overrides else []
@@ -1159,22 +1173,7 @@ async def get_user_config(
         allowed_overrides = []
 
     spending_data = await spending_guard.get_spending_status(db, user.id)
-
-    sp_limits = spending_data.get("limits", {})
-    sp_current = spending_data.get("current", {})
-
-    spending_resp = SpendingStatusResponse(
-        limits=SpendingLimits(
-            monthly_usd=sp_limits.get("monthly_usd"),
-            daily_usd=sp_limits.get("daily_usd"),
-            per_session_usd=sp_limits.get("per_session_usd"),
-        ),
-        current=SpendingCurrent(
-            monthly_usd=sp_current.get("monthly_usd", 0.0),
-            daily_usd=sp_current.get("daily_usd", 0.0),
-        ),
-        status=spending_data.get("status", "ok"),
-    )
+    spending_resp = _spending_response_from_guard(spending_data)
 
     # Skills summary
     skills_result = await db.execute(
@@ -1247,10 +1246,7 @@ async def get_user_security(
 
     user = await _get_owned_user(db, auth, user_id)
 
-    try:
-        security = json.loads(user.security_overrides_json) if user.security_overrides_json else {}
-    except (json.JSONDecodeError, TypeError):
-        security = {}
+    security = _parse_json_field(user.security_overrides_json)
 
     return {"user_id": user.id, "security": security}
 
@@ -1271,10 +1267,7 @@ async def update_user_security(
 
     user = await _get_owned_user(db, auth, user_id)
 
-    try:
-        security = json.loads(user.security_overrides_json) if user.security_overrides_json else {}
-    except (json.JSONDecodeError, TypeError):
-        security = {}
+    security = _parse_json_field(user.security_overrides_json)
 
     patch = body.model_dump(exclude_none=True)
     security.update(patch)
@@ -1300,10 +1293,7 @@ async def get_user_ssh_filters(
 
     user = await _get_owned_user(db, auth, user_id)
 
-    try:
-        security = json.loads(user.security_overrides_json) if user.security_overrides_json else {}
-    except (json.JSONDecodeError, TypeError):
-        security = {}
+    security = _parse_json_field(user.security_overrides_json)
 
     ssh_filters = security.get("ssh_filters", {})
     return {"user_id": user.id, "ssh_filters": ssh_filters}
@@ -1325,10 +1315,7 @@ async def update_user_ssh_filters(
 
     user = await _get_owned_user(db, auth, user_id)
 
-    try:
-        security = json.loads(user.security_overrides_json) if user.security_overrides_json else {}
-    except (json.JSONDecodeError, TypeError):
-        security = {}
+    security = _parse_json_field(user.security_overrides_json)
 
     patch = body.model_dump(exclude_none=True)
     ssh_filters = security.get("ssh_filters", {})
@@ -1463,21 +1450,7 @@ async def get_user_spending(
     user = await _get_owned_user(db, auth, user_id)
 
     spending_data = await spending_guard.get_spending_status(db, user.id)
-    sp_limits = spending_data.get("limits", {})
-    sp_current = spending_data.get("current", {})
-
-    return SpendingStatusResponse(
-        limits=SpendingLimits(
-            monthly_usd=sp_limits.get("monthly_usd"),
-            daily_usd=sp_limits.get("daily_usd"),
-            per_session_usd=sp_limits.get("per_session_usd"),
-        ),
-        current=SpendingCurrent(
-            monthly_usd=sp_current.get("monthly_usd", 0.0),
-            daily_usd=sp_current.get("daily_usd", 0.0),
-        ),
-        status=spending_data.get("status", "ok"),
-    )
+    return _spending_response_from_guard(spending_data)
 
 
 @router.put("/users/{user_id}/spending-limits", response_model=SpendingStatusResponse)
@@ -1538,21 +1511,7 @@ async def set_user_spending_limits(
     await db.commit()
 
     spending_data = await spending_guard.get_spending_status(db, user.id)
-    sp_limits = spending_data.get("limits", {})
-    sp_current = spending_data.get("current", {})
-
-    return SpendingStatusResponse(
-        limits=SpendingLimits(
-            monthly_usd=sp_limits.get("monthly_usd"),
-            daily_usd=sp_limits.get("daily_usd"),
-            per_session_usd=sp_limits.get("per_session_usd"),
-        ),
-        current=SpendingCurrent(
-            monthly_usd=sp_current.get("monthly_usd", 0.0),
-            daily_usd=sp_current.get("daily_usd", 0.0),
-        ),
-        status=spending_data.get("status", "ok"),
-    )
+    return _spending_response_from_guard(spending_data)
 
 
 @router.put("/users/{user_id}/settings-mode")

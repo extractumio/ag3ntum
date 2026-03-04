@@ -558,7 +558,8 @@ class ResellerService:
             total_cost_usd = cost_result.scalar_one() or 0.0
 
         quota = reseller.quota
-        quota.reset_if_needed() if quota else None
+        if quota:
+            quota.reset_if_needed()
 
         return {
             "reseller_id": reseller_id,

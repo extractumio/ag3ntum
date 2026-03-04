@@ -55,14 +55,24 @@ class ResellerQuotaService:
 
         return (True, "")
 
-    async def increment_task_count(self, db: AsyncSession, reseller_id: str) -> None:
-        """Increment daily task count for reseller."""
+    async def _get_quota(self, db: AsyncSession,
+                         reseller_id: str) -> Optional[ResellerQuota]:
+        """Fetch and reset the reseller quota if needed."""
         result = await db.execute(
-            select(ResellerQuota).where(ResellerQuota.reseller_id == reseller_id)
+            select(ResellerQuota).where(
+                ResellerQuota.reseller_id == reseller_id
+            )
         )
         quota = result.scalar_one_or_none()
         if quota:
             quota.reset_if_needed()
+        return quota
+
+    async def increment_task_count(self, db: AsyncSession,
+                                   reseller_id: str) -> None:
+        """Increment daily task count for reseller."""
+        quota = await self._get_quota(db, reseller_id)
+        if quota:
             quota.tasks_today += 1
             await db.commit()
 
@@ -70,12 +80,8 @@ class ResellerQuotaService:
                           cost_usd: float, input_tokens: int = 0,
                           output_tokens: int = 0) -> None:
         """Record cost against reseller quota."""
-        result = await db.execute(
-            select(ResellerQuota).where(ResellerQuota.reseller_id == reseller_id)
-        )
-        quota = result.scalar_one_or_none()
+        quota = await self._get_quota(db, reseller_id)
         if quota:
-            quota.reset_if_needed()
             quota.daily_cost_usd += cost_usd
             quota.monthly_cost_usd += cost_usd
             quota.monthly_input_tokens += input_tokens
