@@ -1,5 +1,7 @@
 """Reseller API endpoints for user management, API keys, usage, and configuration."""
+import csv
 import hashlib
+import io
 import json
 import logging
 import math
@@ -11,6 +13,7 @@ from typing import Optional
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,11 +26,12 @@ from ...services.api_key_service import api_key_service
 from ...services.feature_flag_service import feature_flag_service
 from ...services.spending_guard import spending_guard
 from ...services.usage_service import usage_service
+from ...services.webhook_service import webhook_service
 from ..deps import AuthContext, require_reseller
 from ..reseller_models import (
     APIKeyCreatedResponse, APIKeyListResponse, APIKeyResponse,
     AssignSkillRequest, ChangePasswordRequest, ConnectionTestResponse,
-    CreateAPIKeyRequest, CreateResellerUserRequest,
+    CreateAPIKeyRequest, CreateResellerUserRequest, CreateWebhookRequest,
     DeleteUserResponse, PaginationInfo, PasswordChangedResponse,
     ResellerProfileResponse, ResellerUserListResponse, ResellerUserResponse,
     ResellerUserQuota,
@@ -35,9 +39,12 @@ from ..reseller_models import (
     SkillResponse, SpendingCurrent, SpendingLimits, SpendingStatusResponse,
     SuspendRequest, SuspendUserResponse, UpdateResellerUserRequest,
     UpdateSecurityConfigRequest, UpdateSSHFiltersRequest,
-    UpdateUserConfigRequest, UploadSkillRequest,
+    UpdateUserConfigRequest, UpdateWebhookRequest, UploadSkillRequest,
     UsagePeriod, UsageResponse, UsageTotals, UserConfigResponse,
     UserSkillsResponse, UserUsageBreakdown, UserUsageResponse,
+    WebhookCreatedResponse, WebhookDeliveryListResponse,
+    WebhookDeliveryResponse, WebhookEndpointResponse,
+    WebhookListResponse, WhmcsMetricsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -1039,6 +1046,84 @@ async def get_user_usage(
     )
 
 
+@router.get("/usage/metrics", response_model=WhmcsMetricsResponse)
+async def get_usage_metrics(
+    period: str = Query(
+        default="current_month", pattern="^(current_month|last_month)$"
+    ),
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> WhmcsMetricsResponse:
+    """Get usage in WHMCS MetricProvider format for billing integration.
+
+    Returns per-user session count, token count, and cost in a format
+    compatible with WHMCS MetricProvider modules.
+    """
+    if not auth.has_scope("usage:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: usage:read",
+        )
+
+    start, end = _period_bounds(period)
+    data = await usage_service.get_reseller_metrics(
+        db, auth.reseller_id, start, end
+    )
+    return WhmcsMetricsResponse(**data)
+
+
+@router.get("/usage/export")
+async def export_usage(
+    period: str = Query(
+        default="current_month", pattern="^(current_month|last_month)$"
+    ),
+    fmt: str = Query(default="json", alias="format", pattern="^(json|csv)$"),
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export usage data as JSON or CSV download.
+
+    Returns a file download with Content-Disposition header.
+    """
+    if not auth.has_scope("usage:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: usage:read",
+        )
+
+    start, end = _period_bounds(period)
+    records = await usage_service.export_usage_data(
+        db, auth.reseller_id, start, end
+    )
+
+    if fmt == "csv":
+        output = io.StringIO()
+        if records:
+            writer = csv.DictWriter(output, fieldnames=records[0].keys())
+            writer.writeheader()
+            writer.writerows(records)
+        csv_content = output.getvalue()
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=usage_{period}.csv"
+                ),
+            },
+        )
+
+    # Default: JSON
+    return JSONResponse(
+        content={"period": period, "records": records, "count": len(records)},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=usage_{period}.json"
+            ),
+        },
+    )
+
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -1824,3 +1909,171 @@ async def remove_skill_from_library(
     await db.commit()
 
     return {"status": "removed", "skill_name": skill_name}
+
+
+# =============================================================================
+# Webhooks
+# =============================================================================
+
+@router.post("/webhooks", status_code=201, response_model=WebhookCreatedResponse)
+async def create_webhook(
+    body: CreateWebhookRequest,
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> WebhookCreatedResponse:
+    """Register a new webhook endpoint."""
+    if not auth.has_scope("config:update"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:update",
+        )
+
+    endpoint, secret = await webhook_service.create_endpoint(
+        db, auth.reseller_id, body.url,
+        body.events, body.description,
+    )
+    events = json.loads(endpoint.events)
+    return WebhookCreatedResponse(
+        id=endpoint.id, url=endpoint.url, events=events,
+        is_active=endpoint.is_active, description=endpoint.description,
+        created_at=endpoint.created_at, updated_at=endpoint.updated_at,
+        secret=secret,
+    )
+
+
+@router.get("/webhooks", response_model=WebhookListResponse)
+async def list_webhooks(
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> WebhookListResponse:
+    """List all webhook endpoints."""
+    if not auth.has_scope("config:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:read",
+        )
+
+    endpoints = await webhook_service.list_endpoints(db, auth.reseller_id)
+    items = []
+    for ep in endpoints:
+        try:
+            events = json.loads(ep.events)
+        except (json.JSONDecodeError, TypeError):
+            events = []
+        items.append(WebhookEndpointResponse(
+            id=ep.id, url=ep.url, events=events,
+            is_active=ep.is_active, description=ep.description,
+            created_at=ep.created_at, updated_at=ep.updated_at,
+        ))
+    return WebhookListResponse(webhooks=items)
+
+
+@router.put("/webhooks/{webhook_id}", response_model=WebhookEndpointResponse)
+async def update_webhook(
+    webhook_id: str,
+    body: UpdateWebhookRequest,
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> WebhookEndpointResponse:
+    """Update a webhook endpoint."""
+    if not auth.has_scope("config:update"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:update",
+        )
+
+    update_data = body.model_dump(exclude_none=True)
+    endpoint = await webhook_service.update_endpoint(
+        db, webhook_id, auth.reseller_id, **update_data,
+    )
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    events = json.loads(endpoint.events)
+    return WebhookEndpointResponse(
+        id=endpoint.id, url=endpoint.url, events=events,
+        is_active=endpoint.is_active, description=endpoint.description,
+        created_at=endpoint.created_at, updated_at=endpoint.updated_at,
+    )
+
+
+@router.delete("/webhooks/{webhook_id}")
+async def delete_webhook(
+    webhook_id: str,
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a webhook endpoint and all its delivery logs."""
+    if not auth.has_scope("config:update"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:update",
+        )
+
+    success = await webhook_service.delete_endpoint(
+        db, webhook_id, auth.reseller_id,
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"status": "deleted", "webhook_id": webhook_id}
+
+
+@router.post("/webhooks/{webhook_id}/test")
+async def test_webhook(
+    webhook_id: str,
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Send a test event to a webhook endpoint."""
+    if not auth.has_scope("config:update"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:update",
+        )
+
+    endpoint = await webhook_service.get_endpoint(
+        db, webhook_id, auth.reseller_id,
+    )
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    delivery = await webhook_service.deliver(
+        db, endpoint, "test.ping", {"message": "Test webhook delivery"},
+    )
+    return {
+        "status": delivery.status,
+        "delivery_id": delivery.id,
+        "response_status": delivery.response_status,
+    }
+
+
+@router.get(
+    "/webhooks/{webhook_id}/deliveries",
+    response_model=WebhookDeliveryListResponse,
+)
+async def get_webhook_deliveries(
+    webhook_id: str,
+    auth: AuthContext = Depends(require_reseller),
+    db: AsyncSession = Depends(get_db),
+) -> WebhookDeliveryListResponse:
+    """Get recent delivery log for a webhook endpoint."""
+    if not auth.has_scope("config:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing required scope: config:read",
+        )
+
+    deliveries = await webhook_service.get_deliveries(
+        db, webhook_id, auth.reseller_id,
+    )
+    items = [
+        WebhookDeliveryResponse(
+            id=d.id, event_type=d.event_type, status=d.status,
+            attempts=d.attempts, max_attempts=d.max_attempts,
+            response_status=d.response_status, error=d.error,
+            last_attempt_at=d.last_attempt_at,
+            next_retry_at=d.next_retry_at, created_at=d.created_at,
+        )
+        for d in deliveries
+    ]
+    return WebhookDeliveryListResponse(deliveries=items)

@@ -172,6 +172,7 @@ async def get_current_user(
         username=user.username,
         email=user.email,
         role=user.role,
+        reseller_id=getattr(user, "reseller_id", None),
         created_at=user.created_at,
     )
 
@@ -321,4 +322,3 @@ async def stream_user_events(
             "Content-Type": "text/event-stream; charset=utf-8",
         },
     )
-

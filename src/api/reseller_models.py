@@ -235,6 +235,18 @@ class APIKeyListResponse(BaseModel):
 # Usage & Reporting
 # =============================================================================
 
+class WhmcsMetricDefinition(BaseModel):
+    """Single metric definition in WHMCS MetricProvider format."""
+    type: str = "snapcount"
+    display: str
+
+
+class WhmcsMetricsResponse(BaseModel):
+    """Response in WHMCS MetricProvider format for billing integration."""
+    metrics: dict[str, WhmcsMetricDefinition]
+    usage: dict[str, dict[str, Any]]
+
+
 class UsagePeriod(BaseModel):
     """Time period for usage queries."""
     start: datetime
@@ -412,6 +424,88 @@ class UploadSkillRequest(BaseModel):
 
 
 # =============================================================================
+# Webhooks
+# =============================================================================
+
+# Single source of truth for event types lives in webhook_service
+from ..services.webhook_service import VALID_EVENT_TYPES as VALID_WEBHOOK_EVENTS
+
+
+class CreateWebhookRequest(BaseModel):
+    """Request to register a webhook endpoint."""
+    url: str = Field(min_length=1, max_length=2048, description="Webhook URL (HTTPS)")
+    events: list[str] = Field(description="Event types to subscribe to")
+    description: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("events")
+    @classmethod
+    def validate_events(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("At least one event type required")
+        invalid = set(v) - VALID_WEBHOOK_EVENTS - {"*"}
+        if invalid:
+            raise ValueError(f"Invalid event types: {invalid}")
+        return v
+
+
+class UpdateWebhookRequest(BaseModel):
+    """Request to update a webhook endpoint."""
+    url: Optional[str] = Field(default=None, max_length=2048)
+    events: Optional[list[str]] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("events")
+    @classmethod
+    def validate_events(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is not None:
+            invalid = set(v) - VALID_WEBHOOK_EVENTS - {"*"}
+            if invalid:
+                raise ValueError(f"Invalid event types: {invalid}")
+        return v
+
+
+class WebhookEndpointResponse(BaseModel):
+    """Response for a webhook endpoint (secret is masked)."""
+    id: str
+    url: str
+    events: list[str]
+    is_active: bool
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class WebhookCreatedResponse(WebhookEndpointResponse):
+    """Response when creating a webhook (includes secret, shown once)."""
+    secret: str = Field(description="HMAC secret — shown only once")
+
+
+class WebhookDeliveryResponse(BaseModel):
+    """Single delivery log entry."""
+    id: int
+    event_type: str
+    status: str
+    attempts: int
+    max_attempts: int
+    response_status: Optional[int] = None
+    error: Optional[str] = None
+    last_attempt_at: Optional[datetime] = None
+    next_retry_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class WebhookDeliveryListResponse(BaseModel):
+    """List of delivery log entries."""
+    deliveries: list[WebhookDeliveryResponse] = Field(default_factory=list)
+
+
+class WebhookListResponse(BaseModel):
+    """List of webhook endpoints."""
+    webhooks: list[WebhookEndpointResponse] = Field(default_factory=list)
+
+
+# =============================================================================
 # Reseller Self-Service
 # =============================================================================
 
@@ -580,6 +674,28 @@ class PlatformStats(BaseModel):
     capacity: dict[str, Any]
 
 
+class UpdatePlatformConfigRequest(BaseModel):
+    """Request to update platform-level defaults via PUT /admin/config."""
+    features: Optional[dict[str, Any]] = Field(
+        default=None, description="Feature flag overrides (null values reset to hardcoded)"
+    )
+    quotas: Optional[dict[str, Any]] = Field(
+        default=None, description="Quota overrides (null values reset to hardcoded)"
+    )
+    spending: Optional[dict[str, Any]] = Field(
+        default=None, description="Spending limit overrides (null values reset to hardcoded)"
+    )
+
+
+class PlatformConfigResponse(BaseModel):
+    """Response for GET/PUT /admin/config."""
+    default_features: dict[str, Any]
+    default_quotas: dict[str, Any]
+    default_spending_limits: dict[str, Any]
+    default_settings_mode: str = "readonly"
+    default_allowed_overrides: list[str] = Field(default_factory=list)
+
+
 class AuditLogEntry(BaseModel):
     """Single audit log entry."""
     id: int
@@ -597,3 +713,29 @@ class AuditLogResponse(BaseModel):
     """Paginated audit log."""
     entries: list[AuditLogEntry] = Field(default_factory=list)
     pagination: PaginationInfo
+
+
+# =============================================================================
+# Data retention
+# =============================================================================
+
+class RetentionConfigResponse(BaseModel):
+    """Current data retention configuration (days per table)."""
+    usage_records: int = Field(description="Retention in days for usage_records")
+    events: int = Field(description="Retention in days for events")
+    webhook_delivery_log: int = Field(description="Retention in days for webhook delivery log")
+    api_key_audit_log: int = Field(description="Retention in days for API key audit log")
+
+
+class UpdateRetentionRequest(BaseModel):
+    """Update retention periods (values in days)."""
+    usage_records: Optional[int] = Field(default=None, ge=1)
+    events: Optional[int] = Field(default=None, ge=1)
+    webhook_delivery_log: Optional[int] = Field(default=None, ge=1)
+    api_key_audit_log: Optional[int] = Field(default=None, ge=1)
+
+
+class RetentionRunResponse(BaseModel):
+    """Result of a manual retention purge run."""
+    total_purged: int = Field(description="Total rows purged across all tables")
+    tables: dict[str, Any] = Field(description="Per-table purge results")

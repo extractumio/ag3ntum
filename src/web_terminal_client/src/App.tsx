@@ -19,7 +19,7 @@ import {
   type DynamicMountRequest,
 } from './api';
 import { getBoolean, setBoolean, getString, setString, getNumber, setNumber } from './storage';
-import { AuthProvider, useAuth } from './AuthContext';
+import { useAuth } from './AuthContext';
 import { loadConfig } from './config';
 import {
   EMPTY_EVENTS,
@@ -2394,10 +2394,8 @@ function App({ initialSessionId }: AppProps): JSX.Element {
 
 export default function AppWithAuth({ initialSessionId }: AppProps = {}) {
   return (
-    <AuthProvider>
-      <ProtectedRoute>
-        <App initialSessionId={initialSessionId} />
-      </ProtectedRoute>
-    </AuthProvider>
+    <ProtectedRoute>
+      <App initialSessionId={initialSessionId} />
+    </ProtectedRoute>
   );
 }

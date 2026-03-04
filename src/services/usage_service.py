@@ -140,5 +140,99 @@ class UsageService:
             "ssh_commands": row.ssh_commands or 0,
         }
 
+    async def get_reseller_metrics(self, db: AsyncSession, reseller_id: str,
+                                   start: datetime, end: datetime) -> dict[str, Any]:
+        """Get per-user usage in WHMCS MetricProvider format.
+
+        Returns:
+            {
+              "metrics": {
+                "sessions": {"type": "snapcount", "display": "Sessions"},
+                "tokens":   {"type": "snapcount", "display": "Total Tokens"},
+                "cost":     {"type": "snapcount", "display": "Cost (USD)"},
+              },
+              "usage": {
+                "<username>": {"sessions": N, "tokens": N, "cost": N.NN},
+                ...
+              }
+            }
+        """
+        # Per-user aggregated usage
+        user_query = select(
+            User.username,
+            func.count(UsageRecord.id).label("sessions"),
+            func.coalesce(
+                func.sum(UsageRecord.input_tokens + UsageRecord.output_tokens), 0
+            ).label("tokens"),
+            func.coalesce(func.sum(UsageRecord.cost_usd), 0).label("cost"),
+        ).join(
+            User, User.id == UsageRecord.user_id
+        ).where(
+            UsageRecord.reseller_id == reseller_id,
+            UsageRecord.created_at >= start,
+            UsageRecord.created_at <= end,
+        ).group_by(User.username)
+
+        result = await db.execute(user_query)
+        usage: dict[str, dict[str, Any]] = {}
+        for row in result.all():
+            usage[row.username] = {
+                "sessions": row.sessions or 0,
+                "tokens": int(row.tokens or 0),
+                "cost": round(float(row.cost or 0), 6),
+            }
+
+        return {
+            "metrics": {
+                "sessions": {"type": "snapcount", "display": "Sessions"},
+                "tokens": {"type": "snapcount", "display": "Total Tokens"},
+                "cost": {"type": "snapcount", "display": "Cost (USD)"},
+            },
+            "usage": usage,
+        }
+
+    async def export_usage_data(
+        self, db: AsyncSession, reseller_id: str,
+        start: datetime, end: datetime,
+        max_rows: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        """Export raw usage records for a reseller in a period.
+
+        Returns a list of dicts suitable for CSV/JSON download.
+        Limited to ``max_rows`` to prevent unbounded memory usage.
+        """
+        query = select(
+            UsageRecord, User.username
+        ).join(
+            User, User.id == UsageRecord.user_id
+        ).where(
+            UsageRecord.reseller_id == reseller_id,
+            UsageRecord.created_at >= start,
+            UsageRecord.created_at <= end,
+        ).order_by(UsageRecord.created_at.desc()).limit(max_rows)
+
+        result = await db.execute(query)
+        records = []
+        for row in result.all():
+            record = row[0]  # UsageRecord
+            username = row[1]  # User.username
+            records.append({
+                "session_id": record.session_id,
+                "username": username,
+                "user_id": record.user_id,
+                "model": record.model,
+                "input_tokens": record.input_tokens,
+                "output_tokens": record.output_tokens,
+                "cache_creation_tokens": record.cache_creation_tokens,
+                "cache_read_tokens": record.cache_read_tokens,
+                "cost_usd": round(record.cost_usd, 6),
+                "duration_ms": record.duration_ms,
+                "num_turns": record.num_turns,
+                "ssh_commands": record.ssh_commands_executed,
+                "files_uploaded": record.files_uploaded,
+                "created_at": record.created_at.isoformat(),
+            })
+        return records
+
 
 usage_service = UsageService()

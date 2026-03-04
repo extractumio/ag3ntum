@@ -66,6 +66,7 @@ export interface User {
   username: string;
   email: string;
   role: string;
+  reseller_id?: string | null;
   created_at: string;
 }
 

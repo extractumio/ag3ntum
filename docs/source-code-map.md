@@ -41,16 +41,16 @@ Detailed file/class/purpose tables for all subsystems.
 - `POST /auth/connection-token` — short-lived single-use token for SSE auth
 - `POST /auth/logout` — server-side token revocation (increments `token_version`)
 
-**Reseller endpoints** (`/api/v1/reseller/*`): User CRUD (role=user only), API key management, usage stats, feature flags, settings, skills
-**Admin endpoints** (`/api/v1/admin/*`): Reseller CRUD, platform statistics, audit log
+**Reseller endpoints** (`/api/v1/reseller/*`): User CRUD (role=user only), API key management (create/rotate/revoke + CIDR IP allowlisting), usage stats, WHMCS metrics (`/usage/metrics`), usage export (`/usage/export` JSON/CSV), feature flags, spending limits, settings, skills, webhooks CRUD + test + delivery log
+**Admin endpoints** (`/api/v1/admin/*`): Reseller CRUD, platform statistics, audit log (paginated + filterable), platform config mutation (`GET/PUT /config` for features/quotas/spending), data retention (`GET/PUT /retention`, `POST /retention/run`)
 
 ---
 
 ## Services (`src/services/`)
 
-`agent_runner.py` (background tasks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting) | `api_key_service.py` (create/validate/rotate/revoke) | `api_key_rate_limiter.py` (per-key rate limiting) | `reseller_service.py` (reseller CRUD) | `reseller_quota_service.py` (reseller-level quotas) | `feature_flag_service.py` (3-tier flag resolution) | `spending_guard.py` (3-tier spending cap enforcement) | `usage_service.py` (session usage recording)
+`agent_runner.py` (background tasks, fires session.completed webhooks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting) | `api_key_service.py` (create/validate/rotate/revoke, CIDR IP allowlisting with IPv6 normalisation, audit logging) | `api_key_rate_limiter.py` (per-key rate limiting) | `reseller_service.py` (reseller CRUD, suspension cascading) | `reseller_quota_service.py` (reseller-level quotas) | `feature_flag_service.py` (3-tier flag resolution, DB-backed platform config with load/update) | `spending_guard.py` (3-tier spending cap enforcement, fires spending alert webhooks) | `usage_service.py` (session usage recording, WHMCS metrics, CSV/JSON export) | `webhook_service.py` (CRUD, HMAC-SHA256 signed delivery, exponential retry) | `webhook_processor.py` (background retry loop, 30s interval) | `data_retention_service.py` (configurable purging of old records) | `retention_processor.py` (background daily purge job)
 
-**DB utilities** (`src/db/`): `models.py` (SQLAlchemy, includes Reseller, APIKey, APIKeyAuditLog, UsageRecord, ResellerQuota, UserSkill, ResellerSkillLibrary) | `retry.py` (`with_db_retry` decorator)
+**DB utilities** (`src/db/`): `models.py` (SQLAlchemy, includes Reseller, APIKey, APIKeyAuditLog, UsageRecord, ResellerQuota, UserSkill, ResellerSkillLibrary, PlatformConfig, WebhookEndpoint, WebhookDeliveryLog) | `retry.py` (`with_db_retry` decorator) | `alembic/versions/` (3 migrations: reseller support, platform config, webhook tables)
 
 ---
 
@@ -107,7 +107,7 @@ Detailed file/class/purpose tables for all subsystems.
 
 React 18.3 + TypeScript 5.6 + Vite 5.4. Full arch: @`../DOCUMENTS/TECHNICAL/web_terminal_client.md`
 
-**Files**: `App.tsx` (orchestrator, decomposed) | `api.ts` (client) | `ConnectionManager.ts` (SSE state machine, backoff, polling fallback) | `sse.ts` (thin adapter, delegates to ConnectionManager) | `AuthContext.tsx` (JWT) | `hooks/` (7) | `components/messages/` (14) | `components/input/InputField.tsx` | `components/input/StatusFooter.tsx` | `FileExplorer.tsx` | `FileViewer.tsx` | `MarkdownRenderer.tsx` | `styles/` (17 CSS files, split by component)
+**Files**: `App.tsx` (orchestrator, decomposed) | `api.ts` (client) | `adminApi.ts` (admin/reseller API client) | `ConnectionManager.ts` (SSE state machine, backoff, polling fallback) | `sse.ts` (thin adapter, delegates to ConnectionManager) | `AuthContext.tsx` (JWT, `isAdmin`/`isReseller` computed props) | `ProtectedRoute.tsx` (role-based route guard) | `hooks/` (7) | `components/messages/` (14) | `components/input/InputField.tsx` | `components/input/StatusFooter.tsx` | `components/dashboard/` (DashboardLayout, StatsCard, DataTable, StatusBadge, ConfirmDialog, SecretDisplay) | `pages/admin/` (AdminDashboard, ResellerList, ResellerDetail) | `pages/reseller/` (ResellerDashboard, UserList, UserDetail, ApiKeyManagement) | `FileExplorer.tsx` | `FileViewer.tsx` | `MarkdownRenderer.tsx` | `types/admin.ts` (admin/reseller TypeScript interfaces) | `styles/` (18 CSS files, split by component + dashboard.css)
 
 **Hooks**: `useSSEConnection` | `useSessionManager` | `useUIState` | `useFileOperations` | `useConversation`
 

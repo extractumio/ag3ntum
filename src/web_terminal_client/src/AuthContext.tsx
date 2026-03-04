@@ -7,7 +7,10 @@ import type { User } from './types';
 interface AuthContextType {
   user: User | null;
   token: string | null;
+  baseUrl: string;
   isAuthenticated: boolean;
+  isAdmin: boolean;
+  isReseller: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -27,7 +30,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Load config first
     loadConfig().then((config) => {
       setApiBaseUrl(config.api.base_url);
-      
+
       // Then check for stored token
       const storedToken = getString('auth_token');
       if (storedToken) {
@@ -45,7 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const user = await getCurrentUser(baseUrl, token);
       setUser(user);
       setToken(token);
-    } catch (err) {
+    } catch {
       remove('auth_token');
       setError('Session expired. Please login again.');
     } finally {
@@ -90,13 +93,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, token, isAuthenticated: !!token && !!user, isLoading, login, logout, error }}
+      value={{
+        user, token,
+        baseUrl: apiBaseUrl,
+        isAuthenticated: !!token && !!user,
+        isAdmin: user?.role === 'admin',
+        isReseller: user?.role === 'reseller',
+        isLoading, login, logout, error,
+      }}
     >
       {children}
     </AuthContext.Provider>
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) throw new Error('useAuth must be used within AuthProvider');

@@ -1,10 +1,15 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom';
 import App from './App';
 import { ErrorBoundary } from './ErrorBoundary';
+import { AuthProvider } from './AuthContext';
+import { RoleGuard } from './ProtectedRoute';
 import { ToastProvider } from './components';
 import './styles/index.css';
+
+const AdminRoutes = lazy(() => import('./pages/admin/AdminRoutes'));
+const ResellerRoutes = lazy(() => import('./pages/reseller/ResellerRoutes'));
 
 // Session ID validation: must match backend pattern YYYYMMDD_HHMMSS_8hexchars
 // This prevents XSS, path traversal, and injection attacks via malformed URLs
@@ -58,13 +63,35 @@ createRoot(container).render(
           }}
         />
         <BrowserRouter>
-          <TrailingSlashRedirect />
-          <Routes>
-            <Route path="/" element={<App />} />
-            <Route path="/session/:sessionId/" element={<SessionRoute />} />
-            <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          <AuthProvider>
+            <TrailingSlashRedirect />
+            <Routes>
+              <Route path="/" element={<App />} />
+              <Route path="/session/:sessionId/" element={<SessionRoute />} />
+              <Route path="/session/:sessionId" element={<Navigate to={window.location.pathname + '/'} replace />} />
+              <Route
+                path="/admin/*"
+                element={
+                  <RoleGuard roles={['admin']}>
+                    <Suspense fallback={<div className="dash-loading">Loading...</div>}>
+                      <AdminRoutes />
+                    </Suspense>
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="/reseller/*"
+                element={
+                  <RoleGuard roles={['reseller']}>
+                    <Suspense fallback={<div className="dash-loading">Loading...</div>}>
+                      <ResellerRoutes />
+                    </Suspense>
+                  </RoleGuard>
+                }
+              />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </AuthProvider>
         </BrowserRouter>
       </ToastProvider>
     </ErrorBoundary>

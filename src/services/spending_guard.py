@@ -61,9 +61,19 @@ class SpendingGuard:
                     quota.reset_if_needed()
                     if (reseller.max_daily_spending_usd is not None
                             and quota.daily_cost_usd >= reseller.max_daily_spending_usd):
+                        await self._fire_spending_webhook(
+                            db, user.reseller_id, "spending.exceeded",
+                            user_id, "daily",
+                            quota.daily_cost_usd, reseller.max_daily_spending_usd,
+                        )
                         return (False, "Reseller daily spending limit reached")
                     if (reseller.max_monthly_spending_usd is not None
                             and quota.monthly_cost_usd >= reseller.max_monthly_spending_usd):
+                        await self._fire_spending_webhook(
+                            db, user.reseller_id, "spending.exceeded",
+                            user_id, "monthly",
+                            quota.monthly_cost_usd, reseller.max_monthly_spending_usd,
+                        )
                         return (False, "Reseller monthly spending limit reached")
 
         return (True, "")
@@ -115,6 +125,20 @@ class SpendingGuard:
             },
             "status": status,
         }
+
+    async def _fire_spending_webhook(
+        self, db: AsyncSession, reseller_id: Optional[str],
+        event_type: str, user_id: str, period: str,
+        current_usd: float, limit_usd: float,
+    ) -> None:
+        """Fire a spending webhook event (non-critical, best-effort)."""
+        from .webhook_service import webhook_service
+        await webhook_service.fire_best_effort(db, reseller_id, event_type, {
+            "user_id": user_id,
+            "period": period,
+            "current_usd": round(current_usd, 4),
+            "limit_usd": round(limit_usd, 4),
+        })
 
     async def _get_user_daily_cost(self, db: AsyncSession,
                                    user_id: str, now: datetime) -> float:
