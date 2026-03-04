@@ -32,6 +32,9 @@ python3 /scripts/sync_linux_users.py
 echo "Running database migrations..."
 python3 -c "from src.db.migrations import run_migrations_sync; run_migrations_sync()"
 
+# Fix DB file ownership after migration (migration runs as root, may create new files)
+chown -R 45045:45045 /data 2>/dev/null || true
+
 # Drop to ag3ntum_api with refreshed supplementary groups.
 # --init-groups reads /etc/group to set the correct group list.
 exec setpriv --reuid=45045 --regid=45045 --init-groups \

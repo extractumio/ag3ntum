@@ -58,6 +58,9 @@ python3 /scripts/sync_linux_users.py --prefix "[TEST MODE] "
 echo "[TEST MODE] Running database migrations..."
 python3 -c "from src.db.migrations import run_migrations_sync; run_migrations_sync()"
 
+# Fix DB file ownership after migration (migration runs as root, may create new files)
+chown -R 45045:45045 /data 2>/dev/null || true
+
 # ---- Step 3: Create fully-equipped test users ----
 # These users are complete test accounts with Linux users, DB entries,
 # Python venvs, and proper permissions. Tests can rely on these accounts
