@@ -26,7 +26,21 @@ from src.core.ssh.ssh_config import (
     SSHProfile,
     SSHSecurityConfig,
 )
-from src.core.ssh.ssh_command_filter import SSHFilterResult
+from src.core.ssh.ssh_command_filter import SSHCommandFilter, SSHFilterResult
+
+
+def _load_example_redaction_patterns():
+    """Load output_redaction patterns from the example YAML config."""
+    from pathlib import Path as FilePath
+    example_path = (
+        FilePath(__file__).parent.parent.parent.parent
+        / "config" / "security" / "ssh-privilege-levels.yaml.example"
+    )
+    filt = SSHCommandFilter(config_path=example_path)
+    return filt.output_redaction_patterns
+
+
+_EXAMPLE_REDACTION_PATTERNS = _load_example_redaction_patterns()
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +116,8 @@ def _make_mock_ctx(
         allowed=True, action="allow", reason="read permitted",
         rule="L0:read_allowed", category="read_access",
     ))
+    # Output redaction patterns loaded from example config
+    mock_filter.output_redaction_patterns = _EXAMPLE_REDACTION_PATTERNS
 
     mock_pool = MagicMock()
     mock_conn = AsyncMock()
@@ -714,6 +730,7 @@ class TestOperationsMode:
             rule="test-rule",
             category="test",
         ))
+        mock_filter.output_redaction_patterns = _EXAMPLE_REDACTION_PATTERNS
 
         mock_pool = MagicMock()
         mock_conn = AsyncMock()
@@ -846,7 +863,7 @@ class TestOutputSecretRedaction:
     def test_redacts_wp_db_password(self):
         """WordPress DB_PASSWORD define is redacted."""
         text = "define('DB_PASSWORD', 'my_secret_pass');"
-        result = _redact_output_secrets(text)
+        result = _redact_output_secrets(text, _EXAMPLE_REDACTION_PATTERNS)
         assert "my_secret_pass" not in result
         assert "[REDACTED]" in result
 
@@ -854,7 +871,7 @@ class TestOutputSecretRedaction:
     def test_redacts_wp_db_user(self):
         """WordPress DB_USER define is redacted."""
         text = "define('DB_USER', 'wp_admin');"
-        result = _redact_output_secrets(text)
+        result = _redact_output_secrets(text, _EXAMPLE_REDACTION_PATTERNS)
         assert "wp_admin" not in result
         assert "[REDACTED]" in result
 
@@ -862,21 +879,21 @@ class TestOutputSecretRedaction:
     def test_redacts_generic_password(self):
         """Generic password= pattern is redacted."""
         text = "password: SuperSecret123"
-        result = _redact_output_secrets(text)
+        result = _redact_output_secrets(text, _EXAMPLE_REDACTION_PATTERNS)
         assert "SuperSecret123" not in result
 
     @pytest.mark.unit
     def test_redacts_api_key(self):
         """API key patterns are redacted."""
         text = "api_key=sk-1234567890abcdef"
-        result = _redact_output_secrets(text)
+        result = _redact_output_secrets(text, _EXAMPLE_REDACTION_PATTERNS)
         assert "sk-1234567890abcdef" not in result
 
     @pytest.mark.unit
     def test_preserves_non_secret_content(self):
         """Normal output is not modified."""
         text = "WordPress 6.4.2 is up to date.\nPlugins: 12 active"
-        result = _redact_output_secrets(text)
+        result = _redact_output_secrets(text, _EXAMPLE_REDACTION_PATTERNS)
         assert result == text
 
     @pytest.mark.unit

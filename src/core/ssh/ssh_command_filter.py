@@ -128,6 +128,9 @@ class SSHCommandFilter:
             0: [], 1: [], 2: [], 3: [], 4: [],
         }
 
+        # Output redaction patterns: (compiled_pattern, replacement_string)
+        self._output_redaction: list[tuple[re.Pattern, str]] = []
+
         self._load_config(config_path)
 
     def _load_config(self, config_path: Optional[Path]) -> None:
@@ -226,6 +229,21 @@ class SSHCommandFilter:
             l4_data, "L4_emergency"
         )
 
+        # --- output_redaction patterns ---
+        for rule_data in config.get("output_redaction", []):
+            pattern_str = rule_data.get("pattern", "")
+            replacement = rule_data.get("replacement", "[REDACTED]")
+            if not pattern_str:
+                continue
+            try:
+                compiled_re = re.compile(pattern_str)
+                self._output_redaction.append((compiled_re, replacement))
+            except re.error as e:
+                logger.warning(
+                    f"SSHCommandFilter: Invalid output_redaction pattern "
+                    f"'{pattern_str}': {e} — skipped."
+                )
+
         rule_count = (
             len(self._always_blocked)
             + len(self._requires_approval)
@@ -234,7 +252,8 @@ class SSHCommandFilter:
         )
         logger.info(
             f"SSHCommandFilter: Loaded from {path}. "
-            f"{rule_count} compiled rules across all levels."
+            f"{rule_count} compiled rules, "
+            f"{len(self._output_redaction)} redaction patterns."
         )
         self._config_valid = True
 
@@ -835,6 +854,11 @@ class SSHCommandFilter:
             rule=f"{level_key}:read_allowed",
             category="read_access",
         )
+
+    @property
+    def output_redaction_patterns(self) -> list[tuple[re.Pattern, str]]:
+        """Compiled output redaction patterns from config."""
+        return self._output_redaction
 
     @property
     def config_valid(self) -> bool:

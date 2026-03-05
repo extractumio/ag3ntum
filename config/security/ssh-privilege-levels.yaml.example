@@ -247,3 +247,20 @@ always_blocked:
       description: "Archive creation"
     - pattern: 'cat\s+.*\.(env|key|pem|p12|pfx|jks)\b'
       description: "Sensitive file read"
+
+# Patterns redacted from command output (stdout/stderr) before
+# returning to the agent.  Each entry has a regex 'pattern' and a
+# 'replacement' string (may use backreferences like \1).
+output_redaction:
+  - pattern: "define\\(\\s*'DB_PASSWORD'\\s*,\\s*'[^']+'\\s*\\)"
+    replacement: "define('DB_PASSWORD', '[REDACTED]')"
+    description: "WordPress DB_PASSWORD"
+  - pattern: "define\\(\\s*'DB_USER'\\s*,\\s*'[^']+'\\s*\\)"
+    replacement: "define('DB_USER', '[REDACTED]')"
+    description: "WordPress DB_USER"
+  - pattern: '(?i)password\s*[=:]\s*\S+'
+    replacement: 'password=[REDACTED]'
+    description: "Generic password value"
+  - pattern: '(?i)(api[_-]?key|secret[_-]?key|auth[_-]?token)\s*[=:]\s*\S+'
+    replacement: '\1=[REDACTED]'
+    description: "API keys and tokens"

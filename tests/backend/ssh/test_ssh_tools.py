@@ -18,7 +18,7 @@ from tools.ag3ntum.ag3ntum_ssh.tool import (
     _ssh_connect_impl,
 )
 from src.core.ssh.ssh_config import SSHSecurityConfig, SSHConnectionLimits
-from src.core.ssh.ssh_command_filter import SSHFilterResult
+from src.core.ssh.ssh_command_filter import SSHCommandFilter, SSHFilterResult
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,11 @@ def mock_command_filter():
         allowed=True, action="allow", reason="read permitted",
         rule="L0:read_allowed", category="read_access",
     ))
+    # Output redaction patterns from example config
+    from pathlib import Path as _P
+    _example = _P(__file__).parent.parent.parent.parent / "config" / "security" / "ssh-privilege-levels.yaml.example"
+    _filt = SSHCommandFilter(config_path=_example)
+    f.output_redaction_patterns = _filt.output_redaction_patterns
     return f
 
 

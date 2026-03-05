@@ -84,28 +84,11 @@ def _redact_credentials(command: str) -> str:
     return _apply_redaction_patterns(command, _CREDENTIAL_PATTERNS)
 
 
-# ---------------------------------------------------------------------------
-# Output secret redaction (for command stdout before returning to agent)
-# ---------------------------------------------------------------------------
-
-_OUTPUT_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
-    # WordPress wp-config.php database credentials
-    (re.compile(r"define\(\s*'DB_PASSWORD'\s*,\s*'[^']+'\s*\)"),
-     "define('DB_PASSWORD', '[REDACTED]')"),
-    (re.compile(r"define\(\s*'DB_USER'\s*,\s*'[^']+'\s*\)"),
-     "define('DB_USER', '[REDACTED]')"),
-    # Generic password patterns in output
-    (re.compile(r'password\s*[=:]\s*\S+', re.IGNORECASE),
-     'password=[REDACTED]'),
-    # API keys / tokens in output
-    (re.compile(r'(?i)(api[_-]?key|secret[_-]?key|auth[_-]?token)\s*[=:]\s*\S+'),
-     r'\1=[REDACTED]'),
-]
-
-
-def _redact_output_secrets(text: str) -> str:
-    """Redact known secret patterns from command output."""
-    return _apply_redaction_patterns(text, _OUTPUT_SECRET_PATTERNS)
+def _redact_output_secrets(
+    text: str, patterns: list[tuple[re.Pattern, str]]
+) -> str:
+    """Redact secret patterns from command output using config-driven rules."""
+    return _apply_redaction_patterns(text, patterns)
 
 
 # ---------------------------------------------------------------------------
@@ -584,10 +567,11 @@ async def _ssh_exec_inner(
         logger.error("SSHExec: Failed to log command: %s", audit_exc)
 
     # Redact credentials in output before returning to agent context
+    redaction = ctx.command_filter.output_redaction_patterns
     if stdout:
-        stdout = _redact_output_secrets(stdout)
+        stdout = _redact_output_secrets(stdout, redaction)
     if stderr:
-        stderr = _redact_output_secrets(stderr)
+        stderr = _redact_output_secrets(stderr, redaction)
 
     lines = [
         f"Exit code: {exit_code}",
