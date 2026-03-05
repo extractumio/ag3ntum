@@ -57,6 +57,11 @@ def mock_command_filter():
         rule="L0_monitoring:allowlist",
         category="safe_read",
     ))
+    # SSHRead uses check_path_readable for path filtering — default to allow
+    f.check_path_readable = MagicMock(return_value=SSHFilterResult(
+        allowed=True, action="allow", reason="read permitted",
+        rule="L0:read_allowed", category="read_access",
+    ))
     return f
 
 

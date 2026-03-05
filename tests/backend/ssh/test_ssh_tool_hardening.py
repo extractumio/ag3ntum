@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from tools.ag3ntum.ag3ntum_ssh.tool import (
     _redact_credentials,
+    _redact_output_secrets,
+    _matches_operations,
     _ssh_exec_impl,
     _ssh_read_impl,
     _stream_process_output,
@@ -94,6 +96,11 @@ def _make_mock_ctx(
         reason=filter_reason,
         rule="test-rule",
         category="test",
+    ))
+    # SSHRead uses check_path_readable for path filtering — default to allow
+    mock_filter.check_path_readable = MagicMock(return_value=SSHFilterResult(
+        allowed=True, action="allow", reason="read permitted",
+        rule="L0:read_allowed", category="read_access",
     ))
 
     mock_pool = MagicMock()
@@ -670,3 +677,372 @@ class TestDryRunMode:
         text = result["content"][0]["text"]
         assert "real output" in text
         assert "DRY RUN" not in text
+
+
+# ---------------------------------------------------------------------------
+# Operations Mode Enforcement (Phase 1B)
+# ---------------------------------------------------------------------------
+
+class TestOperationsMode:
+    """Test operations mode enforcement in _ssh_exec_impl."""
+
+    def _make_operations_ctx(self, allowed_operations=None, mode="operations"):
+        """Create context with an operations-mode profile."""
+        session = AsyncMock()
+
+        @asynccontextmanager
+        async def db_factory():
+            yield session
+
+        profile = SSHProfile(
+            name="wp-server",
+            host="192.168.1.100",
+            port=22,
+            username="deploy",
+            auth_method="key",
+            key_ref="test-key",
+            mode=mode,
+            privilege_level=1,
+            allowed_operations=allowed_operations or [],
+        )
+
+        mock_filter = MagicMock()
+        mock_filter.check_command = MagicMock(return_value=SSHFilterResult(
+            allowed=True,
+            action="allow",
+            reason="allowed",
+            rule="test-rule",
+            category="test",
+        ))
+
+        mock_pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.create_process = AsyncMock(
+            return_value=_make_mock_process(stdout="output")
+        )
+        mock_pool.get_connection = AsyncMock(return_value=mock_conn)
+        mock_pool.record_activity = MagicMock()
+
+        mock_audit = MagicMock()
+        mock_audit.log_command = AsyncMock(return_value=1)
+        mock_audit.log_blocked = AsyncMock(return_value=1)
+
+        mock_vault = MagicMock()
+        mock_vault.get_connect_fn = AsyncMock(return_value=AsyncMock())
+
+        ctx = SSHToolContext(
+            session_id="test-session",
+            user_id="test-user",
+            security_config=SSHSecurityConfig(
+                enabled=True,
+                limits=SSHConnectionLimits(
+                    max_output_bytes=1024,
+                    max_concurrent_commands=5,
+                    command_timeout_seconds=30,
+                    max_file_read_bytes=2048,
+                ),
+            ),
+            connection_pool=mock_pool,
+            command_filter=mock_filter,
+            credential_vault=mock_vault,
+            audit_service=mock_audit,
+            profiles={"wp-server": profile},
+            db_session_factory=db_factory,
+        )
+        return ctx
+
+    @pytest.mark.unit
+    async def test_operations_mode_allows_matching_command(self):
+        """Command matching allowed_operations is permitted."""
+        ctx = self._make_operations_ctx(
+            allowed_operations=[r'^wp\s+plugin\s+list']
+        )
+        result = await _ssh_exec_impl(
+            {"profile_name": "wp-server", "command": "wp plugin list"},
+            ctx=ctx,
+        )
+        assert "is_error" not in result
+
+    @pytest.mark.unit
+    async def test_operations_mode_blocks_non_matching_command(self):
+        """Command not matching allowed_operations is blocked."""
+        ctx = self._make_operations_ctx(
+            allowed_operations=[r'^wp\s+plugin\s+list']
+        )
+        result = await _ssh_exec_impl(
+            {"profile_name": "wp-server", "command": "rm -rf /tmp"},
+            ctx=ctx,
+        )
+        assert result.get("is_error") is True
+        text = result["content"][0]["text"]
+        assert "not in allowed operations" in text
+
+    @pytest.mark.unit
+    async def test_operations_mode_empty_operations_blocks_all(self):
+        """Empty allowed_operations with operations mode doesn't block
+        (empty list means no operations filter is applied)."""
+        ctx = self._make_operations_ctx(allowed_operations=[])
+        result = await _ssh_exec_impl(
+            {"profile_name": "wp-server", "command": "uptime"},
+            ctx=ctx,
+        )
+        # Empty list means the condition `profile.allowed_operations` is falsy,
+        # so operations mode check is skipped
+        assert "is_error" not in result
+
+    @pytest.mark.unit
+    async def test_operations_mode_bypassed_when_not_operations(self):
+        """Non-operations mode skips the operations check."""
+        ctx = self._make_operations_ctx(
+            allowed_operations=[r'^wp\s+plugin\s+list'],
+            mode="readonly",  # Not operations mode
+        )
+        result = await _ssh_exec_impl(
+            {"profile_name": "wp-server", "command": "rm -rf /tmp"},
+            ctx=ctx,
+        )
+        # Should pass operations check (bypassed), then pass the mock filter
+        assert "is_error" not in result
+
+
+# ---------------------------------------------------------------------------
+# _matches_operations helper
+# ---------------------------------------------------------------------------
+
+class TestMatchesOperations:
+    """Test the _matches_operations helper function."""
+
+    @pytest.mark.unit
+    def test_matches_simple_pattern(self):
+        assert _matches_operations("wp plugin list", [r'^wp\s+plugin\s+list'])
+
+    @pytest.mark.unit
+    def test_no_match(self):
+        assert not _matches_operations("rm -rf /", [r'^wp\s+plugin\s+list'])
+
+    @pytest.mark.unit
+    def test_case_insensitive(self):
+        assert _matches_operations("WP Plugin List", [r'^wp\s+plugin\s+list'])
+
+    @pytest.mark.unit
+    def test_invalid_regex_skipped(self):
+        """Invalid regex patterns are skipped without crashing."""
+        assert not _matches_operations("test", [r'[invalid'])
+
+    @pytest.mark.unit
+    def test_multiple_patterns(self):
+        patterns = [r'^wp\s+plugin', r'^wp\s+theme']
+        assert _matches_operations("wp theme list", patterns)
+
+
+# ---------------------------------------------------------------------------
+# Output Secret Redaction (Phase 2D)
+# ---------------------------------------------------------------------------
+
+class TestOutputSecretRedaction:
+    """Test output secret redaction for command stdout."""
+
+    @pytest.mark.unit
+    def test_redacts_wp_db_password(self):
+        """WordPress DB_PASSWORD define is redacted."""
+        text = "define('DB_PASSWORD', 'my_secret_pass');"
+        result = _redact_output_secrets(text)
+        assert "my_secret_pass" not in result
+        assert "[REDACTED]" in result
+
+    @pytest.mark.unit
+    def test_redacts_wp_db_user(self):
+        """WordPress DB_USER define is redacted."""
+        text = "define('DB_USER', 'wp_admin');"
+        result = _redact_output_secrets(text)
+        assert "wp_admin" not in result
+        assert "[REDACTED]" in result
+
+    @pytest.mark.unit
+    def test_redacts_generic_password(self):
+        """Generic password= pattern is redacted."""
+        text = "password: SuperSecret123"
+        result = _redact_output_secrets(text)
+        assert "SuperSecret123" not in result
+
+    @pytest.mark.unit
+    def test_redacts_api_key(self):
+        """API key patterns are redacted."""
+        text = "api_key=sk-1234567890abcdef"
+        result = _redact_output_secrets(text)
+        assert "sk-1234567890abcdef" not in result
+
+    @pytest.mark.unit
+    def test_preserves_non_secret_content(self):
+        """Normal output is not modified."""
+        text = "WordPress 6.4.2 is up to date.\nPlugins: 12 active"
+        result = _redact_output_secrets(text)
+        assert result == text
+
+    @pytest.mark.unit
+    async def test_exec_inner_redacts_stdout(self):
+        """_ssh_exec_impl redacts secrets in stdout before returning."""
+        ctx, mock_conn = _make_mock_ctx()
+        mock_conn.create_process = AsyncMock(
+            return_value=_make_mock_process(
+                stdout="define('DB_PASSWORD', 'leaked_secret');"
+            )
+        )
+
+        result = await _ssh_exec_impl(
+            {"profile_name": "test-server", "command": "cat wp-config.php"},
+            ctx=ctx,
+        )
+        text = result["content"][0]["text"]
+        assert "leaked_secret" not in text
+        assert "[REDACTED]" in text
+
+
+# ---------------------------------------------------------------------------
+# SSHRead Blocked Path Filtering (Phase 2B)
+# ---------------------------------------------------------------------------
+
+class TestSSHReadPathBlocking:
+    """Test blocked path check in SSHRead."""
+
+    def _make_read_ctx(self, privilege_level=0, file_content=b"content"):
+        """Create context with real command_filter for path blocking tests."""
+        from pathlib import Path as FilePath
+        from src.core.ssh.ssh_command_filter import SSHCommandFilter
+
+        session = AsyncMock()
+
+        @asynccontextmanager
+        async def db_factory():
+            yield session
+
+        example_path = (
+            FilePath(__file__).parent.parent.parent.parent
+            / "config" / "security" / "ssh-privilege-levels.yaml.example"
+        )
+        real_filter = SSHCommandFilter(config_path=example_path)
+
+        profile = SSHProfile(
+            name="test-server",
+            host="192.168.1.100",
+            port=22,
+            username="deploy",
+            auth_method="key",
+            key_ref="test-key",
+            mode="readonly",
+            privilege_level=privilege_level,
+        )
+
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+
+        mock_sftp = AsyncMock()
+        mock_stat = MagicMock()
+        mock_stat.size = len(file_content)
+        mock_sftp.stat = AsyncMock(return_value=mock_stat)
+        # realpath returns the same path (no symlink)
+        mock_sftp.realpath = AsyncMock(side_effect=lambda p: p)
+
+        mock_file = AsyncMock()
+        mock_file.read = AsyncMock(return_value=file_content)
+        mock_file.close = AsyncMock()
+        mock_sftp.open = AsyncMock(return_value=mock_file)
+
+        mock_sftp_cm = MagicMock()
+        mock_sftp_cm.__aenter__ = AsyncMock(return_value=mock_sftp)
+        mock_sftp_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.start_sftp_client = MagicMock(return_value=mock_sftp_cm)
+
+        mock_pool.get_connection = AsyncMock(return_value=mock_conn)
+        mock_pool.record_activity = MagicMock()
+
+        mock_audit = MagicMock()
+        mock_audit.log_file_access = AsyncMock(return_value=1)
+
+        mock_vault = MagicMock()
+        mock_vault.get_connect_fn = AsyncMock(return_value=AsyncMock())
+
+        ctx = SSHToolContext(
+            session_id="test-session",
+            user_id="test-user",
+            security_config=SSHSecurityConfig(
+                enabled=True,
+                limits=SSHConnectionLimits(
+                    max_output_bytes=1024,
+                    max_concurrent_commands=5,
+                    command_timeout_seconds=30,
+                    max_file_read_bytes=4096,
+                ),
+            ),
+            connection_pool=mock_pool,
+            command_filter=real_filter,
+            credential_vault=mock_vault,
+            audit_service=mock_audit,
+            profiles={"test-server": profile},
+            db_session_factory=db_factory,
+        )
+        return ctx
+
+    @pytest.mark.unit
+    async def test_read_blocked_path_at_l0(self):
+        """/etc/shadow is blocked at L0."""
+        ctx = self._make_read_ctx(privilege_level=0)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/etc/shadow"},
+            ctx=ctx,
+        )
+        assert result.get("is_error") is True
+        text = result["content"][0]["text"]
+        assert "blocked" in text.lower()
+
+    @pytest.mark.unit
+    async def test_read_blocked_path_at_l2(self):
+        """/etc/sudoers is blocked at L2."""
+        ctx = self._make_read_ctx(privilege_level=2)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/etc/sudoers"},
+            ctx=ctx,
+        )
+        assert result.get("is_error") is True
+        text = result["content"][0]["text"]
+        assert "blocked" in text.lower()
+
+    @pytest.mark.unit
+    async def test_read_blocked_path_at_l3_allowed(self):
+        """/etc/shadow at L3 is NOT blocked (blocklist mode, reads allowed)."""
+        ctx = self._make_read_ctx(privilege_level=3)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/etc/shadow"},
+            ctx=ctx,
+        )
+        assert "is_error" not in result
+
+    @pytest.mark.unit
+    async def test_read_allowed_path_at_l0(self):
+        """/var/log/nginx/access.log is allowed at L0."""
+        ctx = self._make_read_ctx(privilege_level=0)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/var/log/nginx/access.log"},
+            ctx=ctx,
+        )
+        assert "is_error" not in result
+
+    @pytest.mark.unit
+    async def test_read_sshd_config_blocked_at_l0(self):
+        """/etc/ssh/sshd_config is blocked at L0."""
+        ctx = self._make_read_ctx(privilege_level=0)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/etc/ssh/sshd_config"},
+            ctx=ctx,
+        )
+        assert result.get("is_error") is True
+
+    @pytest.mark.unit
+    async def test_read_pam_blocked_at_l1(self):
+        """/etc/pam.d/common-auth is blocked at L1."""
+        ctx = self._make_read_ctx(privilege_level=1)
+        result = await _ssh_read_impl(
+            {"profile_name": "test-server", "path": "/etc/pam.d/common-auth"},
+            ctx=ctx,
+        )
+        assert result.get("is_error") is True

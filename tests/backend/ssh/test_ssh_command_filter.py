@@ -808,6 +808,236 @@ class TestShellExpansionBlocking:
             assert r.rule == "always_blocked:shell_expansion"
 
 
+class TestWordPressCommands:
+    """Tests for WordPress wp-cli command allowlist patterns."""
+
+    # L0 read-only wp-cli commands
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_plugin_list(self, command_filter):
+        """wp plugin list is in L0 allowlist."""
+        r = command_filter.check_command("wp plugin list", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_core_version(self, command_filter):
+        """wp core version is in L0 allowlist."""
+        r = command_filter.check_command("wp core version", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_theme_status(self, command_filter):
+        """wp theme status is in L0 allowlist."""
+        r = command_filter.check_command("wp theme status", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_db_check(self, command_filter):
+        """wp db check is in L0 allowlist."""
+        r = command_filter.check_command("wp db check", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_option_get(self, command_filter):
+        """wp option get siteurl is in L0 allowlist."""
+        r = command_filter.check_command("wp option get siteurl", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_post_list(self, command_filter):
+        """wp post list is in L0 allowlist."""
+        r = command_filter.check_command("wp post list", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_user_list(self, command_filter):
+        """wp user list is in L0 allowlist."""
+        r = command_filter.check_command("wp user list", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_cron_event_list(self, command_filter):
+        """wp cron event list is in L0 allowlist."""
+        r = command_filter.check_command("wp cron event list", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_config_list(self, command_filter):
+        """wp config list is in L0 allowlist."""
+        r = command_filter.check_command("wp config list", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_plugin_list_with_flags(self, command_filter):
+        """wp plugin list --status=active is in L0 allowlist."""
+        r = command_filter.check_command("wp plugin list --status=active", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_wp_search_replace_dry_run(self, command_filter):
+        """wp search-replace with --dry-run is allowed at L0."""
+        r = command_filter.check_command(
+            "wp search-replace http://old.com https://new.com --dry-run", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_wp_plugin_update(self, command_filter):
+        """wp plugin update is NOT in L0 (it's write, needs L1)."""
+        r = command_filter.check_command("wp plugin update akismet", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_wp_db_optimize(self, command_filter):
+        """wp db optimize is NOT in L0 (it's a write operation)."""
+        r = command_filter.check_command("wp db optimize", 0)
+        assert not r.allowed
+
+    # L1 operational wp-cli commands
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_plugin_update(self, command_filter):
+        """wp plugin update is in L1 allowed_commands."""
+        r = command_filter.check_command("wp plugin update akismet", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_theme_update(self, command_filter):
+        """wp theme update is in L1 allowed_commands."""
+        r = command_filter.check_command("wp theme update twentytwentyfour", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_core_update(self, command_filter):
+        """wp core update is in L1 allowed_commands."""
+        r = command_filter.check_command("wp core update", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_cache_flush(self, command_filter):
+        """wp cache flush is in L1 allowed_commands."""
+        r = command_filter.check_command("wp cache flush", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_rewrite_flush(self, command_filter):
+        """wp rewrite flush is in L1 allowed_commands."""
+        r = command_filter.check_command("wp rewrite flush", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_db_optimize(self, command_filter):
+        """wp db optimize is in L1 allowed_commands."""
+        r = command_filter.check_command("wp db optimize", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_plugin_activate(self, command_filter):
+        """wp plugin activate is in L1 allowed_commands."""
+        r = command_filter.check_command("wp plugin activate akismet", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_plugin_deactivate(self, command_filter):
+        """wp plugin deactivate is in L1 allowed_commands."""
+        r = command_filter.check_command("wp plugin deactivate akismet", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_wp_transient_delete_all(self, command_filter):
+        """wp transient delete --all is in L1 allowed_commands."""
+        r = command_filter.check_command("wp transient delete --all", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_inherits_l0_wp_plugin_list(self, command_filter):
+        """L1 inherits L0 — wp plugin list is still allowed."""
+        r = command_filter.check_command("wp plugin list", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_blocks_wp_eval(self, command_filter):
+        """wp eval is not in any allowlist — blocked at L1."""
+        r = command_filter.check_command("wp eval 'phpinfo();'", 1)
+        assert not r.allowed
+
+
+class TestPlainVariableBlocking:
+    """Tests for plain $VAR blocking in shell_expansion."""
+
+    @pytest.mark.unit
+    def test_plain_variable_blocked(self, command_filter):
+        """$HOME is blocked at all privilege levels."""
+        cmd = "cat $HOME/.ssh/id_rsa"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:shell_expansion"
+
+    @pytest.mark.unit
+    def test_plain_path_variable_blocked(self, command_filter):
+        """$PATH is blocked at all levels."""
+        cmd = "echo $PATH"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+
+    @pytest.mark.unit
+    def test_underscore_variable_blocked(self, command_filter):
+        """$_internal is blocked at all levels."""
+        cmd = "echo $_internal"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+
+    @pytest.mark.unit
+    def test_exit_code_not_blocked_at_l3(self, command_filter):
+        """$? (exit code) is NOT blocked — $ followed by ? not in [A-Za-z_]."""
+        r = command_filter.check_command("echo $?", 3)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_positional_param_not_blocked_at_l3(self, command_filter):
+        """$1 (positional) is NOT blocked — $ followed by digit not in [A-Za-z_]."""
+        r = command_filter.check_command("echo $1", 3)
+        assert r.allowed
+
+
+class TestOutputRedirectBlocking:
+    """Tests for output redirect detection in always_blocked."""
+
+    @pytest.mark.unit
+    def test_redirect_to_etc_blocked(self, command_filter):
+        """echo evil > /etc/passwd is blocked at all levels by output_redirect."""
+        cmd = "echo evil > /etc/passwd"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+            assert r.rule == "always_blocked:output_redirect"
+
+    @pytest.mark.unit
+    def test_redirect_to_root_ssh_blocked(self, command_filter):
+        """echo key > /root/.ssh/authorized_keys is blocked."""
+        cmd = "echo key > /root/.ssh/known_hosts"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+
+    @pytest.mark.unit
+    def test_redirect_to_cron_blocked(self, command_filter):
+        """Redirect to /var/spool/cron is blocked."""
+        cmd = "echo '* * * * * evil' > /var/spool/cron/root"
+        for level in range(5):
+            r = command_filter.check_command(cmd, level)
+            assert not r.allowed, f"Should be blocked at L{level}"
+
+    @pytest.mark.unit
+    def test_redirect_to_tmp_not_blocked_by_redirect_rule(self, command_filter):
+        """echo test > /tmp/test.txt is not blocked by output_redirect rules."""
+        r = command_filter.check_command("echo test > /tmp/test.txt", 3)
+        assert r.allowed
+
+
 class TestEncodingObfuscationBlocking:
     """Tests for encoding/obfuscation patterns added to lateral_movement (EXT-30)."""
 

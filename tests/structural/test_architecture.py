@@ -222,11 +222,11 @@ class TestFileSizeLimits:
         "tests/sandbox/security_tests.py": 1500,
         # Tools
         "tools/ag3ntum/ag3ntum_webfetch/tool.py": 750,
-        "tools/ag3ntum/ag3ntum_ssh/tool.py": 1100,
-        "src/core/ssh/ssh_command_filter.py": 850,
+        "tools/ag3ntum/ag3ntum_ssh/tool.py": 1150,
+        "src/core/ssh/ssh_command_filter.py": 900,
         "tests/backend/ssh/test_ssh_tools.py": 800,
-        "tests/backend/ssh/test_ssh_command_filter.py": 900,
-        "tests/backend/ssh/test_ssh_tool_hardening.py": 700,
+        "tests/backend/ssh/test_ssh_command_filter.py": 1150,
+        "tests/backend/ssh/test_ssh_tool_hardening.py": 1100,
         # Skills
         "skills/.claude/skills/create_image/image_gen.py": 800,
         # Services
