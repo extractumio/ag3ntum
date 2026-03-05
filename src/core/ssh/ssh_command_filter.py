@@ -128,6 +128,9 @@ class SSHCommandFilter:
             0: [], 1: [], 2: [], 3: [], 4: [],
         }
 
+        # Output redaction patterns: (compiled_pattern, replacement_string)
+        self._output_redaction: list[tuple[re.Pattern, str]] = []
+
         self._load_config(config_path)
 
     def _load_config(self, config_path: Optional[Path]) -> None:
@@ -163,7 +166,7 @@ class SSHCommandFilter:
 
         # --- always_blocked: persistence + lateral_movement + shell_expansion ---
         always_blocked_cfg = config.get("always_blocked", {})
-        for category in ("persistence", "lateral_movement", "shell_expansion"):
+        for category in ("persistence", "lateral_movement", "shell_expansion", "output_redirect"):
             for rule_data in always_blocked_cfg.get(category, []):
                 pattern = rule_data.get("pattern", "")
                 desc = rule_data.get("description", "")
@@ -194,14 +197,16 @@ class SSHCommandFilter:
         self._level_allowlists[0] = l0_rules
         self._level_operations[0] = self._extract_operations(l0_data)
 
-        # L1: inherits L0 + targeted sudo patterns
+        # L1: inherits L0 + targeted sudo patterns + L1 allowed_commands
         l1_data = levels_cfg.get("L1_service_management", {})
         l1_sudo = self._parse_sudo_restricted(l1_data, "L1_service_management")
-        self._level_allowlists[1] = l0_rules + l1_sudo
+        l1_allowed = self._parse_allowed_commands(l1_data, "L1_service_management")
+        self._level_allowlists[1] = l0_rules + l1_sudo + l1_allowed
         self._level_operations[1] = (
             self._level_operations[0]
             + [{"pattern": r.pattern_str, "description": r.description}
                for r in l1_sudo]
+            + self._extract_operations(l1_data)
         )
 
         # L2: inherits L1 + path-based write allowance
@@ -224,6 +229,21 @@ class SSHCommandFilter:
             l4_data, "L4_emergency"
         )
 
+        # --- output_redaction patterns ---
+        for rule_data in config.get("output_redaction", []):
+            pattern_str = rule_data.get("pattern", "")
+            replacement = rule_data.get("replacement", "[REDACTED]")
+            if not pattern_str:
+                continue
+            try:
+                compiled_re = re.compile(pattern_str)
+                self._output_redaction.append((compiled_re, replacement))
+            except re.error as e:
+                logger.warning(
+                    f"SSHCommandFilter: Invalid output_redaction pattern "
+                    f"'{pattern_str}': {e} — skipped."
+                )
+
         rule_count = (
             len(self._always_blocked)
             + len(self._requires_approval)
@@ -232,7 +252,8 @@ class SSHCommandFilter:
         )
         logger.info(
             f"SSHCommandFilter: Loaded from {path}. "
-            f"{rule_count} compiled rules across all levels."
+            f"{rule_count} compiled rules, "
+            f"{len(self._output_redaction)} redaction patterns."
         )
         self._config_valid = True
 
@@ -792,6 +813,52 @@ class SSHCommandFilter:
             rule=f"{level_key}:not_in_writable_paths",
             category="write_blocked",
         )
+
+    def check_path_readable(
+        self, path: str, privilege_level: int
+    ) -> SSHFilterResult:
+        """Check whether a path is readable at the given privilege level.
+
+        L0-L2: paths in blocked_paths are denied (sensitive files).
+        L3-L4: no read restrictions (blocklist mode).
+
+        Args:
+            path: Absolute path string to check.
+            privilege_level: Integer 0-4.
+
+        Returns:
+            SSHFilterResult with allow/block decision.
+        """
+        level = max(0, min(4, privilege_level))
+        level_key = _LEVEL_KEYS.get(level, f"L{level}")
+
+        if level <= 2:
+            blocked = self._find_blocked_path(path)
+            if blocked:
+                logger.info(
+                    f"SSHCommandFilter: PATH READ BLOCKED {level_key}:blocked_path "
+                    f"match='{blocked}' path='{path}'"
+                )
+                return SSHFilterResult(
+                    allowed=False,
+                    action="block",
+                    reason=f"Read of protected path blocked: {blocked}",
+                    rule=f"{level_key}:blocked_path",
+                    category="protected_path",
+                )
+
+        return SSHFilterResult(
+            allowed=True,
+            action="allow",
+            reason=f"Read permitted at privilege level {level}",
+            rule=f"{level_key}:read_allowed",
+            category="read_access",
+        )
+
+    @property
+    def output_redaction_patterns(self) -> list[tuple[re.Pattern, str]]:
+        """Compiled output redaction patterns from config."""
+        return self._output_redaction
 
     @property
     def config_valid(self) -> bool:

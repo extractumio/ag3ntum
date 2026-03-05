@@ -68,6 +68,25 @@ privilege_levels:
         description: "Current user"
       - pattern: '^id$'
         description: "User identity"
+      # WordPress wp-cli read-only commands
+      - pattern: '^wp\s+(plugin|theme|core)\s+(list|status|version|verify-checksums)(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli read-only listing/version commands"
+      - pattern: '^wp\s+db\s+(check|size)(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli database health check"
+      - pattern: '^wp\s+option\s+get\s+[\w_-]+$'
+        description: "wp-cli read single option"
+      - pattern: '^wp\s+post\s+list(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli list posts"
+      - pattern: '^wp\s+user\s+list(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli list users"
+      - pattern: '^wp\s+cron\s+(event\s+list|test)$'
+        description: "wp-cli cron inspection"
+      - pattern: '^wp\s+config\s+list(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli config listing (secrets auto-redacted by wp-cli)"
+      - pattern: '^wp\s+(cache|transient)\s+list(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli cache/transient listing"
+      - pattern: '^wp\s+search-replace\s+.*--dry-run(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli search-replace dry run only"
 
   L1_service_management:
     description: "Service restart and cache management"
@@ -77,6 +96,26 @@ privilege_levels:
       - '^sudo\s+service\s+[\w.-]+\s+(restart|reload|start|stop)$'
       - '^sudo\s+nginx\s+-s\s+(reload|reopen)$'
       - '^sudo\s+apachectl\s+graceful$'
+    allowed_commands:
+      # WordPress wp-cli operational commands (no sudo needed — runs as web user)
+      - pattern: '^wp\s+plugin\s+update\s+[\w-]+(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli update a plugin"
+      - pattern: '^wp\s+theme\s+update\s+[\w-]+(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli update a theme"
+      - pattern: '^wp\s+core\s+update(\s+--[\w-]+(=\S+)?)*$'
+        description: "wp-cli update WordPress core"
+      - pattern: '^wp\s+cache\s+flush$'
+        description: "wp-cli flush object cache"
+      - pattern: '^wp\s+rewrite\s+flush(\s+--hard)?$'
+        description: "wp-cli flush rewrite rules"
+      - pattern: '^wp\s+db\s+optimize$'
+        description: "wp-cli optimize database"
+      - pattern: '^wp\s+db\s+repair$'
+        description: "wp-cli repair database"
+      - pattern: '^wp\s+transient\s+delete\s+--all$'
+        description: "wp-cli delete all transients"
+      - pattern: '^wp\s+plugin\s+(activate|deactivate)\s+[\w-]+$'
+        description: "wp-cli activate/deactivate plugin"
     inherits: L0_monitoring
     human_approval: per_session
 
@@ -188,6 +227,18 @@ always_blocked:
       description: "Shell exec replacement"
     - pattern: '\bsource\b\s|\.\s+/'
       description: "Shell source/dot execution"
+    - pattern: '\$[A-Za-z_]'
+      description: "Shell variable reference ($VAR)"
+
+  output_redirect:
+    - pattern: '>\s*/etc/'
+      description: "Redirect output to /etc/"
+    - pattern: '>\s*/root/'
+      description: "Redirect output to /root/"
+    - pattern: '>\s*~/\.ssh/'
+      description: "Redirect output to .ssh directory"
+    - pattern: '>\s*/var/spool/cron'
+      description: "Redirect output to cron directory"
 
   data_exfiltration_require_approval:
     - pattern: '\bmysqldump\b|\bpg_dump\b'
@@ -196,3 +247,20 @@ always_blocked:
       description: "Archive creation"
     - pattern: 'cat\s+.*\.(env|key|pem|p12|pfx|jks)\b'
       description: "Sensitive file read"
+
+# Patterns redacted from command output (stdout/stderr) before
+# returning to the agent.  Each entry has a regex 'pattern' and a
+# 'replacement' string (may use backreferences like \1).
+output_redaction:
+  - pattern: "define\\(\\s*'DB_PASSWORD'\\s*,\\s*'[^']+'\\s*\\)"
+    replacement: "define('DB_PASSWORD', '[REDACTED]')"
+    description: "WordPress DB_PASSWORD"
+  - pattern: "define\\(\\s*'DB_USER'\\s*,\\s*'[^']+'\\s*\\)"
+    replacement: "define('DB_USER', '[REDACTED]')"
+    description: "WordPress DB_USER"
+  - pattern: '(?i)password\s*[=:]\s*\S+'
+    replacement: 'password=[REDACTED]'
+    description: "Generic password value"
+  - pattern: '(?i)(api[_-]?key|secret[_-]?key|auth[_-]?token)\s*[=:]\s*\S+'
+    replacement: '\1=[REDACTED]'
+    description: "API keys and tokens"

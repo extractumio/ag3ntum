@@ -70,12 +70,40 @@ _CREDENTIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+def _apply_redaction_patterns(
+    text: str, patterns: list[tuple[re.Pattern, str]]
+) -> str:
+    """Apply a list of (compiled_pattern, replacement) to text."""
+    for pattern, replacement in patterns:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _redact_credentials(command: str) -> str:
     """Redact known credential patterns from command for audit logging."""
-    result = command
-    for pattern, replacement in _CREDENTIAL_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
+    return _apply_redaction_patterns(command, _CREDENTIAL_PATTERNS)
+
+
+def _redact_output_secrets(
+    text: str, patterns: list[tuple[re.Pattern, str]]
+) -> str:
+    """Redact secret patterns from command output using config-driven rules."""
+    return _apply_redaction_patterns(text, patterns)
+
+
+# ---------------------------------------------------------------------------
+# Operations mode helper
+# ---------------------------------------------------------------------------
+
+def _matches_operations(command: str, operations: list[str]) -> bool:
+    """Check if command matches any allowed_operations pattern."""
+    for pattern in operations:
+        try:
+            if re.search(pattern, command, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +391,14 @@ async def _ssh_exec_impl(
                 " commands per minute."
             )
 
+    # Operations mode: only allowed_operations patterns permitted
+    if profile.mode == "operations" and profile.allowed_operations:
+        if not _matches_operations(command, profile.allowed_operations):
+            return _error(
+                f"Command not in allowed operations for profile '{profile_name}'. "
+                f"Mode: operations. Use SSHConnect(action='list') to see allowed operations."
+            )
+
     # Command filter check
     filter_result = ctx.command_filter.check_command(command, profile.privilege_level)
 
@@ -530,6 +566,13 @@ async def _ssh_exec_inner(
     except Exception as audit_exc:
         logger.error("SSHExec: Failed to log command: %s", audit_exc)
 
+    # Redact credentials in output before returning to agent context
+    redaction = ctx.command_filter.output_redaction_patterns
+    if stdout:
+        stdout = _redact_output_secrets(stdout, redaction)
+    if stderr:
+        stderr = _redact_output_secrets(stderr, redaction)
+
     lines = [
         f"Exit code: {exit_code}",
         f"Profile:   {profile_name} ({profile.username}@{profile.host}:{profile.port})",
@@ -646,9 +689,11 @@ async def _ssh_read_impl(
                 pass
 
             # Resolve symlinks and check target path for L2
+            real_path = remote_path
             try:
-                real_path = await sftp.realpath(remote_path)
-                if real_path != remote_path:
+                resolved = await sftp.realpath(remote_path)
+                if resolved != remote_path:
+                    real_path = resolved
                     # Symlink detected — verify target is allowed
                     path_check = ctx.command_filter.check_path_writable(
                         real_path, profile.privilege_level
@@ -660,6 +705,15 @@ async def _ssh_read_impl(
                         )
             except Exception:
                 pass  # realpath failed — proceed with the original path
+
+            # Check path against blocked paths (prevent reading sensitive files)
+            read_check = ctx.command_filter.check_path_readable(
+                real_path, profile.privilege_level
+            )
+            if not read_check.allowed:
+                return _error(
+                    f"Cannot read file — {read_check.reason}"
+                )
 
             remote_file = await sftp.open(remote_path, "rb")
             try:
