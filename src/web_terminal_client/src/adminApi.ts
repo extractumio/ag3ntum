@@ -6,14 +6,28 @@
  */
 import type {
   AdminUserListResponse,
+  ApiKey,
   AuditLogResponse,
+  ConnectionTestResult,
+  DeleteResellerResponse,
+  DeleteUserResponse,
   PlatformConfig,
   PlatformStats,
   Reseller,
   ResellerListResponse,
+  ResellerUser,
+  ResellerUserListResponse,
   RetentionConfig,
   RetentionRunResult,
+  SecurityConfig,
+  SettingsMode,
+  SkillListResponse,
+  SpendingStatus,
+  SSHFilters,
+  SuspendResponse,
   UsageResponse,
+  UserConfig,
+  UserUsageResponse,
   WebhookDelivery,
   WebhookEndpoint,
   WhmcsMetrics,
@@ -59,6 +73,25 @@ async function adminRequest<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+async function adminRequestText(baseUrl: string, path: string, token: string, options: RequestInit = {}): Promise<string> {
+  const headers = new Headers(options.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+
+  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `HTTP ${response.status}`;
+    try {
+      const json = JSON.parse(text);
+      message = json.detail || message;
+    } catch { /* use default */ }
+    throw new Error(message);
+  }
+
+  return response.text();
 }
 
 // ---------------------------------------------------------------------------
@@ -113,17 +146,17 @@ export async function updateReseller(
   });
 }
 
-export async function suspendReseller(baseUrl: string, token: string, id: string, reason?: string) {
+export async function suspendReseller(baseUrl: string, token: string, id: string, reason?: string): Promise<SuspendResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/resellers/${id}/suspend`, token, {
     method: 'POST', body: JSON.stringify(reason ? { reason } : {}),
   });
 }
 
-export async function unsuspendReseller(baseUrl: string, token: string, id: string) {
+export async function unsuspendReseller(baseUrl: string, token: string, id: string): Promise<SuspendResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/resellers/${id}/unsuspend`, token, { method: 'POST' });
 }
 
-export async function deleteReseller(baseUrl: string, token: string, id: string) {
+export async function deleteReseller(baseUrl: string, token: string, id: string): Promise<DeleteResellerResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/resellers/${id}?confirm=true`, token, { method: 'DELETE' });
 }
 
@@ -138,12 +171,35 @@ export async function listAllUsers(
   return adminRequest(baseUrl, `/api/v1/admin/users${toQS(params)}`, token);
 }
 
-export async function suspendUser(baseUrl: string, token: string, id: string) {
-  return adminRequest(baseUrl, `/api/v1/admin/users/${id}/suspend`, token, { method: 'POST' });
+export async function createAdminUser(
+  baseUrl: string, token: string,
+  body: { username: string; email: string; password: string; role?: string },
+): Promise<Record<string, unknown>> {
+  return adminRequest(baseUrl, `/api/v1/admin/users${toQS({ role: body.role })}`, token, {
+    method: 'POST', body: JSON.stringify(body),
+  });
 }
 
-export async function unsuspendUser(baseUrl: string, token: string, id: string) {
+export async function suspendUser(baseUrl: string, token: string, id: string, reason?: string): Promise<SuspendResponse> {
+  return adminRequest(baseUrl, `/api/v1/admin/users/${id}/suspend`, token, {
+    method: 'POST', body: JSON.stringify(reason ? { reason } : {}),
+  });
+}
+
+export async function unsuspendUser(baseUrl: string, token: string, id: string): Promise<SuspendResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/users/${id}/unsuspend`, token, { method: 'POST' });
+}
+
+export async function changeAdminUserPassword(
+  baseUrl: string, token: string, userId: string, newPassword: string,
+): Promise<{ status: string }> {
+  return adminRequest(baseUrl, `/api/v1/admin/users/${userId}/change-password`, token, {
+    method: 'POST', body: JSON.stringify({ new_password: newPassword }),
+  });
+}
+
+export async function deleteAdminUser(baseUrl: string, token: string, userId: string): Promise<DeleteUserResponse> {
+  return adminRequest(baseUrl, `/api/v1/admin/users/${userId}?confirm=true`, token, { method: 'DELETE' });
 }
 
 // ---------------------------------------------------------------------------
@@ -152,14 +208,14 @@ export async function unsuspendUser(baseUrl: string, token: string, id: string) 
 
 export async function getPlatformUsage(
   baseUrl: string, token: string,
-  params: { period?: string; reseller_id?: string } = {},
+  params: { period?: string; reseller_id?: string; group_by?: string; start?: string; end?: string } = {},
 ): Promise<UsageResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/usage${toQS(params)}`, token);
 }
 
 export async function getAuditLog(
   baseUrl: string, token: string,
-  params: { page?: number; per_page?: number; reseller_id?: string; action?: string } = {},
+  params: { page?: number; per_page?: number; reseller_id?: string; action?: string; start?: string; end?: string } = {},
 ): Promise<AuditLogResponse> {
   return adminRequest(baseUrl, `/api/v1/admin/audit${toQS(params)}`, token);
 }
@@ -185,31 +241,209 @@ export async function runRetention(baseUrl: string, token: string): Promise<Rete
 }
 
 // ---------------------------------------------------------------------------
-// Reseller — Profile & Users
+// Reseller — Profile & Connection
 // ---------------------------------------------------------------------------
 
-export async function getResellerProfile(baseUrl: string, token: string) {
+export async function getResellerProfile(baseUrl: string, token: string): Promise<Reseller> {
   return adminRequest(baseUrl, '/api/v1/reseller/profile', token);
 }
+
+export async function testConnection(baseUrl: string, token: string): Promise<ConnectionTestResult> {
+  return adminRequest(baseUrl, '/api/v1/reseller/test-connection', token);
+}
+
+export async function getResellerSpending(baseUrl: string, token: string): Promise<SpendingStatus> {
+  return adminRequest(baseUrl, '/api/v1/reseller/spending', token);
+}
+
+// ---------------------------------------------------------------------------
+// Reseller — Users
+// ---------------------------------------------------------------------------
 
 export async function listResellerUsers(
   baseUrl: string, token: string,
   params: { page?: number; per_page?: number; status?: string; search?: string } = {},
-) {
+): Promise<ResellerUserListResponse> {
   return adminRequest(baseUrl, `/api/v1/reseller/users${toQS(params)}`, token);
 }
 
-export async function getResellerUser(
-  baseUrl: string, token: string, userId: string,
-) {
+export async function getResellerUser(baseUrl: string, token: string, userId: string): Promise<ResellerUser> {
   return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}`, token);
 }
 
 export async function createResellerUser(
   baseUrl: string, token: string, body: Record<string, unknown>,
-) {
+): Promise<ResellerUser> {
   return adminRequest(baseUrl, '/api/v1/reseller/users', token, {
     method: 'POST', body: JSON.stringify(body),
+  });
+}
+
+export async function updateResellerUser(
+  baseUrl: string, token: string, userId: string, body: Record<string, unknown>,
+): Promise<ResellerUser> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function suspendResellerUser(baseUrl: string, token: string, userId: string, reason?: string): Promise<SuspendResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/suspend`, token, {
+    method: 'POST', body: JSON.stringify(reason ? { reason } : {}),
+  });
+}
+
+export async function unsuspendResellerUser(baseUrl: string, token: string, userId: string): Promise<SuspendResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/unsuspend`, token, { method: 'POST' });
+}
+
+export async function changeResellerUserPassword(
+  baseUrl: string, token: string, userId: string, newPassword: string,
+): Promise<{ status: string }> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/change-password`, token, {
+    method: 'POST', body: JSON.stringify({ new_password: newPassword }),
+  });
+}
+
+export async function deleteResellerUser(baseUrl: string, token: string, userId: string): Promise<DeleteUserResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}`, token, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
+// Reseller — User Config
+// ---------------------------------------------------------------------------
+
+export async function getUserConfig(baseUrl: string, token: string, userId: string): Promise<UserConfig> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/config`, token);
+}
+
+export async function updateUserConfig(
+  baseUrl: string, token: string, userId: string, body: Record<string, unknown>,
+): Promise<UserConfig> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/config`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function getUserSecurity(baseUrl: string, token: string, userId: string): Promise<SecurityConfig> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/security`, token);
+}
+
+export async function updateUserSecurity(
+  baseUrl: string, token: string, userId: string, body: Partial<SecurityConfig>,
+): Promise<SecurityConfig> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/security`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function getUserSSHFilters(baseUrl: string, token: string, userId: string): Promise<SSHFilters> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/ssh-filters`, token);
+}
+
+export async function updateUserSSHFilters(
+  baseUrl: string, token: string, userId: string, body: Partial<SSHFilters>,
+): Promise<SSHFilters> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/ssh-filters`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function getUserEnvVars(baseUrl: string, token: string, userId: string): Promise<{ env_vars: Record<string, string> }> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/env-vars`, token);
+}
+
+export async function setUserEnvVars(
+  baseUrl: string, token: string, userId: string, envVars: Record<string, string>,
+): Promise<{ env_vars: Record<string, string> }> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/env-vars`, token, {
+    method: 'PUT', body: JSON.stringify({ env_vars: envVars }),
+  });
+}
+
+export async function deleteUserEnvVar(baseUrl: string, token: string, userId: string, name: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/env-vars/${encodeURIComponent(name)}`, token, {
+    method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reseller — User Spending
+// ---------------------------------------------------------------------------
+
+export async function getUserSpending(baseUrl: string, token: string, userId: string): Promise<SpendingStatus> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/spending`, token);
+}
+
+export async function setUserSpendingLimits(
+  baseUrl: string, token: string, userId: string,
+  body: { max_monthly_usd?: number | null; max_daily_usd?: number | null; max_per_session_usd?: number | null },
+): Promise<SpendingStatus> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/spending-limits`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function setUserSettingsMode(
+  baseUrl: string, token: string, userId: string,
+  body: { mode: SettingsMode; allowed_overrides?: string[] },
+): Promise<Record<string, unknown>> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/settings-mode`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reseller — Skills
+// ---------------------------------------------------------------------------
+
+export async function getUserSkills(baseUrl: string, token: string, userId: string): Promise<SkillListResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/skills`, token);
+}
+
+export async function assignUserSkill(
+  baseUrl: string, token: string, userId: string,
+  body: { name: string; source?: string },
+): Promise<Record<string, unknown>> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/skills`, token, {
+    method: 'POST', body: JSON.stringify(body),
+  });
+}
+
+export async function removeUserSkill(baseUrl: string, token: string, userId: string, skillName: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/skills/${encodeURIComponent(skillName)}`, token, {
+    method: 'DELETE',
+  });
+}
+
+export async function enableUserSkill(baseUrl: string, token: string, userId: string, skillName: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/skills/${encodeURIComponent(skillName)}/enable`, token, {
+    method: 'POST',
+  });
+}
+
+export async function disableUserSkill(baseUrl: string, token: string, userId: string, skillName: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/skills/${encodeURIComponent(skillName)}/disable`, token, {
+    method: 'POST',
+  });
+}
+
+export async function getSkillLibrary(baseUrl: string, token: string): Promise<SkillListResponse> {
+  return adminRequest(baseUrl, '/api/v1/reseller/skill-library', token);
+}
+
+export async function uploadSkill(
+  baseUrl: string, token: string,
+  body: { name: string; description?: string; content: string },
+): Promise<Record<string, unknown>> {
+  return adminRequest(baseUrl, '/api/v1/reseller/skill-library', token, {
+    method: 'POST', body: JSON.stringify(body),
+  });
+}
+
+export async function deleteLibrarySkill(baseUrl: string, token: string, skillName: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/skill-library/${encodeURIComponent(skillName)}`, token, {
+    method: 'DELETE',
   });
 }
 
@@ -217,21 +451,24 @@ export async function createResellerUser(
 // Reseller — API Keys
 // ---------------------------------------------------------------------------
 
-export async function listApiKeys(baseUrl: string, token: string) {
+export async function listApiKeys(baseUrl: string, token: string): Promise<{ api_keys: ApiKey[] }> {
   return adminRequest(baseUrl, '/api/v1/reseller/api-keys', token);
 }
 
-export async function createApiKey(baseUrl: string, token: string, body: Record<string, unknown>) {
+export async function createApiKey(
+  baseUrl: string, token: string,
+  body: { name: string; scopes: string[]; ip_allowlist?: string[] | null; rate_limit_per_minute?: number; expires_at?: string },
+): Promise<ApiKey & { key: string }> {
   return adminRequest(baseUrl, '/api/v1/reseller/api-keys', token, {
     method: 'POST', body: JSON.stringify(body),
   });
 }
 
-export async function revokeApiKey(baseUrl: string, token: string, id: string) {
-  return adminRequest(baseUrl, `/api/v1/reseller/api-keys/${id}`, token, { method: 'DELETE' });
+export async function revokeApiKey(baseUrl: string, token: string, id: string): Promise<void> {
+  return adminRequest(baseUrl, `/api/v1/reseller/api-keys/${id}/revoke`, token, { method: 'POST' });
 }
 
-export async function rotateApiKey(baseUrl: string, token: string, id: string) {
+export async function rotateApiKey(baseUrl: string, token: string, id: string): Promise<{ key: string }> {
   return adminRequest(baseUrl, `/api/v1/reseller/api-keys/${id}/rotate`, token, { method: 'POST' });
 }
 
@@ -239,8 +476,29 @@ export async function rotateApiKey(baseUrl: string, token: string, id: string) {
 // Reseller — Usage
 // ---------------------------------------------------------------------------
 
+export async function getResellerUsage(
+  baseUrl: string, token: string,
+  params: { period?: string } = {},
+): Promise<UsageResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/usage${toQS(params)}`, token);
+}
+
+export async function getUserUsage(
+  baseUrl: string, token: string, userId: string,
+  params: { period?: string } = {},
+): Promise<UserUsageResponse> {
+  return adminRequest(baseUrl, `/api/v1/reseller/users/${userId}/usage${toQS(params)}`, token);
+}
+
 export async function getResellerUsageMetrics(baseUrl: string, token: string): Promise<WhmcsMetrics> {
   return adminRequest(baseUrl, '/api/v1/reseller/usage/metrics', token);
+}
+
+export async function exportUsage(
+  baseUrl: string, token: string,
+  params: { format?: string; period?: string } = {},
+): Promise<string> {
+  return adminRequestText(baseUrl, `/api/v1/reseller/usage/export${toQS(params)}`, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -259,8 +517,21 @@ export async function createWebhook(
   });
 }
 
-export async function deleteWebhook(baseUrl: string, token: string, id: string) {
+export async function updateWebhook(
+  baseUrl: string, token: string, id: string,
+  body: { url?: string; events?: string[]; is_active?: boolean; description?: string },
+): Promise<WebhookEndpoint> {
+  return adminRequest(baseUrl, `/api/v1/reseller/webhooks/${id}`, token, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+}
+
+export async function deleteWebhook(baseUrl: string, token: string, id: string): Promise<void> {
   return adminRequest(baseUrl, `/api/v1/reseller/webhooks/${id}`, token, { method: 'DELETE' });
+}
+
+export async function testWebhook(baseUrl: string, token: string, id: string): Promise<{ status: string }> {
+  return adminRequest(baseUrl, `/api/v1/reseller/webhooks/${id}/test`, token, { method: 'POST' });
 }
 
 export async function getWebhookDeliveries(

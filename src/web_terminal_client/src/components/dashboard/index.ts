@@ -5,3 +5,14 @@ export type { Column } from './DataTable';
 export { StatusBadge } from './StatusBadge';
 export { ConfirmDialog } from './ConfirmDialog';
 export { SecretDisplay } from './SecretDisplay';
+export { TabbedDetail } from './TabbedDetail';
+export type { Tab } from './TabbedDetail';
+export {
+  FormField,
+  ReadonlyField,
+  SpendingBar,
+  CheckboxGroup,
+  TagInput,
+  JsonEditor,
+  ImpactConfirmDialog,
+} from './FormControls';
