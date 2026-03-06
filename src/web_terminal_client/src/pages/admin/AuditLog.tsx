@@ -5,6 +5,43 @@ import { DataTable } from '../../components/dashboard';
 import type { Column } from '../../components/dashboard';
 import type { AuditLogResponse } from '../../types/admin';
 
+const AUDIT_COLUMNS: Column<Record<string, unknown>>[] = [
+  {
+    key: 'timestamp', header: 'Timestamp', sortable: true,
+    render: (r) => new Date(r.timestamp as string).toLocaleString(),
+  },
+  {
+    key: 'api_key_name', header: 'API Key',
+    render: (r) => r.api_key_name ? String(r.api_key_name) : '—',
+  },
+  {
+    key: 'reseller_name', header: 'Reseller',
+    render: (r) => r.reseller_name ? String(r.reseller_name) : '—',
+  },
+  { key: 'action', header: 'Action', sortable: true },
+  {
+    key: 'target_user', header: 'Target User',
+    render: (r) => r.target_user ? String(r.target_user) : '—',
+  },
+  { key: 'ip_address', header: 'IP Address' },
+  {
+    key: 'status_code', header: 'Status', sortable: true,
+    render: (r) => {
+      const code = r.status_code as number;
+      const color = code < 300 ? 'var(--color-success)'
+        : code < 400 ? 'var(--color-warning)'
+        : 'var(--color-error)';
+      return <span style={{ color, fontWeight: 600 }}>{code}</span>;
+    },
+  },
+  {
+    key: 'error', header: 'Error',
+    render: (r) => r.error
+      ? <span className="dash-form-error">{String(r.error)}</span>
+      : '—',
+  },
+];
+
 export function AuditLog() {
   const { token, baseUrl } = useAuth();
   const [data, setData] = useState<AuditLogResponse | null>(null);
@@ -25,43 +62,6 @@ export function AuditLog() {
   }, [token, baseUrl, page, actionFilter, resellerFilter]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
-
-  const columns: Column<Record<string, unknown>>[] = [
-    {
-      key: 'timestamp', header: 'Timestamp', sortable: true,
-      render: (r) => new Date(r.timestamp as string).toLocaleString(),
-    },
-    {
-      key: 'api_key_name', header: 'API Key',
-      render: (r) => r.api_key_name ? String(r.api_key_name) : '—',
-    },
-    {
-      key: 'reseller_name', header: 'Reseller',
-      render: (r) => r.reseller_name ? String(r.reseller_name) : '—',
-    },
-    { key: 'action', header: 'Action', sortable: true },
-    {
-      key: 'target_user', header: 'Target User',
-      render: (r) => r.target_user ? String(r.target_user) : '—',
-    },
-    { key: 'ip_address', header: 'IP Address' },
-    {
-      key: 'status_code', header: 'Status', sortable: true,
-      render: (r) => {
-        const code = r.status_code as number;
-        const color = code < 300 ? 'var(--color-success, #4ade80)'
-          : code < 400 ? 'var(--color-warning, #facc15)'
-          : 'var(--color-error, #f87171)';
-        return <span style={{ color, fontWeight: 600 }}>{code}</span>;
-      },
-    },
-    {
-      key: 'error', header: 'Error',
-      render: (r) => r.error
-        ? <span style={{ color: 'var(--color-error, #f87171)', fontSize: '0.8rem' }}>{String(r.error)}</span>
-        : '—',
-    },
-  ];
 
   return (
     <div>
@@ -89,7 +89,7 @@ export function AuditLog() {
 
       {data && (
         <DataTable
-          columns={columns}
+          columns={AUDIT_COLUMNS}
           data={data.entries as unknown as Record<string, unknown>[]}
           keyField="id"
           emptyMessage="No audit log entries"

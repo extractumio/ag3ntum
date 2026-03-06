@@ -15,6 +15,35 @@ interface CreateForm {
 
 const EMPTY_FORM: CreateForm = { username: '', email: '', password: '', role: 'user' };
 
+const ROLE_BADGE: Record<string, string> = {
+  admin: 'badge-secondary',
+  reseller: 'badge-warning',
+};
+
+const USER_COLUMNS: Column<Record<string, unknown>>[] = [
+  { key: 'username', header: 'Username', sortable: true },
+  { key: 'email', header: 'Email', sortable: true },
+  {
+    key: 'role', header: 'Role', sortable: true,
+    render: (r) => {
+      const variant = ROLE_BADGE[String(r.role)] ?? '';
+      return <span className={`badge${variant ? ` ${variant}` : ''}`}>{String(r.role)}</span>;
+    },
+  },
+  {
+    key: 'reseller_name', header: 'Reseller',
+    render: (r) => r.reseller_name ? String(r.reseller_name) : '—',
+  },
+  {
+    key: 'is_active', header: 'Status', sortable: true,
+    render: (r) => <StatusBadge status={r.is_active ? 'active' : 'suspended'} />,
+  },
+  {
+    key: 'created_at', header: 'Created', sortable: true,
+    render: (r) => new Date(r.created_at as string).toLocaleDateString(),
+  },
+];
+
 function validateForm(form: CreateForm): Partial<Record<keyof CreateForm, string>> {
   const errors: Partial<Record<keyof CreateForm, string>> = {};
   if (!form.username.trim()) errors.username = 'Username is required';
@@ -83,27 +112,6 @@ export function AdminUserList() {
       setSubmitting(false);
     }
   };
-
-  const columns: Column<Record<string, unknown>>[] = [
-    { key: 'username', header: 'Username', sortable: true },
-    { key: 'email', header: 'Email', sortable: true },
-    {
-      key: 'role', header: 'Role', sortable: true,
-      render: (r) => <span className={`dash-badge dash-badge-${r.role === 'admin' ? 'blue' : r.role === 'reseller' ? 'yellow' : 'default'}`}>{String(r.role)}</span>,
-    },
-    {
-      key: 'reseller_name', header: 'Reseller',
-      render: (r) => r.reseller_name ? String(r.reseller_name) : '—',
-    },
-    {
-      key: 'is_active', header: 'Status', sortable: true,
-      render: (r) => <StatusBadge status={r.is_active ? 'active' : 'suspended'} />,
-    },
-    {
-      key: 'created_at', header: 'Created', sortable: true,
-      render: (r) => new Date(r.created_at as string).toLocaleDateString(),
-    },
-  ];
 
   if (error) return <div className="dash-error">{error}</div>;
 
@@ -208,7 +216,7 @@ export function AdminUserList() {
 
       {data && (
         <DataTable
-          columns={columns}
+          columns={USER_COLUMNS}
           data={data.users as unknown as Record<string, unknown>[]}
           keyField="id"
           onRowClick={(r) => navigate(`/admin/users/${r.id}`, { state: { user: r as unknown as AdminUser } })}

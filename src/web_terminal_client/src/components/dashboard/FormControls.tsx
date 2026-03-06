@@ -69,9 +69,9 @@ export function SpendingBar({ current, limit, alertThreshold = 80, label }: Spen
     );
   }
   const pct = Math.min((current / limit) * 100, 100);
-  const color = pct >= 90 ? 'var(--color-error, #f87171)'
-    : pct >= alertThreshold ? 'var(--color-warning, #facc15)'
-    : 'var(--color-success, #4ade80)';
+  const color = pct >= 90 ? 'var(--color-error)'
+    : pct >= alertThreshold ? 'var(--color-warning)'
+    : 'var(--color-success)';
 
   return (
     <div className="dash-spending-bar-wrap">

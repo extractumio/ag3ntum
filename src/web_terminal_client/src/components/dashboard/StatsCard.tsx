@@ -7,12 +7,14 @@ interface StatsCardProps {
   accent?: 'green' | 'yellow' | 'red' | 'blue' | 'default';
 }
 
-const ACCENT_COLORS: Record<string, string> = {
-  green: 'var(--color-success, #4ade80)',
-  yellow: 'var(--color-warning, #facc15)',
-  red: 'var(--color-error, #f87171)',
-  blue: 'var(--color-info, #60a5fa)',
-  default: 'var(--color-primary, #22d3ee)',
+type Accent = NonNullable<StatsCardProps['accent']>;
+
+const ACCENT_COLORS: Record<Accent, string> = {
+  green: 'var(--color-success)',
+  yellow: 'var(--color-warning)',
+  red: 'var(--color-error)',
+  blue: 'var(--color-accent-secondary)',
+  default: 'var(--color-accent-primary)',
 };
 
 export function StatsCard({ label, value, sublabel, accent = 'default' }: StatsCardProps) {
