@@ -38,6 +38,7 @@ export interface PlatformStats {
 export interface SpendingLimits {
   monthly_usd: number | null;
   daily_usd: number | null;
+  per_session_usd?: number | null;
 }
 
 export interface SpendingCurrent {
@@ -113,6 +114,118 @@ export interface AdminUserListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Reseller User (reseller view)
+// ---------------------------------------------------------------------------
+
+export interface ResellerUserQuota {
+  max_concurrent_tasks: number;
+  max_daily_tasks: number;
+  tasks_today: number;
+}
+
+export interface ResellerUserUsageSummary {
+  total_sessions: number;
+  total_cost_usd: number;
+}
+
+export interface ResellerUser {
+  id: string;
+  username: string;
+  email: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at?: string;
+  last_session_at?: string;
+  sessions_total: number;
+  quota?: ResellerUserQuota;
+  features?: Record<string, unknown>;
+  usage_summary?: ResellerUserUsageSummary;
+  metadata?: Record<string, unknown>;
+  settings_mode?: SettingsMode;
+  spending_limits?: SpendingLimits;
+}
+
+export interface ResellerUserListResponse {
+  users: ResellerUser[];
+  pagination: PaginationInfo;
+}
+
+// ---------------------------------------------------------------------------
+// Settings mode
+// ---------------------------------------------------------------------------
+
+export type SettingsMode = 'readonly' | 'configurable';
+
+// ---------------------------------------------------------------------------
+// Spending
+// ---------------------------------------------------------------------------
+
+export interface SpendingStatus {
+  limits: SpendingLimits;
+  current: SpendingCurrent;
+  alert_threshold_pct: number;
+  status: string;
+}
+
+// ---------------------------------------------------------------------------
+// User Config
+// ---------------------------------------------------------------------------
+
+export interface UserConfig {
+  user_id: string;
+  settings_mode: SettingsMode;
+  allowed_overrides: string[];
+  features: Record<string, unknown>;
+  security: Record<string, unknown>;
+  spending: SpendingStatus;
+  skills: Record<string, unknown>;
+  ssh_filters: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Security Config
+// ---------------------------------------------------------------------------
+
+export interface SecurityConfig {
+  allowed_tools?: string[];
+  disabled_tools?: string[];
+  command_block_patterns?: string[];
+  network_allowed_domains?: string[];
+  network_blocked_domains?: string[];
+  path_blocklist_additions?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// SSH Filters
+// ---------------------------------------------------------------------------
+
+export interface SSHFilters {
+  blocked_hosts?: string[];
+  allowed_hosts?: string[];
+  command_block_patterns?: string[];
+  max_connections?: number;
+  session_timeout_seconds?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+export interface SkillInfo {
+  name: string;
+  source: string;
+  is_enabled: boolean;
+  content_hash: string;
+  created_at?: string;
+  description?: string;
+}
+
+export interface SkillListResponse {
+  skills: SkillInfo[];
+  limits: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Platform Config
 // ---------------------------------------------------------------------------
 
@@ -120,6 +233,8 @@ export interface PlatformConfig {
   default_features: Record<string, unknown>;
   default_quotas: Record<string, unknown>;
   default_spending_limits: Record<string, unknown>;
+  default_settings_mode?: string;
+  default_allowed_overrides?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +283,21 @@ export interface ApiKey {
   name: string;
   key_prefix: string;
   scopes: string[];
-  ip_allowlist: string[];
-  rate_limit_rpm: number | null;
+  ip_allowlist: string[] | null;
+  rate_limit_per_minute: number;
   is_active: boolean;
   last_used_at: string | null;
+  last_used_ip?: string | null;
   expires_at: string | null;
   created_at: string;
 }
+
+export const VALID_API_KEY_SCOPES = [
+  'users:create', 'users:read', 'users:update', 'users:suspend',
+  'users:delete', 'users:password', 'sessions:read', 'usage:read',
+  'keys:manage', 'config:read', 'config:update', 'skills:manage',
+  'security:manage',
+] as const;
 
 // ---------------------------------------------------------------------------
 // Webhook
@@ -187,6 +310,7 @@ export interface WebhookEndpoint {
   is_active: boolean;
   description: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface WebhookDelivery {
@@ -194,27 +318,98 @@ export interface WebhookDelivery {
   event_type: string;
   status: string;
   attempts: number;
+  max_attempts?: number;
   response_status: number | null;
   error: string | null;
+  last_attempt_at?: string;
+  next_retry_at?: string;
   created_at: string;
 }
+
+export const WEBHOOK_EVENT_TYPES = [
+  'session.started', 'session.completed', 'session.failed',
+  'user.created', 'user.suspended', 'user.deleted',
+  'spending.warning', 'spending.exceeded',
+  '*',
+] as const;
 
 // ---------------------------------------------------------------------------
 // Usage / Metrics
 // ---------------------------------------------------------------------------
 
+export interface UsageTotals {
+  sessions: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  active_users: number;
+  ssh_commands?: number;
+}
+
 export interface UsageResponse {
   period: { start: string; end: string };
-  totals: {
-    sessions: number;
-    input_tokens: number;
-    output_tokens: number;
-    cost_usd: number;
-    active_users: number;
-  };
+  totals: UsageTotals;
+  by_user?: { user_id: string; username: string; sessions: number; cost_usd: number }[];
+  by_day?: { date: string; sessions: number; cost_usd: number }[];
+}
+
+export interface UserUsageSession {
+  id: string;
+  status: string;
+  created_at: string;
+  cost_usd: number;
+  num_turns: number;
+}
+
+export interface UserUsageResponse {
+  user_id: string;
+  username: string;
+  period: { start: string; end: string };
+  totals: UsageTotals;
+  sessions: UserUsageSession[];
 }
 
 export interface WhmcsMetrics {
   metrics: Record<string, { type: string; display: string }>;
   usage: Record<string, Record<string, number>>;
+}
+
+// ---------------------------------------------------------------------------
+// Connection Test
+// ---------------------------------------------------------------------------
+
+export interface ConnectionTestResult {
+  status: string;
+  version?: string;
+  reseller?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Suspend / Delete Responses
+// ---------------------------------------------------------------------------
+
+export interface SuspendResponse {
+  id: string;
+  username?: string;
+  name?: string;
+  is_active: boolean;
+  active_sessions_cancelled?: number;
+  users_suspended?: number;
+  sessions_cancelled?: number;
+  api_keys_deactivated?: number;
+}
+
+export interface DeleteUserResponse {
+  status: string;
+  id: string;
+  username: string;
+  sessions_deleted: number;
+  files_cleaned: boolean;
+}
+
+export interface DeleteResellerResponse {
+  status: string;
+  name: string;
+  users_deleted: number;
+  sessions_deleted: number;
 }

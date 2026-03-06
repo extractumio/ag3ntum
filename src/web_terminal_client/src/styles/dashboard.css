@@ -425,6 +425,213 @@
   border-color: var(--color-primary, #22d3ee);
 }
 
+/* Tabs */
+.dash-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-color, #222);
+  margin-bottom: 1.5rem;
+  overflow-x: auto;
+}
+
+.dash-tab {
+  padding: 0.6rem 1rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary, #999);
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dash-tab:hover {
+  color: var(--text-primary, #e0e0e0);
+}
+
+.dash-tab-active {
+  color: var(--color-primary, #22d3ee);
+  border-bottom-color: var(--color-primary, #22d3ee);
+}
+
+.dash-tab-badge {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.65rem;
+}
+
+.dash-tab-content {
+  min-height: 200px;
+}
+
+/* Form controls */
+.dash-form-required {
+  color: var(--color-error, #f87171);
+}
+
+.dash-form-hint {
+  font-size: 0.7rem;
+  opacity: 0.5;
+  margin-top: 0.2rem;
+}
+
+.dash-form-error {
+  font-size: 0.7rem;
+  color: var(--color-error, #f87171);
+  margin-top: 0.2rem;
+}
+
+.dash-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.dash-readonly-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-color, #222);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.dash-lock-icon {
+  font-size: 0.7rem;
+}
+
+/* Spending bar */
+.dash-spending-bar-wrap {
+  margin-bottom: 0.75rem;
+}
+
+.dash-spending-bar {
+  position: relative;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.dash-spending-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s;
+  opacity: 0.3;
+}
+
+.dash-spending-text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* Checkbox group */
+.dash-checkbox-group {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.dash-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.dash-checkbox-item input {
+  accent-color: var(--color-primary, #22d3ee);
+}
+
+/* Tag input */
+.dash-tag-input {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.dash-tag-input .dash-form-input {
+  flex: 1;
+}
+
+.dash-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.dash-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  border-radius: 3px;
+  font-size: 0.75rem;
+}
+
+.dash-tag-remove {
+  background: none;
+  border: none;
+  color: var(--color-error, #f87171);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0;
+  line-height: 1;
+}
+
+/* JSON editor */
+.dash-json-editor {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.8rem;
+  resize: vertical;
+  min-height: 80px;
+}
+
+/* Impact dialog */
+.dash-impact-list ul {
+  color: var(--color-error, #f87171);
+}
+
+/* Form grid */
+.dash-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+/* Success message */
+.dash-success {
+  color: var(--color-success, #4ade80);
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+/* Form actions row */
+.dash-form-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .dash-layout {
