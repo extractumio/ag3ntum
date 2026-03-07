@@ -190,7 +190,7 @@ export function PlatformConfig() {
           </FormField>
         </div>
         {retentionError && <div className="dash-form-error">{retentionError}</div>}
-        {purgeResult && <div style={{ color: 'var(--color-success, #4ade80)', marginBottom: '0.75rem' }}>{purgeResult}</div>}
+        {purgeResult && <div className="dash-success">{purgeResult}</div>}
         {retention && (
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
             <button
