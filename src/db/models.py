@@ -67,6 +67,9 @@ class User(Base):
     vault_secrets: Mapped[list["VaultSecret"]] = relationship(
         "VaultSecret", back_populates="user", cascade="all, delete-orphan"
     )
+    ssh_profiles: Mapped[list["SSHProfileRecord"]] = relationship(
+        "SSHProfileRecord", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Session(Base):
@@ -340,6 +343,63 @@ class SSHAuditEvent(Base):
     relay_audit_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, index=True, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SSHProfileRecord(Base):
+    """User-managed SSH connection profiles (UI-created, stored in DB)."""
+    __tablename__ = "ssh_profiles"
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_ssh_profile_user_name"),
+        Index("ix_ssh_profile_user", "user_id"),
+        Index("ix_ssh_profile_user_active", "user_id", "is_active"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(64))
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(64))
+    auth_method: Mapped[str] = mapped_column(String(20), default="key")
+    key_vault_secret_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("vault_secrets.id"), nullable=True
+    )
+    mode: Mapped[str] = mapped_column(String(20), default="readonly")
+    privilege_level: Mapped[int] = mapped_column(Integer, default=0)
+    allowed_operations: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    passphrase_vault_secret_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("vault_secrets.id"), nullable=True
+    )
+    host_key_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_connected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+    last_connection_error: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    created_by: Mapped[str] = mapped_column(String(20), default="self")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="ssh_profiles")
+    key_secret: Mapped[Optional["VaultSecret"]] = relationship(
+        "VaultSecret", foreign_keys=[key_vault_secret_id]
+    )
+    passphrase_secret: Mapped[Optional["VaultSecret"]] = relationship(
+        "VaultSecret", foreign_keys=[passphrase_vault_secret_id]
     )
 
 

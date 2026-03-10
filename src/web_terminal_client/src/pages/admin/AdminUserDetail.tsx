@@ -5,8 +5,15 @@ import {
   listAllUsers, suspendUser, unsuspendUser,
   changeAdminUserPassword, deleteAdminUser,
 } from '../../adminApi';
-import { StatusBadge, ConfirmDialog, FormField, ReadonlyField, ImpactConfirmDialog } from '../../components/dashboard';
+import { StatusBadge, ConfirmDialog, FormField, ReadonlyField, ImpactConfirmDialog, TabbedDetail } from '../../components/dashboard';
+import type { Tab } from '../../components/dashboard';
 import type { AdminUser } from '../../types/admin';
+import { AdminSSHProfilesTab } from './AdminSSHProfilesTab';
+
+const TABS: Tab[] = [
+  { id: 'details', label: 'Details' },
+  { id: 'ssh', label: 'SSH Profiles' },
+];
 
 export function AdminUserDetail() {
   const { userId } = useParams<{ userId: string }>();
@@ -18,6 +25,8 @@ export function AdminUserDetail() {
   const [user, setUser] = useState<AdminUser | null>(initialUser ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!initialUser);
+
+  const [activeTab, setActiveTab] = useState<'details' | 'ssh'>('details');
 
   const [confirmSuspend, setConfirmSuspend] = useState<'suspend' | 'unsuspend' | null>(null);
   const [showDelete, setShowDelete] = useState(false);
@@ -163,20 +172,23 @@ export function AdminUserDetail() {
         </div>
       )}
 
-      <div className="dash-section">
-        <h3 className="dash-section-title">User Info</h3>
-        <div className="dash-form-grid">
-          <ReadonlyField label="Username" value={user.username} />
-          <ReadonlyField label="Email" value={user.email} />
-          <ReadonlyField label="Role" value={user.role} />
-          <ReadonlyField label="Reseller" value={user.reseller_name ?? '—'} />
-          <div className="dash-form-group">
-            <label className="dash-form-label">Status</label>
-            <StatusBadge status={user.is_active ? 'active' : 'suspended'} />
+      <TabbedDetail tabs={TABS} activeTab={activeTab} onTabChange={(id) => setActiveTab(id as 'details' | 'ssh')}>
+        {activeTab === 'details' && (
+          <div className="dash-form-grid">
+            <ReadonlyField label="Username" value={user.username} />
+            <ReadonlyField label="Email" value={user.email} />
+            <ReadonlyField label="Role" value={user.role} />
+            <ReadonlyField label="Reseller" value={user.reseller_name ?? '—'} />
+            <div className="dash-form-group">
+              <label className="dash-form-label">Status</label>
+              <StatusBadge status={user.is_active ? 'active' : 'suspended'} />
+            </div>
+            <ReadonlyField label="Created" value={new Date(user.created_at).toLocaleString()} />
           </div>
-          <ReadonlyField label="Created" value={new Date(user.created_at).toLocaleString()} />
-        </div>
-      </div>
+        )}
+
+        {activeTab === 'ssh' && <AdminSSHProfilesTab userId={user.id} />}
+      </TabbedDetail>
 
       <ConfirmDialog
         open={confirmSuspend !== null}

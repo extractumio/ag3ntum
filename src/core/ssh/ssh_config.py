@@ -283,64 +283,84 @@ def load_ssh_security_config(
 
 def load_ssh_profiles(
     user_config_dir: Path,
+    db_profiles: Optional[list[SSHProfile]] = None,
 ) -> dict[str, SSHProfile]:
     """
-    Load per-user SSH connection profiles.
+    Load per-user SSH connection profiles from YAML and optional DB profiles.
+
+    DB profiles are loaded first (lower precedence), then YAML profiles
+    overwrite on name collision. This preserves backward compatibility for
+    infrastructure-as-code users while enabling UI-based management.
 
     Args:
         user_config_dir: Path to user's ag3ntum config directory
                          (e.g., /users/{username}/ag3ntum/)
+        db_profiles: Optional list of SSHProfile objects from the database
+                     (UI-managed profiles). Lower precedence than YAML.
 
     Returns:
         Dict mapping profile name to SSHProfile.
         Empty dict if no profiles configured.
     """
-    profiles_path = user_config_dir / "ssh-profiles.yaml"
-
-    if not profiles_path.exists():
-        return {}
-
-    try:
-        with open(profiles_path) as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as e:
-        logger.error(
-            f"Failed to load SSH profiles from {profiles_path}: {e}"
-        )
-        return {}
-
-    profiles_data = data.get("profiles", {})
     result: dict[str, SSHProfile] = {}
 
-    for name, profile_data in profiles_data.items():
-        if not isinstance(profile_data, dict):
-            logger.warning(f"Invalid SSH profile '{name}': not a dict")
-            continue
+    # 1. Load DB profiles first (lower precedence)
+    if db_profiles:
+        for p in db_profiles:
+            result[p.name] = p
+        logger.info("Loaded %d SSH profiles from database", len(db_profiles))
 
-        host = profile_data.get("host")
-        if not host:
-            logger.warning(f"SSH profile '{name}' missing 'host'")
-            continue
+    # 2. Load YAML profiles (higher precedence — overwrites DB on collision)
+    profiles_path = user_config_dir / "ssh-profiles.yaml"
 
-        result[name] = SSHProfile(
-            name=name,
-            host=host,
-            port=profile_data.get("port", 22),
-            username=profile_data.get("username", ""),
-            auth_method=profile_data.get("auth_method", "key"),
-            key_ref=profile_data.get("key_ref"),
-            certificate_ref=profile_data.get("certificate_ref"),
-            password_secret_id=profile_data.get("password_secret_id"),
-            mode=profile_data.get("mode", "readonly"),
-            privilege_level=profile_data.get("privilege_level", 0),
-            allowed_operations=profile_data.get(
-                "allowed_operations", []
-            ),
-            description=profile_data.get("description", ""),
-            file_handling=profile_data.get("file_handling", {}),
+    if profiles_path.exists():
+        try:
+            with open(profiles_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error(
+                f"Failed to load SSH profiles from {profiles_path}: {e}"
+            )
+            return result  # Return DB profiles even if YAML fails
+
+        profiles_data = data.get("profiles", {})
+
+        for name, profile_data in profiles_data.items():
+            if not isinstance(profile_data, dict):
+                logger.warning(f"Invalid SSH profile '{name}': not a dict")
+                continue
+
+            host = profile_data.get("host")
+            if not host:
+                logger.warning(f"SSH profile '{name}' missing 'host'")
+                continue
+
+            if name in result:
+                logger.warning(
+                    "YAML profile '%s' overrides DB profile (YAML takes precedence)",
+                    name,
+                )
+
+            result[name] = SSHProfile(
+                name=name,
+                host=host,
+                port=profile_data.get("port", 22),
+                username=profile_data.get("username", ""),
+                auth_method=profile_data.get("auth_method", "key"),
+                key_ref=profile_data.get("key_ref"),
+                certificate_ref=profile_data.get("certificate_ref"),
+                password_secret_id=profile_data.get("password_secret_id"),
+                mode=profile_data.get("mode", "readonly"),
+                privilege_level=profile_data.get("privilege_level", 0),
+                allowed_operations=profile_data.get(
+                    "allowed_operations", []
+                ),
+                description=profile_data.get("description", ""),
+                file_handling=profile_data.get("file_handling", {}),
+            )
+
+        logger.info(
+            f"Loaded {len(profiles_data)} SSH profiles from {profiles_path}"
         )
 
-    logger.info(
-        f"Loaded {len(result)} SSH profiles from {profiles_path}"
-    )
     return result

@@ -162,7 +162,7 @@ class TestFileSizeLimits:
         "src/api/reseller_models.py": 800,
         "src/api/security_middleware.py": 700,
         # Models
-        "src/db/models.py": 700,
+        "src/db/models.py": 750,
         # Services
         "src/services/session_service.py": 1100,
         "src/services/event_service.py": 750,

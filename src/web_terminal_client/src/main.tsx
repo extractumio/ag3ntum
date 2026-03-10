@@ -10,6 +10,7 @@ import './styles/index.css';
 
 const AdminRoutes = lazy(() => import('./pages/admin/AdminRoutes'));
 const ResellerRoutes = lazy(() => import('./pages/reseller/ResellerRoutes'));
+const SettingsRoutes = lazy(() => import('./pages/settings/SettingsRoutes'));
 
 // Session ID validation: must match backend pattern YYYYMMDD_HHMMSS_8hexchars
 // This prevents XSS, path traversal, and injection attacks via malformed URLs
@@ -85,6 +86,16 @@ createRoot(container).render(
                   <RoleGuard roles={['reseller']}>
                     <Suspense fallback={<div className="dash-loading">Loading...</div>}>
                       <ResellerRoutes />
+                    </Suspense>
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="/settings/*"
+                element={
+                  <RoleGuard roles={['user', 'admin', 'reseller']}>
+                    <Suspense fallback={<div className="dash-loading">Loading...</div>}>
+                      <SettingsRoutes />
                     </Suspense>
                   </RoleGuard>
                 }

@@ -45,7 +45,7 @@ Consult before fixing bugs or designing features:
 | `inbound_waf_filter.md` | WAF rules, request size limits, DoS prevention |
 | `ask-user-question-logic.md` | Human-in-the-loop AskUserQuestion flow |
 
-Design plans: `docs/plans/`
+Design plans: `docs/plans/` — naming convention defined in Agent Rules → **Plan format**.
 
 ---
 
@@ -62,6 +62,7 @@ Design plans: `docs/plans/`
 - **Study `requirements.txt`** before adding dependencies — use existing packages, do not add redundant ones.
 - **Empty mounts are valid** — a configured external mount pointing to an empty directory is not an error. Report "no files found".
 - **Follow task management flow** — use Plane for all task tracking. Transition states as you work. Use worktrees for all changes. Never merge PRs — only humans merge.
+- **Plan format** — when asked to create a plan, produce two files under `docs/plans/`: (1) `plan-<YYYYMMDD-HHMM>-<feature-slug>.md` (implementation plan: goals, design, steps, trade-offs) and (2) `plan-checklist-<YYYYMMDD-HHMM>-<feature-slug>.md` (verification checklist: code landed, tests passing, docs updated, lint clean, acceptance criteria met). Use current date-time. The checklist ensures the plan was executed correctly and all deliverables are ready.
 
 → See [docs/internals/ag3ntum-task-management-and-flow.md](docs/internals/ag3ntum-task-management-and-flow.md) for full workflow: task states, branching, testing requirements, commit conventions, Definition of Done.
 
@@ -191,9 +192,7 @@ Design plans: `docs/plans/`
 
 Three-tier hierarchy: Admin (`ag3_adm_`) → Reseller (`ag3_res_`) → End-User. Routes: `/api/v1/reseller/*`, `/api/v1/admin/*`. Services: `APIKeyService`, `ResellerService`, `ResellerQuotaService`, `FeatureFlagService`, `SpendingGuard`, `UsageService`, `WebhookService`, `DataRetentionService`. Spending caps: Platform → Reseller → User (daily/monthly/per-session). Feature flags: Platform → Reseller → User (null = inherit). Settings mode: "readonly" | "configurable". IDOR prevention: `_get_owned_user()` on all reseller endpoints.
 
-**Phase 2 additions**: CIDR IP allowlisting on API keys. Audit logging (`GET /admin/audit`). Platform config mutation (`PUT /admin/config` for features/quotas/spending, null resets to default). WHMCS metrics (`GET /reseller/usage/metrics`). Usage export (`GET /reseller/usage/export` JSON/CSV). Webhook CRUD with HMAC-SHA256 signing + exponential retry (`/reseller/webhooks`). Data retention with configurable purge periods (`GET/PUT /admin/retention`, `POST /admin/retention/run`). Background processors: `WebhookProcessor` (30s retry), `RetentionProcessor` (24h purge). Admin/reseller dashboard pages (frontend).
-
-→ See `docs/plans/enable-reselling/` for detailed design.
+**Phase 2 additions**: CIDR IP allowlisting on API keys. Audit logging (`GET /admin/audit`). Platform config mutation (`PUT /admin/config` for features/quotas/spending, null resets to default). WHMCS metrics (`GET /reseller/usage/metrics`). Usage export (`GET /reseller/usage/export` JSON/CSV). Webhook CRUD with HMAC-SHA256 signing + exponential retry (`/reseller/webhooks`). Data retention with configurable purge periods (`GET/PUT /admin/retention`, `POST /admin/retention/run`). Background processors: `WebhookProcessor` (30s retry), `RetentionProcessor` (24h purge). Admin/reseller dashboard pages (frontend). → See `docs/plans/enable-reselling/` for detailed design.
 
 ---
 
