@@ -192,24 +192,31 @@ async def update_profile(
         fingerprint, key_type = _compute_key_fingerprint_from_key(parsed_key)
         logger.debug("Rotating key for '%s': %s (%s)", record.name, fingerprint, key_type)
 
-        if record.key_vault_secret_id:
-            await vault.delete_secret(db, user_id, record.key_vault_secret_id, reason="key_rotation")
-
         vault_name = _vault_key_name(record.name)
-        new_secret = await vault.store_secret(
-            db=db, user_id=user_id, secret_type="ssh_private_key",
-            name=vault_name, plaintext_value=private_key,
-            ssh_key_type=key_type.replace("ssh-", ""),
-        )
-        record.key_vault_secret_id = new_secret.id
+        if record.key_vault_secret_id:
+            # Rotate in-place to avoid unique constraint violation from soft-delete
+            await vault.rotate_secret(
+                db, user_id, record.key_vault_secret_id, private_key,
+            )
+        else:
+            new_secret = await vault.store_secret(
+                db=db, user_id=user_id, secret_type="ssh_private_key",
+                name=vault_name, plaintext_value=private_key,
+                ssh_key_type=key_type.replace("ssh-", ""),
+            )
+            record.key_vault_secret_id = new_secret.id
 
         if record.passphrase_vault_secret_id:
-            await vault.delete_secret(
-                db, user_id, record.passphrase_vault_secret_id, reason="key_rotation",
-            )
-            record.passphrase_vault_secret_id = None
-
-        if passphrase:
+            if passphrase:
+                await vault.rotate_secret(
+                    db, user_id, record.passphrase_vault_secret_id, passphrase,
+                )
+            else:
+                await vault.delete_secret(
+                    db, user_id, record.passphrase_vault_secret_id, reason="key_rotation",
+                )
+                record.passphrase_vault_secret_id = None
+        elif passphrase:
             pp_secret = await vault.store_secret(
                 db=db, user_id=user_id, secret_type="ssh_passphrase",
                 name=f"{vault_name}_passphrase", plaintext_value=passphrase,

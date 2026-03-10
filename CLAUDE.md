@@ -61,6 +61,7 @@ Design plans: `docs/plans/` — naming convention defined in Agent Rules → **P
 - **Verify containers before testing** — before `./run.sh test` or `shell`, confirm containers are up with `docker compose ps`.
 - **Study `requirements.txt`** before adding dependencies — use existing packages, do not add redundant ones.
 - **Empty mounts are valid** — a configured external mount pointing to an empty directory is not an error. Report "no files found".
+- **Branch hygiene for new work** — before starting a new feature or large change, check the current branch. If the branch is already merged, fetch the latest main (`git fetch origin main && git checkout main && git pull`) and create a fresh branch so all changes land in a new branch and new PR.
 - **Follow task management flow** — use Plane for all task tracking. Transition states as you work. Use worktrees for all changes. Never merge PRs — only humans merge.
 - **Plan format** — when asked to create a plan, produce two files under `docs/plans/`: (1) `plan-<YYYYMMDD-HHMM>-<feature-slug>.md` (implementation plan: goals, design, steps, trade-offs) and (2) `plan-checklist-<YYYYMMDD-HHMM>-<feature-slug>.md` (verification checklist: code landed, tests passing, docs updated, lint clean, acceptance criteria met). Use current date-time. The checklist ensures the plan was executed correctly and all deliverables are ready.
 
