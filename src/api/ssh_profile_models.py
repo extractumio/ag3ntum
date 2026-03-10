@@ -1,9 +1,13 @@
 """Pydantic models for SSH profile management API."""
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+# Authoritative set of valid SSH modes — used by validators and service layer.
+# Frontend equivalent: SSHMode type in src/web_terminal_client/src/types/ssh.ts
+VALID_SSH_MODES = frozenset({"readonly", "operations", "filtered_shell"})
 
 
 def mask_ssh_key(pem: str) -> str:
@@ -12,11 +16,42 @@ def mask_ssh_key(pem: str) -> str:
     Shows first 40 and last 20 characters with asterisks in between.
     This reveals the key type header/footer for identification
     without exposing the secret material.
+
+    Mirrored in frontend: src/web_terminal_client/src/utils/sshUtils.ts
     """
     if len(pem) <= 60:
         return pem
     return pem[:40] + "********************" + pem[-20:]
 
+
+# ---------------------------------------------------------------------------
+# Shared field validators (called from Create/Update/Test models)
+# ---------------------------------------------------------------------------
+
+def _validate_profile_name(v: str) -> str:
+    if not re.match(r'^[a-z][a-z0-9._-]*$', v):
+        raise ValueError(
+            "Profile name must start with a letter and contain only "
+            "lowercase letters, numbers, dots, hyphens, underscores"
+        )
+    return v
+
+
+def _validate_ssh_mode(v: str) -> str:
+    if v not in VALID_SSH_MODES:
+        raise ValueError(f"Mode must be one of: {', '.join(sorted(VALID_SSH_MODES))}")
+    return v
+
+
+def _validate_pem_key(v: str) -> str:
+    if not v.strip().startswith("-----BEGIN"):
+        raise ValueError("Private key must be in PEM format (-----BEGIN ...)")
+    return v.strip()
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
 
 class CreateSSHProfileRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64,
@@ -42,27 +77,17 @@ class CreateSSHProfileRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
-        if not re.match(r'^[a-z][a-z0-9._-]*$', v):
-            raise ValueError(
-                "Profile name must start with a letter and contain only "
-                "lowercase letters, numbers, dots, hyphens, underscores"
-            )
-        return v
+        return _validate_profile_name(v)
 
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        allowed = {"readonly", "operations", "filtered_shell"}
-        if v not in allowed:
-            raise ValueError(f"Mode must be one of: {', '.join(sorted(allowed))}")
-        return v
+        return _validate_ssh_mode(v)
 
     @field_validator("private_key")
     @classmethod
     def validate_key_format(cls, v: str) -> str:
-        if not v.strip().startswith("-----BEGIN"):
-            raise ValueError("Private key must be in PEM format (-----BEGIN ...)")
-        return v.strip()
+        return _validate_pem_key(v)
 
     @field_validator("host")
     @classmethod
@@ -93,30 +118,17 @@ class UpdateSSHProfileRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not re.match(r'^[a-z][a-z0-9._-]*$', v):
-            raise ValueError(
-                "Profile name must start with a letter and contain only "
-                "lowercase letters, numbers, dots, hyphens, underscores"
-            )
-        return v
+        return _validate_profile_name(v) if v is not None else v
 
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            allowed = {"readonly", "operations", "filtered_shell"}
-            if v not in allowed:
-                raise ValueError(
-                    f"Mode must be one of: {', '.join(sorted(allowed))}"
-                )
-        return v
+        return _validate_ssh_mode(v) if v is not None else v
 
     @field_validator("private_key")
     @classmethod
     def validate_key_format(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not v.strip().startswith("-----BEGIN"):
-            raise ValueError("Private key must be in PEM format")
-        return v.strip() if v else v
+        return _validate_pem_key(v) if v is not None else v
 
 
 class TestSSHConnectionRequest(BaseModel):
@@ -129,13 +141,11 @@ class TestSSHConnectionRequest(BaseModel):
     @field_validator("private_key")
     @classmethod
     def validate_key_format(cls, v: str) -> str:
-        if not v.strip().startswith("-----BEGIN"):
-            raise ValueError("Private key must be in PEM format")
-        return v.strip()
+        return _validate_pem_key(v)
 
 
 class TestSSHConnectionResponse(BaseModel):
-    status: str  # "success" | "failed"
+    status: Literal["success", "failed"]
     error_code: Optional[str] = None
     message: str
     host_key_fingerprint: Optional[str] = None

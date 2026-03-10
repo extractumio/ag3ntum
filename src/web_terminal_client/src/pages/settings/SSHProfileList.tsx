@@ -4,15 +4,13 @@ import {
   listSSHProfiles,
   deleteSSHProfile,
   testSavedSSHConnection,
+  createSSHProfile,
+  updateSSHProfile,
 } from '../../sshApi';
 import { DataTable, ConfirmDialog, StatusBadge } from '../../components/dashboard';
 import type { Column } from '../../components/dashboard';
 import { SSHProfileForm } from './SSHProfileForm';
 import { ConnectionTestResult } from './ConnectionTestResult';
-import {
-  createSSHProfile,
-  updateSSHProfile,
-} from '../../sshApi';
 import type { SSHProfile, CreateSSHProfileRequest, UpdateSSHProfileRequest, TestSSHConnectionResponse } from '../../types/ssh';
 
 // ---------------------------------------------------------------------------

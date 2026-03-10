@@ -4,7 +4,7 @@ import { maskSSHKey, isEncryptedKey } from '../../utils/sshUtils';
 import { testSSHConnection } from '../../sshApi';
 import { useAuth } from '../../AuthContext';
 import { ConnectionTestResult } from './ConnectionTestResult';
-import type { CreateSSHProfileRequest, SSHProfile, TestSSHConnectionResponse, UpdateSSHProfileRequest } from '../../types/ssh';
+import type { CreateSSHProfileRequest, SSHMode, SSHProfile, TestSSHConnectionResponse, UpdateSSHProfileRequest } from '../../types/ssh';
 
 // ---------------------------------------------------------------------------
 // Access level options
@@ -13,7 +13,7 @@ import type { CreateSSHProfileRequest, SSHProfile, TestSSHConnectionResponse, Up
 interface AccessLevel {
   value: number;
   label: string;
-  mode: string;
+  mode: SSHMode;
   recommended?: boolean;
 }
 
@@ -72,8 +72,8 @@ function validateForm(state: FormState): FormErrors {
   const errors: FormErrors = {};
   if (!state.name.trim()) {
     errors.name = 'Profile name is required';
-  } else if (!/^[a-z0-9_-]+$/.test(state.name)) {
-    errors.name = 'Lowercase letters, numbers, _ or - only';
+  } else if (!/^[a-z][a-z0-9._-]*$/.test(state.name)) {
+    errors.name = 'Must start with a letter; lowercase letters, numbers, dots, _ or - only';
   }
   if (!state.host.trim()) errors.host = 'Host is required';
   if (!state.username.trim()) errors.username = 'Username is required';
@@ -193,7 +193,7 @@ export function SSHProfileForm({
       host: form.host.trim(),
       port: form.port ? Number(form.port) : 22,
       username: form.username.trim(),
-      mode: ACCESS_LEVELS.find((l) => l.value === form.privilegeLevel)?.mode ?? 'operations',
+      mode: ACCESS_LEVELS.find((l) => l.value === form.privilegeLevel)?.mode ?? ('operations' as SSHMode),
       privilege_level: form.privilegeLevel,
       description: form.description.trim() || undefined,
     };
@@ -327,7 +327,7 @@ export function SSHProfileForm({
       </FormField>
 
       {/* Passphrase — shown only when key is encrypted */}
-      {(needsPassphrase || (isEditing && form.rawKey && needsPassphrase)) && (
+      {needsPassphrase && (
         <FormField label="Passphrase" hint="Required for encrypted keys">
           <input
             className="dash-form-input"

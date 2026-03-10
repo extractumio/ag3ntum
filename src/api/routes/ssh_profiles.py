@@ -46,6 +46,20 @@ def _get_vault() -> VaultService:
     return _vault
 
 
+async def _check_ssh_test_rate(user: User) -> None:
+    """Shared rate limit check for SSH test endpoints."""
+    key = svc.SSH_TEST_RATE_KEY.format(user_id=user.id)
+    if not await check_rate_limit(
+        key,
+        max_attempts=svc.SSH_TEST_MAX_ATTEMPTS,
+        window_seconds=svc.SSH_TEST_WINDOW_SECONDS,
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many SSH connection tests. Please wait and try again.",
+        )
+
+
 # =========================================================================
 # User self-service endpoints
 # =========================================================================
@@ -56,11 +70,7 @@ async def list_my_profiles(
     db: AsyncSession = Depends(get_db),
 ):
     """List all SSH profiles for the current user."""
-    records = await svc.get_profiles(db, user.id)
-    profiles = []
-    for r in records:
-        resp = await svc.build_profile_response(db, _get_vault(), r, user.id)
-        profiles.append(resp)
+    profiles = await svc.build_profiles_list(db, _get_vault(), user.id)
     return SSHProfileListResponse(profiles=profiles, count=len(profiles))
 
 
@@ -72,10 +82,11 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new SSH profile for the current user."""
+    vault = _get_vault()
     try:
         record = await svc.create_profile(
             db=db,
-            vault=_get_vault(),
+            vault=vault,
             user_id=user.id,
             name=req.name,
             host=req.host,
@@ -95,7 +106,7 @@ async def create_profile(
             raise HTTPException(status_code=409, detail=error_msg)
         raise HTTPException(status_code=422, detail=error_msg)
 
-    return await svc.build_profile_response(db, _get_vault(), record, user.id)
+    return await svc.build_profile_response(db, vault, record, user.id)
 
 
 @router.get("/ssh-profiles/{profile_id}", response_model=SSHProfileResponse)
@@ -123,9 +134,10 @@ async def update_profile(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    vault = _get_vault()
     try:
         record = await svc.update_profile(
-            db, _get_vault(), user.id, profile_id, **updates
+            db, vault, user.id, profile_id, **updates
         )
     except ValueError as e:
         error_msg = str(e)
@@ -135,7 +147,7 @@ async def update_profile(
 
     if not record:
         raise HTTPException(status_code=404, detail="Profile not found")
-    return await svc.build_profile_response(db, _get_vault(), record, user.id)
+    return await svc.build_profile_response(db, vault, record, user.id)
 
 
 @router.delete("/ssh-profiles/{profile_id}")
@@ -159,13 +171,7 @@ async def test_connection(
     db: AsyncSession = Depends(get_db),
 ):
     """Test an SSH connection without saving."""
-    if not await check_rate_limit(
-        f"rate:ssh_test:user:{user.id}", max_attempts=5, window_seconds=60
-    ):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many SSH connection tests. Please wait and try again.",
-        )
+    await _check_ssh_test_rate(user)
     result = await svc.test_connection(
         host=req.host,
         port=req.port,
@@ -184,13 +190,7 @@ async def test_saved_connection(
     db: AsyncSession = Depends(get_db),
 ):
     """Test an existing saved profile's connection."""
-    if not await check_rate_limit(
-        f"rate:ssh_test:user:{user.id}", max_attempts=5, window_seconds=60
-    ):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many SSH connection tests. Please wait and try again.",
-        )
+    await _check_ssh_test_rate(user)
     result = await svc.test_saved_connection(
         db, _get_vault(), user.id, profile_id
     )
@@ -211,11 +211,7 @@ async def admin_list_user_profiles(
     db: AsyncSession = Depends(get_db),
 ):
     """Admin: list all SSH profiles for a user."""
-    records = await svc.get_profiles(db, user_id)
-    profiles = []
-    for r in records:
-        resp = await svc.build_profile_response(db, _get_vault(), r, user_id)
-        profiles.append(resp)
+    profiles = await svc.build_profiles_list(db, _get_vault(), user_id)
     return SSHProfileListResponse(profiles=profiles, count=len(profiles))
 
 

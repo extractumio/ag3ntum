@@ -1,12 +1,15 @@
 /** TypeScript interfaces for SSH Profile API responses. */
 
+/** Valid SSH access modes — matches backend VALID_SSH_MODES in ssh_profile_models.py */
+export type SSHMode = 'readonly' | 'operations' | 'filtered_shell';
+
 export interface SSHProfile {
   id: string;
   name: string;
   host: string;
   port: number;
   username: string;
-  mode: string;
+  mode: SSHMode;
   privilege_level: number;
   host_key_pinned: boolean;
   host_key_fingerprint: string | null;
@@ -33,7 +36,7 @@ export interface CreateSSHProfileRequest {
   username: string;
   private_key: string;
   passphrase?: string;
-  mode?: string;
+  mode?: SSHMode;
   privilege_level?: number;
   allowed_operations?: string[];
   description?: string;
@@ -46,7 +49,7 @@ export interface UpdateSSHProfileRequest {
   username?: string;
   private_key?: string;
   passphrase?: string;
-  mode?: string;
+  mode?: SSHMode;
   privilege_level?: number;
   allowed_operations?: string[];
   description?: string;

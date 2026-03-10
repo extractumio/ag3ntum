@@ -66,6 +66,8 @@ def mock_ssh(mock_vault):
     """
     fake_key = _make_fake_asyncssh_key()
 
+    fake_pub_key = _make_fake_asyncssh_key()  # reuse for public key mock
+
     with patch(
         "src.services.ssh_profile_service.scan_host_key",
         new_callable=AsyncMock,
@@ -78,7 +80,11 @@ def mock_ssh(mock_vault):
             "src.services.ssh_profile_service.asyncssh.import_private_key",
             return_value=fake_key,
         ):
-            yield mock_scan
+            with patch(
+                "src.services.ssh_profile_service.asyncssh.import_public_key",
+                return_value=fake_pub_key,
+            ):
+                yield mock_scan
 
 
 def _make_fake_asyncssh_key():
@@ -86,12 +92,13 @@ def _make_fake_asyncssh_key():
     the fingerprint / key-type extraction code paths in ssh_profile_service."""
     from unittest.mock import MagicMock
     key = MagicMock()
-    # export_public_key("openssh") → bytes with "ssh-ed25519 AAAA..."
+    key.get_algorithm.return_value = "ssh-ed25519"
+    key.get_fingerprint.return_value = "SHA256:fakeTestFingerprint012345678901234567890"
+    # export_public_key still needed for host key extraction in test_connection
     key.export_public_key.return_value = (
         b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake"
         b"KeyDataForTestingPurposesOnlyNotReal\n"
     )
-    key.get_fingerprint.return_value = "SHA256:fakeTestFingerprint012345678901234567890"
     return key
 
 
