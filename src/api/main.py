@@ -255,6 +255,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("Could not start RetentionProcessor: %s", e)
 
+    # Initialize SSH Service Manager (agent integration)
+    try:
+        from ..services.ssh_service_manager import ssh_service_manager
+        await ssh_service_manager.initialize()
+        app.state.ssh_manager = ssh_service_manager
+    except Exception as e:
+        logger.warning("Could not initialize SSH service manager: %s", e)
+
     # Initialize SubagentManager singleton
     # This loads config/subagents.yaml and renders all prompt templates ONCE.
     # The same subagent definitions are shared across ALL users and sessions.
@@ -324,6 +332,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    # Close SSH connection pool
+    ssh_mgr = getattr(app.state, "ssh_manager", None)
+    if ssh_mgr:
+        await ssh_mgr.shutdown()
+
     if retention_processor:
         await retention_processor.stop()
         logger.info("RetentionProcessor stopped")

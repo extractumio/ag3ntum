@@ -227,11 +227,12 @@ class TestFileSizeLimits:
         "tests/backend/ssh/test_ssh_tools.py": 800,
         "tests/backend/ssh/test_ssh_command_filter.py": 1150,
         "tests/backend/ssh/test_ssh_tool_hardening.py": 1100,
+        "tests/backend/test_ssh_profiles_connection.py": 800,
         # Skills
         "skills/.claude/skills/create_image/image_gen.py": 800,
         # Services
         "src/services/user_service.py": 1200,
-        "src/services/agent_runner.py": 850,  # usage recording hook for reseller billing
+        "src/services/agent_runner.py": 870,  # usage recording + SSH context building
         "src/services/mount_service.py": 1200,
         # Core (additional)
         "src/core/output.py": 700,

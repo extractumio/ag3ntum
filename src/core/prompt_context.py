@@ -51,6 +51,7 @@ def build_prompt_context(
     external_mounts: Optional[dict[str, Any]] = None,
     dynamic_mounts: Optional[list] = None,
     original_path_mounts: Optional[list] = None,
+    ssh_profiles: Optional[dict[str, Any]] = None,
 ) -> PromptContext:
     """
     Build a PromptContext for template rendering.
@@ -153,5 +154,34 @@ def build_prompt_context(
         context.arrays["DYNAMIC_MOUNTS"] = dynamic_mounts
     if original_path_mounts:
         context.arrays["ORIGINAL_PATH_MOUNTS"] = original_path_mounts
+
+    # SSH profile injection
+    if ssh_profiles:
+        context.flags["SSH_ENABLED"] = True
+        mode_labels = {
+            "readonly": "L0 readonly",
+            "operations": "L1 operations",
+            "filtered_shell": "L2 filtered",
+        }
+        lines = []
+        for name, profile in ssh_profiles.items():
+            mode = getattr(profile, "mode", "readonly")
+            desc = getattr(profile, "description", "")
+            host = getattr(profile, "host", "?")
+            port = getattr(profile, "port", 22)
+            user = getattr(profile, "username", "?")
+            line = (
+                f"- **{name}**: {user}@{host}:{port} "
+                f"({mode_labels.get(mode, mode)})"
+            )
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+        context.strings["SSH_PROFILES_BLOCK"] = "\n".join(lines)
+        context.tool_names["AG3NTUM_SSH_EXEC_TOOL"] = "mcp__ag3ntum__SSHExec"
+        context.tool_names["AG3NTUM_SSH_READ_TOOL"] = "mcp__ag3ntum__SSHRead"
+        context.tool_names["AG3NTUM_SSH_CONNECT_TOOL"] = "mcp__ag3ntum__SSHConnect"
+    else:
+        context.flags["SSH_ENABLED"] = False
 
     return context

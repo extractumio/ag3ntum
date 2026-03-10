@@ -9,6 +9,9 @@ Covers functionality NOT tested in test_ssh_profiles.py:
 - Name rename uniqueness conflict
 - Connection failure scenarios
 """
+import asyncio
+
+import asyncssh
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -239,7 +242,6 @@ class TestInlineConnectionTest:
     @pytest.mark.integration
     def test_inline_test_auth_failed(self, client, auth_headers, mock_ssh):
         """Inline test returns failed when authentication is denied."""
-        import asyncssh
         with patch(
             "src.services.ssh_profile_service.asyncssh.connect",
             new_callable=AsyncMock,
@@ -262,7 +264,6 @@ class TestInlineConnectionTest:
     @pytest.mark.integration
     def test_inline_test_timeout(self, client, auth_headers, mock_ssh):
         """Inline test returns failed on timeout."""
-        import asyncio
         with patch(
             "src.services.ssh_profile_service.asyncssh.connect",
             new_callable=AsyncMock,
@@ -567,7 +568,6 @@ class TestSSHProfileUpdateAdvanced:
         """Replacing the private key via PUT updates key_fingerprint."""
         create_resp = _create_profile(client, auth_headers)
         profile_id = create_resp.json()["id"]
-        original_fingerprint = create_resp.json()["key_fingerprint"]
 
         resp = client.put(
             f"/api/v1/ssh-profiles/{profile_id}",
@@ -575,9 +575,7 @@ class TestSSHProfileUpdateAdvanced:
             json={"private_key": _SECOND_KEY},
         )
         assert resp.status_code == 200
-        # Key was replaced — fingerprint field exists
         assert "key_fingerprint" in resp.json()
-        # Key preview should reflect the new key type
         assert resp.json()["key_preview"].startswith("-----BEGIN")
 
     @pytest.mark.integration

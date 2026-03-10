@@ -171,7 +171,7 @@ async def execute_agent_task(
     # For HTTP: user-specific /users/{username}/sessions
     # For CLI: global SESSIONS_DIR (fallback for CLI use)
     sessions_dir = params.sessions_dir if params.sessions_dir else SESSIONS_DIR
-    
+
     agent = ClaudeAgent(
         config=agent_config,
         sessions_dir=sessions_dir,
@@ -194,6 +194,7 @@ async def execute_agent_task(
         username=params.username,  # For sandbox mount path substitution
         session_context=params.session_context,  # Pass session context if provided
         dynamic_mounts=params.dynamic_mounts,  # Dynamic mounts for this session
+        ssh_context=params.ssh_context,  # SSH tool context (if user has active profiles)
     )
 
     return result

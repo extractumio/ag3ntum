@@ -592,6 +592,7 @@ class ClaudeAgent:
         fork_session: bool = False,
         username: Optional[str] = None,
         dynamic_mounts: Optional[list] = None,
+        ssh_context: Optional[Any] = None,
     ) -> ClaudeAgentOptions:
         """
         Build ClaudeAgentOptions for the SDK.
@@ -1024,6 +1025,7 @@ class ClaudeAgent:
                 workspace_path=workspace_dir,
                 sandbox_executor=sandbox_executor,  # SECURITY: Enable bwrap for Bash
                 include_bash=include_bash,
+                ssh_context=ssh_context,
                 server_name="ag3ntum"
             )
             mcp_servers["ag3ntum"] = ag3ntum_server
@@ -1046,6 +1048,14 @@ class ClaudeAgent:
             ]
             if include_bash:
                 ag3ntum_tool_names.append("mcp__ag3ntum__Bash")
+
+            # Add SSH tool names if SSH context is available
+            if ssh_context is not None:
+                ag3ntum_tool_names.extend([
+                    "mcp__ag3ntum__SSHExec",
+                    "mcp__ag3ntum__SSHRead",
+                    "mcp__ag3ntum__SSHConnect",
+                ])
 
             # Add to all_tools so they're available for subagent tool filtering
             all_tools.extend(ag3ntum_tool_names)
@@ -1367,6 +1377,7 @@ class ClaudeAgent:
         username: Optional[str] = None,
         session_context: Optional[SessionContext] = None,
         dynamic_mounts: Optional[list] = None,
+        ssh_context: Optional[Any] = None,
     ) -> AgentResult:
         """
         Execute the agent with a task.
@@ -1403,6 +1414,7 @@ class ClaudeAgent:
                 task, system_prompt, parameters, resume_session_id, fork_session,
                 session_id=session_id, username=username, session_context=session_context,
                 dynamic_mounts=dynamic_mounts,
+                ssh_context=ssh_context,
             ),
             timeout=effective_timeout,
         )
@@ -1418,6 +1430,7 @@ class ClaudeAgent:
         username: Optional[str] = None,
         session_context: Optional[SessionContext] = None,
         dynamic_mounts: Optional[list] = None,
+        ssh_context: Optional[Any] = None,
     ) -> AgentResult:
         """
         Internal execution logic (called by run() with timeout wrapper).
@@ -1550,6 +1563,11 @@ class ClaudeAgent:
             params = parameters or {}
             role_name = params.get("role", self._config.role)
 
+            # Extract SSH profiles from context for prompt injection
+            ssh_profiles_for_prompt = None
+            if ssh_context is not None:
+                ssh_profiles_for_prompt = getattr(ssh_context, "profiles", None)
+
             try:
                 system_prompt = get_prompt_manager().build_system_prompt(
                     username=username,
@@ -1564,6 +1582,7 @@ class ClaudeAgent:
                     original_path_mounts=self._load_original_path_mounts_for_prompt(
                         username, dynamic_mounts
                     ),
+                    ssh_profiles=ssh_profiles_for_prompt,
                 )
             except FileNotFoundError as e:
                 raise AgentError(str(e)) from e
@@ -1623,6 +1642,7 @@ class ClaudeAgent:
             fork_session=fork_session,
             username=username,
             dynamic_mounts=dynamic_mounts,
+            ssh_context=ssh_context,
         )
         user_prompt = self._build_user_prompt(task, session_context, parameters)
 
