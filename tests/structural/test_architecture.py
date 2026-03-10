@@ -232,7 +232,7 @@ class TestFileSizeLimits:
         "skills/.claude/skills/create_image/image_gen.py": 800,
         # Services
         "src/services/user_service.py": 1200,
-        "src/services/agent_runner.py": 870,  # usage recording + SSH context building
+        "src/services/agent_runner.py": 860,  # usage recording + SSH context building
         "src/services/mount_service.py": 1200,
         # Core (additional)
         "src/core/output.py": 700,

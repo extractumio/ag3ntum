@@ -502,35 +502,24 @@ class AgentRunner:
                         records = await get_profiles(ssh_db, params.user_id)
                         active_records = [r for r in records if r.is_active]
                         if active_records:
-                            from .vault_encryption import VaultEncryption
-                            from .vault_service import VaultService
-                            from ..config import CONFIG_DIR
-                            import yaml as _yaml
-                            secrets_path = CONFIG_DIR / "secrets.yaml"
-                            secrets_data = {}
-                            if secrets_path.exists():
-                                with secrets_path.open("r", encoding="utf-8") as f:
-                                    secrets_data = _yaml.safe_load(f) or {}
-                            master_key = (secrets_data.get("fernet_key", "") or "").encode()
-                            if master_key:
-                                encryption = VaultEncryption(master_key=master_key)
-                                vault_svc = VaultService(vault_encryption=encryption)
-                                profiles = {
-                                    r.name: profile_to_ssh_profile(r)
-                                    for r in active_records
-                                }
-                                ssh_context = await ssh_mgr.build_session_context(
-                                    session_id=session_id,
-                                    user_id=params.user_id,
-                                    profiles=profiles,
-                                    db_session_factory=AsyncSessionLocal,
-                                    vault_service=vault_svc,
+                            from .vault_service import get_vault_service
+                            vault_svc = get_vault_service()
+                            profiles = {
+                                r.name: profile_to_ssh_profile(r)
+                                for r in active_records
+                            }
+                            ssh_context = await ssh_mgr.build_session_context(
+                                session_id=session_id,
+                                user_id=params.user_id,
+                                profiles=profiles,
+                                db_session_factory=AsyncSessionLocal,
+                                vault_service=vault_svc,
+                            )
+                            if ssh_context:
+                                logger.info(
+                                    "SSH context built for session %s (%d profiles)",
+                                    session_id, len(profiles),
                                 )
-                                if ssh_context:
-                                    logger.info(
-                                        "SSH context built for session %s (%d profiles)",
-                                        session_id, len(profiles),
-                                    )
             except Exception as ssh_err:
                 logger.warning("Failed to build SSH context: %s", ssh_err)
 

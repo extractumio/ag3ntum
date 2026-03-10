@@ -1051,10 +1051,15 @@ class ClaudeAgent:
 
             # Add SSH tool names if SSH context is available
             if ssh_context is not None:
+                from tools.ag3ntum.ag3ntum_ssh.tool import (
+                    AG3NTUM_SSH_EXEC_TOOL,
+                    AG3NTUM_SSH_READ_TOOL,
+                    AG3NTUM_SSH_CONNECT_TOOL,
+                )
                 ag3ntum_tool_names.extend([
-                    "mcp__ag3ntum__SSHExec",
-                    "mcp__ag3ntum__SSHRead",
-                    "mcp__ag3ntum__SSHConnect",
+                    AG3NTUM_SSH_EXEC_TOOL,
+                    AG3NTUM_SSH_READ_TOOL,
+                    AG3NTUM_SSH_CONNECT_TOOL,
                 ])
 
             # Add to all_tools so they're available for subagent tool filtering
@@ -1563,11 +1568,6 @@ class ClaudeAgent:
             params = parameters or {}
             role_name = params.get("role", self._config.role)
 
-            # Extract SSH profiles from context for prompt injection
-            ssh_profiles_for_prompt = None
-            if ssh_context is not None:
-                ssh_profiles_for_prompt = getattr(ssh_context, "profiles", None)
-
             try:
                 system_prompt = get_prompt_manager().build_system_prompt(
                     username=username,
@@ -1582,7 +1582,7 @@ class ClaudeAgent:
                     original_path_mounts=self._load_original_path_mounts_for_prompt(
                         username, dynamic_mounts
                     ),
-                    ssh_profiles=ssh_profiles_for_prompt,
+                    ssh_profiles=getattr(ssh_context, "profiles", None) if ssh_context else None,
                 )
             except FileNotFoundError as e:
                 raise AgentError(str(e)) from e

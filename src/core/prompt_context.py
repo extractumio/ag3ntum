@@ -157,6 +157,11 @@ def build_prompt_context(
 
     # SSH profile injection
     if ssh_profiles:
+        from tools.ag3ntum.ag3ntum_ssh.tool import (
+            AG3NTUM_SSH_EXEC_TOOL,
+            AG3NTUM_SSH_READ_TOOL,
+            AG3NTUM_SSH_CONNECT_TOOL,
+        )
         context.flags["SSH_ENABLED"] = True
         mode_labels = {
             "readonly": "L0 readonly",
@@ -178,9 +183,9 @@ def build_prompt_context(
                 line += f" — {desc}"
             lines.append(line)
         context.strings["SSH_PROFILES_BLOCK"] = "\n".join(lines)
-        context.tool_names["AG3NTUM_SSH_EXEC_TOOL"] = "mcp__ag3ntum__SSHExec"
-        context.tool_names["AG3NTUM_SSH_READ_TOOL"] = "mcp__ag3ntum__SSHRead"
-        context.tool_names["AG3NTUM_SSH_CONNECT_TOOL"] = "mcp__ag3ntum__SSHConnect"
+        context.tool_names["AG3NTUM_SSH_EXEC_TOOL"] = AG3NTUM_SSH_EXEC_TOOL
+        context.tool_names["AG3NTUM_SSH_READ_TOOL"] = AG3NTUM_SSH_READ_TOOL
+        context.tool_names["AG3NTUM_SSH_CONNECT_TOOL"] = AG3NTUM_SSH_CONNECT_TOOL
     else:
         context.flags["SSH_ENABLED"] = False
 

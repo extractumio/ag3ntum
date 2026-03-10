@@ -7,8 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...db.database import get_db
 from ...db.models import User
 from ...services import ssh_profile_service as svc
-from ...services.vault_encryption import VaultEncryption
-from ...services.vault_service import VaultService
+from ...services.vault_service import VaultService, get_vault_service
 from ..deps import get_current_user, require_admin
 from ...services.rate_limiter import check_rate_limit
 from ..ssh_profile_models import (
@@ -23,27 +22,9 @@ from ..ssh_profile_models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ssh-profiles"])
 
-# Lazy-initialized vault service (needs master key from secrets.yaml)
-_vault: VaultService | None = None
-
-
 def _get_vault() -> VaultService:
-    """Get or create VaultService with encryption from secrets.yaml."""
-    global _vault
-    if _vault is None:
-        import yaml
-        from ...config import CONFIG_DIR
-        secrets_path = CONFIG_DIR / "secrets.yaml"
-        secrets_data = {}
-        if secrets_path.exists():
-            with secrets_path.open("r", encoding="utf-8") as f:
-                secrets_data = yaml.safe_load(f) or {}
-        master_key = (secrets_data.get("fernet_key", "") or "").encode()
-        if not master_key:
-            raise RuntimeError("No fernet_key in secrets.yaml — cannot use vault")
-        encryption = VaultEncryption(master_key=master_key)
-        _vault = VaultService(vault_encryption=encryption)
-    return _vault
+    """Get or create VaultService — delegates to shared factory."""
+    return get_vault_service()
 
 
 async def _check_ssh_test_rate(user: User) -> None:

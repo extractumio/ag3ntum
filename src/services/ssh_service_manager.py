@@ -89,7 +89,7 @@ class SSHServiceManager:
         )
         from ..core.ssh.ssh_credential_vault import SSHCredentialVault
         from ..core.ssh.ssh_host_key_resolver import SSHHostKeyResolver
-        from ..services.ssh_audit_service import SSHAuditService
+        from ..services.ssh_audit_service import ssh_audit_service
 
         host_key_resolver = SSHHostKeyResolver(vault_service=vault_service)
         credential_vault = SSHCredentialVault(
@@ -97,7 +97,6 @@ class SSHServiceManager:
             security_config=self._security_config,
             host_key_resolver=host_key_resolver,
         )
-        audit_service = SSHAuditService()
         approval_store = SSHApprovalStore()
 
         # Local refs satisfy type narrowing (None guards above)
@@ -112,7 +111,7 @@ class SSHServiceManager:
             connection_pool=pool,
             command_filter=cmd_filter,
             credential_vault=credential_vault,
-            audit_service=audit_service,
+            audit_service=ssh_audit_service,
             profiles=profiles,
             db_session_factory=db_session_factory,
             approval_store=approval_store,
