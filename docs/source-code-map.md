@@ -28,12 +28,13 @@ Detailed file/class/purpose tables for all subsystems.
 | `system_reminders.py` | `ReminderType`, `get_reminder()` | 42 contextual reminders injected during agent conversations |
 | `structured_output.py` | `parse_structured_output()` | Parse structured response headers from agent output |
 | `trace_processor.py` | `TraceProcessor` | SDK message → events (delegates to circuit_breaker/pattern_detector) |
+| `ssh/` | `SSHSecurityConfig`, `SSHProfile`, `SSHConnectionPool`, `SSHCommandFilter` | SSH security config loader, connection pooling, command filtering for remote execution |
 
 ---
 
 ## API (`src/api/`)
 
-`main.py` (app factory) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `routes/reseller.py` (reseller API) | `routes/admin.py` (admin API) | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `reseller_models.py` (reseller/admin Pydantic) | `deps.py` (DI)
+`main.py` (app factory, SSHServiceManager lifespan) | `routes/sessions.py` (CRUD, SSE) | `routes/auth.py` (JWT, token revocation, rate limiting) | `routes/files.py` (file explorer) | `routes/health.py` | `routes/ssh_profiles.py` (SSH profile CRUD) | `routes/reseller.py` (reseller API) | `routes/admin.py` (admin API) | `security_middleware.py` (headers, CSP) | `waf_filter.py` (DoS, body-size tracking) | `models.py` (Pydantic) | `ssh_profile_models.py` (SSH Pydantic) | `reseller_models.py` (reseller/admin Pydantic) | `deps.py` (DI)
 
 **Auth endpoints**:
 - `POST /auth/token` — login (rate-limited: 5 failed/account/min, 20 failed/IP/min)
@@ -48,29 +49,32 @@ Detailed file/class/purpose tables for all subsystems.
 
 ## Services (`src/services/`)
 
-`agent_runner.py` (background tasks, fires session.completed webhooks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting) | `api_key_service.py` (create/validate/rotate/revoke, CIDR IP allowlisting with IPv6 normalisation, audit logging) | `api_key_rate_limiter.py` (per-key rate limiting) | `reseller_service.py` (reseller CRUD, suspension cascading) | `reseller_quota_service.py` (reseller-level quotas) | `feature_flag_service.py` (3-tier flag resolution, DB-backed platform config with load/update) | `spending_guard.py` (3-tier spending cap enforcement, fires spending alert webhooks) | `usage_service.py` (session usage recording, WHMCS metrics, CSV/JSON export) | `webhook_service.py` (CRUD, HMAC-SHA256 signed delivery, exponential retry) | `webhook_processor.py` (background retry loop, 30s interval) | `data_retention_service.py` (configurable purging of old records) | `retention_processor.py` (background daily purge job)
+`agent_runner.py` (background tasks, fires session.completed webhooks) | `session_service.py` (SQLite + files) | `event_service.py` (SSE persistence) | `redis_event_hub.py` (Pub/Sub) | `auth_service.py` (JWT, token versioning) | `user_service.py` (CRUD, shared GID setup) | `mount_service.py` (mount auth, mtime-cached) | `connection_token.py` (short-lived single-use SSE tokens) | `rate_limiter.py` (Redis-based auth rate limiting) | `api_key_service.py` (create/validate/rotate/revoke, CIDR IP allowlisting with IPv6 normalisation, audit logging) | `api_key_rate_limiter.py` (per-key rate limiting) | `reseller_service.py` (reseller CRUD, suspension cascading) | `reseller_quota_service.py` (reseller-level quotas) | `feature_flag_service.py` (3-tier flag resolution, DB-backed platform config with load/update) | `spending_guard.py` (3-tier spending cap enforcement, fires spending alert webhooks) | `usage_service.py` (session usage recording, WHMCS metrics, CSV/JSON export) | `webhook_service.py` (CRUD, HMAC-SHA256 signed delivery, exponential retry) | `webhook_processor.py` (background retry loop, 30s interval) | `data_retention_service.py` (configurable purging of old records) | `retention_processor.py` (background daily purge job) | `ssh_service_manager.py` (singleton SSH infrastructure, per-session context building) | `ssh_profile_service.py` (SSH profile CRUD, vault encryption) | `vault_service.py` (shared vault factory for secret encryption/decryption)
 
 **DB utilities** (`src/db/`): `models.py` (SQLAlchemy, includes Reseller, APIKey, APIKeyAuditLog, UsageRecord, ResellerQuota, UserSkill, ResellerSkillLibrary, PlatformConfig, WebhookEndpoint, WebhookDeliveryLog) | `retry.py` (`with_db_retry` decorator) | `alembic/versions/` (3 migrations: reseller support, platform config, webhook tables)
 
 ---
 
-## MCP Tools (`tools/ag3ntum/`) — 11 tools
+## MCP Tools (`tools/ag3ntum/`) — 14 tools
 
-| Tool | Security | Replaces |
-|------|----------|----------|
-| `mcp__ag3ntum__Read` | PathValidator | Read |
-| `mcp__ag3ntum__Write` | PathValidator | Write |
-| `mcp__ag3ntum__Edit` | PathValidator | Edit |
-| `mcp__ag3ntum__MultiEdit` | PathValidator | MultiEdit |
-| `mcp__ag3ntum__Bash` | CmdFilter + Bubblewrap + UID | Bash |
-| `mcp__ag3ntum__Glob` | PathValidator | Glob |
-| `mcp__ag3ntum__Grep` | PathValidator | Grep |
-| `mcp__ag3ntum__LS` | PathValidator | LS |
-| `mcp__ag3ntum__WebFetch` | Domain blocklist | WebFetch |
-| `mcp__ag3ntum__AskUserQuestion` | — | AskUserQuestion |
-| `mcp__ag3ntum__ReadDocument` | Size limits | *New* |
+| Tool | Security | Purpose |
+|------|----------|---------|
+| `mcp__ag3ntum__Read` | PathValidator | Read local files |
+| `mcp__ag3ntum__Write` | PathValidator | Write local files |
+| `mcp__ag3ntum__Edit` | PathValidator | Edit local files |
+| `mcp__ag3ntum__MultiEdit` | PathValidator | Batch edit local files |
+| `mcp__ag3ntum__Bash` | CmdFilter + Bubblewrap + UID | Execute shell commands |
+| `mcp__ag3ntum__Glob` | PathValidator | Find local files by pattern |
+| `mcp__ag3ntum__Grep` | PathValidator | Search local file contents |
+| `mcp__ag3ntum__LS` | PathValidator | List local directories |
+| `mcp__ag3ntum__WebFetch` | Domain blocklist | Fetch web content |
+| `mcp__ag3ntum__AskUserQuestion` | — | Ask user question |
+| `mcp__ag3ntum__ReadDocument` | Size limits | Read agent docs |
+| `mcp__ag3ntum__SSHConnect` | SSHSecurityConfig | Connect to SSH host (test connection) |
+| `mcp__ag3ntum__SSHExec` | SSHSecurityConfig + SSHCommandFilter | Execute command on SSH host |
+| `mcp__ag3ntum__SSHRead` | SSHSecurityConfig | Read file on SSH host |
 
-**Native tools BLOCKED** via `permissions.yaml` → `tools.disabled`. All ops use `mcp__ag3ntum__*`.
+**Native tools BLOCKED** via `permissions.yaml` → `tools.disabled`. All ops use `mcp__ag3ntum__*`. SSH tools (Connect/Exec/Read) only available if SSH profiles configured.
 
 ---
 
@@ -90,6 +94,26 @@ Detailed file/class/purpose tables for all subsystems.
 | `docker-compose.dev.yml` | Overrides web container for Vite dev server (HMR, npm install) |
 | `docker-compose.test.yml` | Test overlay (test entrypoint, test volumes) |
 | `docker-compose.override.yml` | Auto-generated external mounts |
+
+---
+
+## System Prompts (`prompts/system-prompts/`)
+
+| File | Purpose |
+|------|---------|
+| `01-identity.md` | Agent identity, model, platform version |
+| `02-security-constraints.md` | Security rules, forbidden operations |
+| `03-execution.md` | Execution environment, tool availability |
+| `04-context-management.md` | Context preferences (resumption, thinking) |
+| `05-tool-descriptions.md` | Tool use patterns and examples |
+| `06-output-formatting.md` | Output formatting rules |
+| `07-human-interaction.md` | Human confirmation patterns |
+| `07b-ssh.md` | **SSH remote server access** (conditional on SSH_ENABLED flag) |
+| `08-skill-management.md` | Skill creation, update, packaging |
+| `09-team-collaboration.md` | Team task management |
+| `10-compaction.md` | Message compaction rules |
+
+**Conditional prompts**: `07b-ssh.md` wrapped in `{% if SSH_ENABLED %}` block — only injected if user has SSH profiles configured.
 
 ---
 
