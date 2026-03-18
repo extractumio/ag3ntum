@@ -29,6 +29,10 @@ tools:
     - mcp__ag3ntum__WebFetch
     # Ag3ntum interactive tool (waits for user input via web UI)
     - mcp__ag3ntum__AskUserQuestion
+    # Ag3ntum SSH tools (dynamically enabled per-user via feature flags)
+    - mcp__ag3ntum__SSHConnect
+    - mcp__ag3ntum__SSHExec
+    - mcp__ag3ntum__SSHRead
     # Native tools that don't need replacement
     - Task
     - Skill
@@ -36,7 +40,7 @@ tools:
     - TodoWrite
     - NotebookEdit
     - WebSearch
-    
+
   # BLOCKED: Native Claude Code tools - replaced by Ag3ntum versions
   disabled:
     - Bash      # Use mcp__ag3ntum__Bash instead
@@ -49,7 +53,7 @@ tools:
     - LS        # Use mcp__ag3ntum__LS instead
     - WebFetch  # Use mcp__ag3ntum__WebFetch instead
     - AskUserQuestion  # Use mcp__ag3ntum__AskUserQuestion instead
-    
+
   # Legacy: permission checking is now done by tools themselves
   permission_checked: []
 
@@ -60,7 +64,7 @@ session_workspace:
     1. Bubblewrap mount namespace (for Ag3ntumBash subprocesses)
     2. Ag3ntumPathValidator (for Python file tools like Ag3ntumRead/Write/Edit)
     3. Native Claude Code tools are blocked via tools.disabled
-    
+
     These patterns are kept for backward compatibility but Ag3ntum tools
     handle their own validation.
   allow:
@@ -76,6 +80,10 @@ session_workspace:
     - mcp__ag3ntum__LS(*)
     - mcp__ag3ntum__WebFetch(*)
     - mcp__ag3ntum__AskUserQuestion(*)
+    # SSH tools (security enforced by tools themselves)
+    - mcp__ag3ntum__SSHConnect(*)
+    - mcp__ag3ntum__SSHExec(*)
+    - mcp__ag3ntum__SSHRead(*)
     # Other allowed tools
     - Task
     - Skill
@@ -83,7 +91,7 @@ session_workspace:
     - TodoWrite
     - NotebookEdit
     - WebSearch
-    
+
   deny:
     # Block ALL native Claude Code tools - use Ag3ntum versions instead
     - Bash(*)
@@ -96,7 +104,7 @@ session_workspace:
     - LS(*)
     - WebFetch(*)
     - AskUserQuestion(*)
-    
+
   allowed_dirs:
     - "{workspace}"
 
@@ -264,7 +272,7 @@ sandbox:
     # Optional: only mounted if user has configured SSH keys at /users/{username}/.ssh/
     user_ssh:
       source: "/users/{username}/.ssh"
-      target: "/root/.ssh"
+      target: "/workspace/.ssh"
       mode: ro
       optional: true
 
@@ -273,7 +281,7 @@ sandbox:
     # Optional: only mounted if user has a .gitconfig at /users/{username}/.gitconfig
     user_gitconfig:
       source: "/users/{username}/.gitconfig"
-      target: "/root/.gitconfig"
+      target: "/workspace/.gitconfig"
       mode: ro
       optional: true
 

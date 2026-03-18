@@ -14,6 +14,7 @@ from .queue import router as queue_router
 from .reseller import router as reseller_router
 from .sessions import router as sessions_router
 from .skills import router as skills_router
+from .ssh_profiles import router as ssh_profiles_router
 
 __all__ = [
     "admin_router",
@@ -27,4 +28,5 @@ __all__ = [
     "reseller_router",
     "sessions_router",
     "skills_router",
+    "ssh_profiles_router",
 ]

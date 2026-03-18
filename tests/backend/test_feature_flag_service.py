@@ -88,8 +88,8 @@ class TestGetEffective:
     def test_null_override_is_ignored(self, svc):
         svc._db_features = {"ssh_enabled": None}
         result = svc.get_platform_features()
-        # Null override does NOT apply
-        assert result["ssh_enabled"] is True
+        # Null override does NOT apply — returns hardcoded default (False)
+        assert result["ssh_enabled"] is False
 
     def test_unknown_key_in_override_is_ignored(self, svc):
         svc._db_features = {"nonexistent_feature": True}
@@ -117,7 +117,7 @@ class TestGetEffective:
         svc._db_features = {"ssh_enabled": False}
         svc.get_platform_features()
         # DEFAULT_FEATURES should not be modified
-        assert DEFAULT_FEATURES["ssh_enabled"] is True
+        assert DEFAULT_FEATURES["ssh_enabled"] is False
 
 
 # ---------------------------------------------------------------------------

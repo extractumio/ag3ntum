@@ -29,7 +29,7 @@ from ..services.session_service import InvalidSessionIdError, SessionNotFoundErr
 from ..core.logging_config import setup_backend_logging
 from ..core.subagent_manager import get_subagent_manager
 from ..db.database import engine, init_db, DATABASE_PATH
-from .routes import admin_router, auth_router, config_router, files_router, health_router, llm_proxy_router, llm_proxy_session_router, queue_router, reseller_router, sessions_router, skills_router
+from .routes import admin_router, auth_router, config_router, files_router, health_router, llm_proxy_router, llm_proxy_session_router, queue_router, reseller_router, sessions_router, skills_router, ssh_profiles_router
 from .metrics import setup_metrics
 from .waf_filter import WAFMiddleware
 from .security_middleware import (
@@ -255,6 +255,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("Could not start RetentionProcessor: %s", e)
 
+    # Initialize SSH Service Manager (agent integration)
+    try:
+        from ..services.ssh_service_manager import ssh_service_manager
+        await ssh_service_manager.initialize()
+        app.state.ssh_manager = ssh_service_manager
+    except Exception as e:
+        logger.warning("Could not initialize SSH service manager: %s", e)
+
     # Initialize SubagentManager singleton
     # This loads config/subagents.yaml and renders all prompt templates ONCE.
     # The same subagent definitions are shared across ALL users and sessions.
@@ -324,6 +332,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    # Close SSH connection pool
+    ssh_mgr = getattr(app.state, "ssh_manager", None)
+    if ssh_mgr:
+        await ssh_mgr.shutdown()
+
     if retention_processor:
         await retention_processor.stop()
         logger.info("RetentionProcessor stopped")
@@ -431,6 +444,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(config_router, prefix="/api/v1")
     app.include_router(reseller_router, prefix="/api/v1")
+    app.include_router(ssh_profiles_router, prefix="/api/v1")
 
     # Prometheus metrics (optional — requires prometheus-fastapi-instrumentator)
     setup_metrics(app)

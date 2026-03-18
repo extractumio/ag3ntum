@@ -26,6 +26,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Cached singleton — lazy-initialized on first call to get_vault_service()
+_vault_singleton: Optional["VaultService"] = None
+
+
+def get_vault_service() -> "VaultService":
+    """Get or create VaultService with encryption from secrets.yaml.
+
+    Returns the same cached instance on subsequent calls.
+    Raises RuntimeError if fernet_key is missing from secrets.yaml.
+    """
+    global _vault_singleton
+    if _vault_singleton is None:
+        import yaml
+        from ..config import CONFIG_DIR
+        secrets_path = CONFIG_DIR / "secrets.yaml"
+        secrets_data = {}
+        if secrets_path.exists():
+            with secrets_path.open("r", encoding="utf-8") as f:
+                secrets_data = yaml.safe_load(f) or {}
+        master_key = (secrets_data.get("fernet_key", "") or "").encode()
+        if not master_key:
+            raise RuntimeError("No fernet_key in secrets.yaml — cannot use vault")
+        encryption = VaultEncryption(master_key=master_key)
+        _vault_singleton = VaultService(vault_encryption=encryption)
+    return _vault_singleton
+
 
 class VaultService:
     """Unified credential management. Agent never accesses directly.

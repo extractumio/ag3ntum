@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Platform-level defaults (baseline)
 DEFAULT_FEATURES: dict[str, Any] = {
-    "ssh_enabled": True,
+    "ssh_enabled": False,
     "file_upload_enabled": True,
     "file_download_enabled": True,
     "max_session_minutes": 30,

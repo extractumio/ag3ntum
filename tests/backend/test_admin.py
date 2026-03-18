@@ -410,7 +410,7 @@ class TestServiceIntegration:
 
         # No overrides = defaults
         features = feature_flag_service.resolve_features(None, None)
-        assert features["ssh_enabled"] is True
+        assert features["ssh_enabled"] is False
         assert features["web_fetch_enabled"] is False
 
         # Reseller override

@@ -4,9 +4,17 @@ import { useAuth } from '../../AuthContext';
 import {
   listAllUsers, suspendUser, unsuspendUser,
   changeAdminUserPassword, deleteAdminUser,
+  getUserFeatures, updateUserFeatures,
 } from '../../adminApi';
-import { StatusBadge, ConfirmDialog, FormField, ReadonlyField, ImpactConfirmDialog } from '../../components/dashboard';
+import { StatusBadge, ConfirmDialog, FormField, ReadonlyField, ImpactConfirmDialog, TabbedDetail } from '../../components/dashboard';
+import type { Tab } from '../../components/dashboard';
 import type { AdminUser } from '../../types/admin';
+import { AdminSSHProfilesTab } from './AdminSSHProfilesTab';
+
+const TABS: Tab[] = [
+  { id: 'details', label: 'Details' },
+  { id: 'ssh', label: 'SSH Profiles' },
+];
 
 export function AdminUserDetail() {
   const { userId } = useParams<{ userId: string }>();
@@ -19,6 +27,8 @@ export function AdminUserDetail() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!initialUser);
 
+  const [activeTab, setActiveTab] = useState<'details' | 'ssh'>('details');
+
   const [confirmSuspend, setConfirmSuspend] = useState<'suspend' | 'unsuspend' | null>(null);
   const [showDelete, setShowDelete] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -28,6 +38,11 @@ export function AdminUserDetail() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordSuccess, setPasswordSuccess] = useState(false);
+
+  // Feature flags
+  const [sshEnabled, setSshEnabled] = useState<boolean | null>(null);
+  const [featureToggling, setFeatureToggling] = useState(false);
+  const [confirmSshToggle, setConfirmSshToggle] = useState<boolean | null>(null);
 
   const refetch = useCallback(() => {
     if (!token || !baseUrl || !userId) return;
@@ -41,9 +56,36 @@ export function AdminUserDetail() {
       .finally(() => setLoading(false));
   }, [token, baseUrl, userId]);
 
+  const fetchFeatures = useCallback(() => {
+    if (!token || !baseUrl || !userId) return;
+    getUserFeatures(baseUrl, token, userId)
+      .then((res) => {
+        setSshEnabled(Boolean(res.effective.ssh_enabled));
+      })
+      .catch(() => setSshEnabled(null));
+  }, [token, baseUrl, userId]);
+
   useEffect(() => {
     if (!initialUser) refetch();
-  }, [refetch]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchFeatures();
+  }, [refetch, fetchFeatures]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleToggleSshConfirmed = async () => {
+    if (!token || !baseUrl || !userId || confirmSshToggle === null) return;
+    setFeatureToggling(true);
+    setActionError(null);
+    try {
+      const res = await updateUserFeatures(baseUrl, token, userId, {
+        ssh_enabled: confirmSshToggle,
+      });
+      setSshEnabled(Boolean(res.effective.ssh_enabled));
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFeatureToggling(false);
+      setConfirmSshToggle(null);
+    }
+  };
 
   const handleToggleSuspend = async () => {
     if (!token || !baseUrl || !userId) return;
@@ -108,7 +150,7 @@ export function AdminUserDetail() {
             {user.email}{user.reseller_name ? ` | ${user.reseller_name}` : ''}
           </span>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
           <button
             className={`dash-btn ${user.is_active ? 'dash-btn-danger' : 'dash-btn-primary'}`}
             onClick={() => setConfirmSuspend(user.is_active ? 'suspend' : 'unsuspend')}
@@ -163,20 +205,46 @@ export function AdminUserDetail() {
         </div>
       )}
 
-      <div className="dash-section">
-        <h3 className="dash-section-title">User Info</h3>
-        <div className="dash-form-grid">
-          <ReadonlyField label="Username" value={user.username} />
-          <ReadonlyField label="Email" value={user.email} />
-          <ReadonlyField label="Role" value={user.role} />
-          <ReadonlyField label="Reseller" value={user.reseller_name ?? '—'} />
-          <div className="dash-form-group">
-            <label className="dash-form-label">Status</label>
-            <StatusBadge status={user.is_active ? 'active' : 'suspended'} />
+      <TabbedDetail tabs={TABS} activeTab={activeTab} onTabChange={(id) => setActiveTab(id as 'details' | 'ssh')}>
+        {activeTab === 'details' && (
+          <div>
+            <div className="dash-form-grid">
+              <ReadonlyField label="Username" value={user.username} />
+              <ReadonlyField label="Email" value={user.email} />
+              <ReadonlyField label="Role" value={user.role} />
+              <ReadonlyField label="Reseller" value={user.reseller_name ?? '—'} />
+              <div className="dash-form-group">
+                <label className="dash-form-label">Status</label>
+                <StatusBadge status={user.is_active ? 'active' : 'suspended'} />
+              </div>
+              <ReadonlyField label="Created" value={new Date(user.created_at).toLocaleString()} />
+            </div>
+
+            {/* Feature Flags */}
+            <div className="dash-section" style={{ marginTop: 'var(--spacing-xl, 1.5rem)' }}>
+              <h3 className="dash-section-title">Feature Access</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md, 0.75rem)', padding: 'var(--spacing-sm, 0.5rem) 0' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm, 0.5rem)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={sshEnabled === true}
+                    disabled={featureToggling || sshEnabled === null}
+                    onChange={() => setConfirmSshToggle(!sshEnabled)}
+                    style={{ width: 18, height: 18, cursor: 'pointer' }}
+                  />
+                  <span style={{ fontWeight: 500 }}>SSH Access</span>
+                </label>
+                {sshEnabled === null && <span style={{ fontSize: '0.8rem', opacity: 0.5 }}>loading...</span>}
+                {sshEnabled !== null && (
+                  <StatusBadge status={sshEnabled ? 'active' : 'suspended'} label={sshEnabled ? 'enabled' : 'disabled'} />
+                )}
+              </div>
+            </div>
           </div>
-          <ReadonlyField label="Created" value={new Date(user.created_at).toLocaleString()} />
-        </div>
-      </div>
+        )}
+
+        {activeTab === 'ssh' && <AdminSSHProfilesTab userId={user.id} />}
+      </TabbedDetail>
 
       <ConfirmDialog
         open={confirmSuspend !== null}
@@ -190,6 +258,20 @@ export function AdminUserDetail() {
         danger={confirmSuspend === 'suspend'}
         onConfirm={handleToggleSuspend}
         onCancel={() => setConfirmSuspend(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmSshToggle !== null}
+        title={confirmSshToggle ? 'Enable SSH Access' : 'Disable SSH Access'}
+        message={
+          confirmSshToggle
+            ? `Enable SSH access for ${user.username}? They will be able to create SSH connection profiles.`
+            : `Disable SSH access for ${user.username}? Active SSH sessions will lose access within 30 seconds.`
+        }
+        confirmLabel={featureToggling ? 'Saving...' : (confirmSshToggle ? 'Enable' : 'Disable')}
+        danger={!confirmSshToggle}
+        onConfirm={handleToggleSshConfirmed}
+        onCancel={() => setConfirmSshToggle(null)}
       />
 
       <ImpactConfirmDialog

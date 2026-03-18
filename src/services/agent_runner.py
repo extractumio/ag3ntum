@@ -489,6 +489,47 @@ class AgentRunner:
                         f"{session_id}: {mount_error}"
                     )
 
+            # Build SSH context if user has SSH enabled (feature flag) and active profiles
+            ssh_context = None
+            try:
+                from .ssh_service_manager import ssh_service_manager as ssh_mgr
+                if ssh_mgr and ssh_mgr.enabled and await ssh_mgr.is_user_ssh_enabled(params.user_id):
+                    async with AsyncSessionLocal() as ssh_db:
+                        from .ssh_profile_service import (
+                            get_profiles,
+                            profile_to_ssh_profile,
+                        )
+                        records = await get_profiles(ssh_db, params.user_id)
+                        active_records = [r for r in records if r.is_active]
+                        if active_records:
+                            from .vault_service import get_vault_service
+                            vault_svc = get_vault_service()
+                            profiles = {
+                                r.name: profile_to_ssh_profile(r)
+                                for r in active_records
+                            }
+                            ssh_context = await ssh_mgr.build_session_context(
+                                session_id=session_id,
+                                user_id=params.user_id,
+                                profiles=profiles,
+                                db_session_factory=AsyncSessionLocal,
+                                vault_service=vault_svc,
+                            )
+                            if ssh_context:
+                                logger.info(
+                                    "SSH context built for session %s (%d profiles)",
+                                    session_id, len(profiles),
+                                )
+                        else:
+                            logger.debug(
+                                "SSH enabled for user %s but no active profiles",
+                                params.user_id,
+                            )
+                else:
+                    logger.debug("SSH disabled for user %s (feature flag)", params.user_id)
+            except Exception as ssh_err:
+                logger.warning("Failed to build SSH context: %s", ssh_err)
+
             logger.info(f"Task: {params.task[:100]}{'...' if len(params.task) > 100 else ''}")
 
             exec_params = TaskExecutionParams(
@@ -522,6 +563,8 @@ class AgentRunner:
                 session_context=session_context,
                 # Dynamic mounts set up for this session
                 dynamic_mounts=dynamic_mount_info,
+                # SSH tool context (if user has active profiles)
+                ssh_context=ssh_context,
             )
 
             # Execute using unified task runner
@@ -662,6 +705,14 @@ class AgentRunner:
             await self._update_session_status(session_id, "failed")
 
         finally:
+            # Close SSH connections for this session
+            if ssh_context is not None:
+                try:
+                    from .ssh_service_manager import ssh_service_manager as _ssh_mgr
+                    await _ssh_mgr.cleanup_session(session_id)
+                except Exception as ssh_err:
+                    logger.warning("SSH cleanup failed for %s: %s", session_id, ssh_err)
+
             # Drain pending tracer tasks to ensure all events are persisted
             if tracer is not None:
                 try:

@@ -204,6 +204,8 @@ class SSHCredentialVault:
                 known_hosts=known_hosts,
                 keepalive_interval=30,
                 keepalive_count_max=3,
+                agent_path=None,
+                config=[],
             )
 
         return connect
@@ -253,6 +255,8 @@ class SSHCredentialVault:
                 known_hosts=known_hosts,
                 keepalive_interval=30,
                 keepalive_count_max=3,
+                agent_path=None,
+                config=[],
             )
 
         return connect
@@ -297,6 +301,8 @@ class SSHCredentialVault:
                 known_hosts=known_hosts,
                 keepalive_interval=30,
                 keepalive_count_max=3,
+                agent_path=None,
+                config=[],
             )
 
         return connect

@@ -368,6 +368,9 @@ class SandboxExecutor:
 
         cmd.extend(["--setenv", "HOME", config.environment.home])
         cmd.extend(["--setenv", "PATH", config.environment.path])
+        cmd.extend(["--setenv", "XDG_CONFIG_HOME", f"{config.environment.home}/.config"])
+        cmd.extend(["--setenv", "XDG_CACHE_HOME", f"{config.environment.home}/.cache"])
+        cmd.extend(["--setenv", "XDG_DATA_HOME", f"{config.environment.home}/.local/share"])
 
         # Prevent Python from writing .pyc bytecode cache files.
         # Skills and tools directories are mounted read-only; Python's

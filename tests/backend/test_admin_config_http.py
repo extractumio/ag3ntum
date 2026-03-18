@@ -43,7 +43,7 @@ class TestGetPlatformConfig:
         assert "ssh_enabled" in features
         assert "max_session_minutes" in features
         assert "allowed_models" in features
-        assert features["ssh_enabled"] is True
+        assert features["ssh_enabled"] is False
         assert features["max_session_minutes"] == 30
 
     @pytest.mark.integration
@@ -91,7 +91,7 @@ class TestUpdatePlatformConfig:
         assert data["default_features"]["max_session_minutes"] == 60
         assert data["default_features"]["web_fetch_enabled"] is True
         # Unchanged values remain at defaults
-        assert data["default_features"]["ssh_enabled"] is True
+        assert data["default_features"]["ssh_enabled"] is False
 
     @pytest.mark.integration
     def test_update_quotas(self, client, admin_auth_headers):

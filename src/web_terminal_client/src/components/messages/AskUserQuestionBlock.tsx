@@ -150,7 +150,7 @@ export function AskUserQuestionBlock({
             <span className="ask-waiting-icon">[...]</span>
             Loading questions...
           </div>
-          {tool.input && (
+          {Boolean(tool.input) && (
             <div className="ask-question-answer">
               <span className="ask-answer-label">Debug input:</span>
               <span className="ask-answer-value">{typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input)}</span>

@@ -1912,6 +1912,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             <span className="header-divider">│</span>
             <span className="header-meta">user: {user?.username || 'unknown'}</span>
             <button
+              className="settings-button"
+              type="button"
+              onClick={() => navigate('/settings')}
+              title="Settings"
+            >
+              ⚙
+            </button>
+            <button
               className="logout-button"
               type="button"
               onClick={logout}
@@ -2153,7 +2161,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               onModelChange={handleModelChange}
               availableModels={availableModels}
               baseUrl={config?.api.base_url}
-              token={token}
+              token={token ?? undefined}
               dynamicMounts={dynamicMounts}
               onMountsChange={setDynamicMounts}
               registerInsertText={(fn) => { insertTextFnRef.current = fn; }}

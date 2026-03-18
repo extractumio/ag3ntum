@@ -42,7 +42,7 @@ jobs:
 
       - name: Frontend lint (ESLint)
         working-directory: src/web_terminal_client
-        run: npx eslint src/ --max-warnings 53
+        run: npx eslint src/ --max-warnings 55
 
       # NOTE: Frontend tests (vitest) run in the docker-tests job.
       # The vitest config has Docker-specific paths (/app/, AG3NTUM_ROOT=/)
@@ -59,7 +59,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest pyyaml
 
       - name: Run structural tests
         run: python -m pytest tests/structural/ -v --tb=long

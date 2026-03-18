@@ -517,3 +517,7 @@ class TaskExecutionParams:
     # Dynamic mounts for this session (API only)
     # List of DynamicMountInfo objects from setup_dynamic_mounts()
     dynamic_mounts: list = field(default_factory=list)
+
+    # SSH tool context (API only, built by SSHServiceManager)
+    # Type: SSHToolContext from tools.ag3ntum.ag3ntum_ssh.tool (Any to avoid import)
+    ssh_context: Optional[Any] = None

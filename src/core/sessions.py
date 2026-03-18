@@ -71,6 +71,26 @@ def _sudo_chown(path: Path, uid: int) -> None:
         logger.warning(f"Could not set ownership of {path} to {uid}: {e}")
 
 
+def _apply_shared_ownership(path: Path, owner_uid: Optional[int]) -> None:
+    """Set owner to the session UID and group to ag3ntum.
+
+    If direct chown fails under /users/, fall back to the controlled sudo path
+    used elsewhere for session setup. This keeps session artifacts readable by
+    both the sandbox user and the API process under the shared-GID model.
+    """
+    if owner_uid is None:
+        return
+
+    try:
+        os.chown(path, owner_uid, _get_ag3ntum_gid())
+        return
+    except OSError as e:
+        if str(path).startswith("/users/"):
+            _sudo_chown(path, owner_uid)
+            return
+        logger.warning(f"Could not set ownership of {path} to {owner_uid}: {e}")
+
+
 def chown_to_session_user(path: Path, session_id: str) -> None:
     """
     Change ownership of a file/directory to the session's sandbox user.
@@ -813,19 +833,14 @@ def secure_file_write(
     file_path.chmod(mode)
 
     # Set ownership if provided (owner=sandbox user, group=ag3ntum)
-    if owner_uid is not None:
-        try:
-            os.chown(file_path, owner_uid, _get_ag3ntum_gid())
-        except OSError as e:
-            logger.warning(f"Could not set ownership of {file_path} to {owner_uid}: {e}")
+    _apply_shared_ownership(file_path, owner_uid)
 
 
 def _secure_path(path: Path, mode: int, owner_uid: Optional[int]) -> None:
     """Helper to set permissions and ownership on a path."""
     try:
         path.chmod(mode)
-        if owner_uid:
-            os.chown(path, owner_uid, _get_ag3ntum_gid())
+        _apply_shared_ownership(path, owner_uid)
     except OSError:
         pass
 
@@ -857,22 +872,27 @@ def ensure_secure_session_files(
     if not session_dir.exists():
         return
 
-    # Secure session directory with shared access
-    _secure_path(session_dir, 0o770, owner_uid)
+    # Recursively secure the entire session tree. This covers:
+    # - root session metadata (.claude.json, agent.jsonl)
+    # - workspace artifacts created by tools
+    # - Claude project JSONL resume files under projects/
+    # - debug/todos directories created by the SDK wrapper
+    #
+    # Symlinks are skipped to avoid mutating external mount targets.
+    for root, dirs, files in os.walk(session_dir, followlinks=False):
+        root_path = Path(root)
+        _secure_path(root_path, 0o770, owner_uid)
 
-    # Secure sensitive root files (still need group read for API access)
-    for sensitive_file in ["agent.jsonl", ".claude.json"]:
-        file_path = session_dir / sensitive_file
-        if file_path.exists():
+        for dirname in list(dirs):
+            dir_path = root_path / dirname
+            if dir_path.is_symlink():
+                continue
+            _secure_path(dir_path, 0o770, owner_uid)
+
+        for filename in files:
+            file_path = root_path / filename
+            if file_path.is_symlink():
+                continue
             _secure_path(file_path, 0o660, owner_uid)
-
-    # Recursively secure workspace directory with shared access
-    workspace = session_dir / "workspace"
-    if workspace.exists():
-        for root, dirs, files in os.walk(workspace):
-            root_path = Path(root)
-            _secure_path(root_path, 0o770, owner_uid)
-            for f in files:
-                _secure_path(root_path / f, 0o660, owner_uid)
 
     logger.debug(f"Secured session files: {session_dir} (owner_uid={owner_uid})")

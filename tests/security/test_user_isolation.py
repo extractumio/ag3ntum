@@ -1429,6 +1429,76 @@ class TestSessionIsolation:
         mode = (session_dir / "workspace" / "file.txt").stat().st_mode & 0o777
         assert mode == 0o660, f"workspace file: expected 0o660, got {oct(mode)}"
 
+    def test_ensure_secure_session_files_hardens_projects_and_debug_dirs(
+        self, tmp_path: Path
+    ) -> None:
+        """Hardening should cover the full session tree, not just workspace."""
+        from src.core.sessions import ensure_secure_session_files
+
+        session_dir = tmp_path / "session"
+        project_dir = session_dir / "projects" / "slug"
+        debug_dir = session_dir / "debug"
+        project_dir.mkdir(parents=True)
+        debug_dir.mkdir(parents=True)
+
+        project_file = project_dir / "resume.jsonl"
+        debug_file = debug_dir / "trace.txt"
+        project_file.write_text("test")
+        debug_file.write_text("test")
+
+        project_dir.chmod(0o755)
+        debug_dir.chmod(0o755)
+        project_file.chmod(0o600)
+        debug_file.chmod(0o644)
+
+        ensure_secure_session_files(session_dir)
+
+        assert (project_dir.stat().st_mode & 0o777) == 0o770
+        assert (debug_dir.stat().st_mode & 0o777) == 0o770
+        assert (project_file.stat().st_mode & 0o777) == 0o660
+        assert (debug_file.stat().st_mode & 0o777) == 0o660
+
+    def test_secure_file_write_falls_back_to_sudo_chown_under_users_path(
+        self, monkeypatch
+    ) -> None:
+        """When direct chown fails under /users/, the sudo fallback should run."""
+        import shutil
+        import uuid
+
+        import pytest
+
+        from src.core import sessions as sessions_mod
+
+        users_root = Path("/users") / f"pytest-secure-file-{uuid.uuid4().hex}" / "sessions" / "s1"
+        try:
+            users_root.mkdir(parents=True)
+        except PermissionError:
+            pytest.skip("Requires writable /users path")
+
+        test_file = users_root / "agent.jsonl"
+
+        calls: list[tuple[Path, int]] = []
+        real_chown = sessions_mod.os.chown
+
+        def fake_chown(path, uid, gid):
+            if str(path).startswith("/users/"):
+                raise PermissionError("simulated")
+            return real_chown(path, uid, gid)
+
+        monkeypatch.setattr(sessions_mod.os, "chown", fake_chown)
+        monkeypatch.setattr(sessions_mod, "_get_ag3ntum_gid", lambda: 1001)
+        monkeypatch.setattr(
+            sessions_mod,
+            "_sudo_chown",
+            lambda path, uid: calls.append((Path(path), uid)),
+        )
+
+        try:
+            sessions_mod.secure_file_write(test_file, "test", owner_uid=50000)
+            assert calls == [(test_file, 50000)]
+        finally:
+            shutil.rmtree(users_root.parents[2], ignore_errors=True)
+
 
 # =============================================================================
 # Test: Permission Model Constants

@@ -14,5 +14,6 @@ export default defineConfig({
   server: {
     port: Number(process.env.AG3NTUM_WEB_PORT ?? process.env.VITE_DEV_PORT ?? 50080),
     host: '0.0.0.0',
+    allowedHosts: true,
   },
 });

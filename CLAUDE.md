@@ -45,7 +45,7 @@ Consult before fixing bugs or designing features:
 | `inbound_waf_filter.md` | WAF rules, request size limits, DoS prevention |
 | `ask-user-question-logic.md` | Human-in-the-loop AskUserQuestion flow |
 
-Design plans: `docs/plans/`
+Design plans: `docs/plans/` — naming convention defined in Agent Rules → **Plan format**.
 
 ---
 
@@ -61,7 +61,9 @@ Design plans: `docs/plans/`
 - **Verify containers before testing** — before `./run.sh test` or `shell`, confirm containers are up with `docker compose ps`.
 - **Study `requirements.txt`** before adding dependencies — use existing packages, do not add redundant ones.
 - **Empty mounts are valid** — a configured external mount pointing to an empty directory is not an error. Report "no files found".
+- **Branch hygiene for new work** — before starting a new feature or large change, check the current branch. If the branch is already merged, fetch the latest main (`git fetch origin main && git checkout main && git pull`) and create a fresh branch so all changes land in a new branch and new PR.
 - **Follow task management flow** — use Plane for all task tracking. Transition states as you work. Use worktrees for all changes. Never merge PRs — only humans merge.
+- **Plan format** — when asked to create a plan, produce two files under `docs/plans/`: (1) `plan-<YYYYMMDD-HHMM>-<feature-slug>.md` (implementation plan: goals, design, steps, trade-offs) and (2) `plan-checklist-<YYYYMMDD-HHMM>-<feature-slug>.md` (verification checklist: code landed, tests passing, docs updated, lint clean, acceptance criteria met). Use current date-time. The checklist ensures the plan was executed correctly and all deliverables are ready.
 
 → See [docs/internals/ag3ntum-task-management-and-flow.md](docs/internals/ag3ntum-task-management-and-flow.md) for full workflow: task states, branching, testing requirements, commit conventions, Definition of Done.
 
@@ -191,9 +193,7 @@ Design plans: `docs/plans/`
 
 Three-tier hierarchy: Admin (`ag3_adm_`) → Reseller (`ag3_res_`) → End-User. Routes: `/api/v1/reseller/*`, `/api/v1/admin/*`. Services: `APIKeyService`, `ResellerService`, `ResellerQuotaService`, `FeatureFlagService`, `SpendingGuard`, `UsageService`, `WebhookService`, `DataRetentionService`. Spending caps: Platform → Reseller → User (daily/monthly/per-session). Feature flags: Platform → Reseller → User (null = inherit). Settings mode: "readonly" | "configurable". IDOR prevention: `_get_owned_user()` on all reseller endpoints.
 
-**Phase 2 additions**: CIDR IP allowlisting on API keys. Audit logging (`GET /admin/audit`). Platform config mutation (`PUT /admin/config` for features/quotas/spending, null resets to default). WHMCS metrics (`GET /reseller/usage/metrics`). Usage export (`GET /reseller/usage/export` JSON/CSV). Webhook CRUD with HMAC-SHA256 signing + exponential retry (`/reseller/webhooks`). Data retention with configurable purge periods (`GET/PUT /admin/retention`, `POST /admin/retention/run`). Background processors: `WebhookProcessor` (30s retry), `RetentionProcessor` (24h purge). Admin/reseller dashboard pages (frontend).
-
-→ See `docs/plans/enable-reselling/` for detailed design.
+**Phase 2 additions**: CIDR IP allowlisting on API keys. Audit logging (`GET /admin/audit`). Platform config mutation (`PUT /admin/config` for features/quotas/spending, null resets to default). WHMCS metrics (`GET /reseller/usage/metrics`). Usage export (`GET /reseller/usage/export` JSON/CSV). Webhook CRUD with HMAC-SHA256 signing + exponential retry (`/reseller/webhooks`). Data retention with configurable purge periods (`GET/PUT /admin/retention`, `POST /admin/retention/run`). Background processors: `WebhookProcessor` (30s retry), `RetentionProcessor` (24h purge). Admin/reseller dashboard pages (frontend). → See `docs/plans/enable-reselling/` for detailed design.
 
 ---
 
@@ -244,7 +244,7 @@ Version: `VERSION` file (semver). Branch: `main` (dev) | `release` (stable). →
 27. **Shared Vite config** — `vite.shared.mjs` shared by `vite.config.mjs` + `vitest.config.mjs`. Entrypoint copies to `/tmp/vite-*/`.
 28. **`docker compose exec` = root** — Use `-u 45045:45045` for npm/vite/node to avoid root-owned files breaking entrypoint.
 29. **External mount dirs may be empty** — A configured mount pointing to an empty host dir is valid. Report "no files found", do not error or retry.
-30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
-31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
+30. **Rebase + verify commits** — Run `git pull --rebase origin main` before committing. After commit, `git status` + `git diff` to check completeness. Amend if needed. Re-run tests — hooks test the working tree, not the commit.
 32. **Reseller user creation = role=user only** — Reseller API hardcodes role='user'. Reseller cannot create admin or reseller accounts.
 33. **Use `./upgrade.sh` for upgrades** — not `git pull` + `./run.sh build`. Direct build skips DB migration, config migration, and backup.
+34. **Rebuild UI after frontend changes** — `.tsx`/`.ts`/`.css` changes require `./run.sh build` (or `build --dev`). Frontend is served from a Docker-built bundle.

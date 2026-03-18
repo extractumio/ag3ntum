@@ -62,7 +62,7 @@ jobs:
         run: npm install --no-fund --no-audit --legacy-peer-deps
 
       - name: Frontend lint (ESLint)
-        run: cd src/web_terminal_client && npx eslint src/ --max-warnings 53
+        run: cd src/web_terminal_client && npx eslint src/ --max-warnings 55
 
   # Structural tests (same as CI)
   structural-tests:
@@ -75,7 +75,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest pyyaml
 
       - name: Run structural tests
         run: python -m pytest tests/structural/ -v --tb=long

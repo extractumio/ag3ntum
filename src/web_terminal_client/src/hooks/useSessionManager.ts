@@ -106,7 +106,7 @@ export function useSessionManager(
         });
 
         // Seed events with initial user message if needed
-        const seededEvents = seedSessionEvents(sessionData, eventsResponse.events);
+        const seededEvents = seedSessionEvents(sessionData, eventsResponse);
         return seededEvents;
       } catch (err) {
         console.error('Failed to load session:', err);

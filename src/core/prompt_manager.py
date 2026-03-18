@@ -103,6 +103,7 @@ class PromptManager:
         external_mounts: Optional[dict[str, Any]] = None,
         dynamic_mounts: Optional[list] = None,
         original_path_mounts: Optional[list] = None,
+        ssh_profiles: Optional[dict[str, Any]] = None,
     ) -> str:
         """
         Build the complete system prompt.
@@ -155,6 +156,7 @@ class PromptManager:
             external_mounts=external_mounts,
             dynamic_mounts=dynamic_mounts,
             original_path_mounts=original_path_mounts,
+            ssh_profiles=ssh_profiles,
         )
 
         # Load and render each system prompt component

@@ -900,3 +900,208 @@ class TestAgentConfigProperties:
             thinking_tokens=16000,
         )
         assert cfg.effective_thinking_tokens is None
+
+
+# ===================================================================
+# TestSSHToolsPreApproval (REGRESSION — permission denied bug)
+# ===================================================================
+class TestSSHToolsPreApproval:
+    """
+    Verify SSH tools are pre-approved when ssh_context is present.
+
+    Regression test for bug where SSH tools were added to the SDK's
+    available tools list (tools=) but NOT to the pre-approved list
+    (allowed_tools=). This caused the permission callback to deny
+    every SSH tool call with "permission denied".
+
+    Root cause: allowed_tools was computed early in _build_options()
+    before SSH tools were added to all_tools during MCP server setup.
+    Fix: SSH tool names are now added to allowed_tools alongside
+    all_tools when ssh_context is not None.
+    """
+
+    SSH_TOOL_NAMES = [
+        "mcp__ag3ntum__SSHExec",
+        "mcp__ag3ntum__SSHRead",
+        "mcp__ag3ntum__SSHConnect",
+    ]
+
+    def _make_session_context(self, session_id="test-session"):
+        from src.core.schemas import SessionContext
+        return SessionContext(session_id=session_id)
+
+    def _make_permission_manager(self):
+        """Create a mock PermissionManager with standard Ag3ntum tool config."""
+        mock_pm = MagicMock()
+
+        # Build a realistic active_profile
+        profile = MagicMock()
+        profile.name = "user"
+
+        tools = MagicMock()
+        tools.enabled = [
+            "mcp__ag3ntum__Read", "mcp__ag3ntum__Write",
+            "mcp__ag3ntum__Edit", "mcp__ag3ntum__Bash",
+            "mcp__ag3ntum__Glob", "mcp__ag3ntum__Grep",
+        ]
+        tools.disabled = ["Bash", "Read", "Write", "Edit"]
+        tools.permission_checked = []
+        profile.tools = tools
+        profile.permissions = MagicMock()
+        profile.permissions.allow = ["mcp__ag3ntum__Bash(*)"]
+        profile.permissions.deny = ["Bash(*)"]
+        profile.permissions.ask = []
+        profile.permissions.allowed_dirs = []
+        profile.sandbox = None
+        profile.checkpointing = None
+
+        mock_pm.profile = profile
+        mock_pm.active_profile = profile
+        mock_pm.activate.return_value = profile
+        mock_pm.get_permission_checked_tools.return_value = set()
+        mock_pm.get_disabled_tools.return_value = set(tools.disabled)
+        mock_pm.get_allowed_dirs.return_value = []
+        mock_pm.get_sandbox_config.return_value = None
+
+        return mock_pm
+
+    def _make_ssh_context(self):
+        """Create a minimal SSH context mock."""
+        ctx = MagicMock()
+        ctx.profiles = {"test-server": MagicMock()}
+        return ctx
+
+    def _build_options_with_patches(self, agent, mocks, ssh_context=None):
+        """
+        Call _build_options with enough patches to get past MCP server setup.
+
+        Returns the ClaudeAgentOptions object.
+        """
+        ctx = self._make_session_context()
+        workspace = Path("/tmp/test-workspace")
+
+        mocks["session_manager"].get_session_dir.return_value = Path("/tmp/test-session")
+        mocks["session_manager"].get_workspace_dir.return_value = workspace
+
+        with patch("src.core.agent_core.load_sandboxed_envs", return_value={}), \
+             patch("src.core.agent_core._get_proxy_base_url_for_model", return_value=None), \
+             patch("src.core.agent_core.configure_path_validator"), \
+             patch("src.core.agent_core.set_session_linux_uid"), \
+             patch("src.core.agent_core.create_ag3ntum_tools_mcp_server") as mock_mcp, \
+             patch("src.core.agent_core.get_subagent_manager") as mock_sam, \
+             patch("src.core.agent_core.create_pre_compact_hook", return_value=MagicMock()):
+
+            mock_mcp.return_value = MagicMock()  # MCP server mock
+            mock_sam.return_value = MagicMock(
+                get_agents_dict=MagicMock(return_value={}),
+            )
+
+            options = agent._build_options(
+                session_context=ctx,
+                system_prompt="You are a helpful agent.",
+                ssh_context=ssh_context,
+            )
+
+        return options
+
+    def test_ssh_tools_in_allowed_tools_when_context_present(self):
+        """SSH tools MUST be in allowed_tools when ssh_context is provided.
+
+        This is the core regression test. Without the fix, SSH tools
+        appear in tools= (available) but not allowed_tools= (pre-approved),
+        causing the permission callback to deny them.
+        """
+        mock_pm = self._make_permission_manager()
+        agent, mocks = _build_agent(
+            permission_manager=mock_pm,
+            config=_make_agent_config(allowed_tools=[
+                "mcp__ag3ntum__Read", "mcp__ag3ntum__Bash",
+            ]),
+        )
+
+        ssh_ctx = self._make_ssh_context()
+        options = self._build_options_with_patches(agent, mocks, ssh_context=ssh_ctx)
+
+        for tool_name in self.SSH_TOOL_NAMES:
+            assert tool_name in options.allowed_tools, (
+                f"{tool_name} must be pre-approved (in allowed_tools) "
+                f"when ssh_context is present. Without this, the SDK's "
+                f"permission system denies the tool."
+            )
+
+    def test_ssh_tools_in_tools_list_when_context_present(self):
+        """SSH tools MUST be in the tools list (available) when ssh_context is provided."""
+        mock_pm = self._make_permission_manager()
+        agent, mocks = _build_agent(
+            permission_manager=mock_pm,
+            config=_make_agent_config(allowed_tools=[
+                "mcp__ag3ntum__Read", "mcp__ag3ntum__Bash",
+            ]),
+        )
+
+        ssh_ctx = self._make_ssh_context()
+        options = self._build_options_with_patches(agent, mocks, ssh_context=ssh_ctx)
+
+        for tool_name in self.SSH_TOOL_NAMES:
+            assert tool_name in options.tools, (
+                f"{tool_name} must be in the tools list (available) "
+                f"when ssh_context is present."
+            )
+
+    def test_ssh_tools_absent_when_no_context(self):
+        """SSH tools MUST NOT be in tools or allowed_tools when ssh_context is None."""
+        mock_pm = self._make_permission_manager()
+        agent, mocks = _build_agent(
+            permission_manager=mock_pm,
+            config=_make_agent_config(allowed_tools=[
+                "mcp__ag3ntum__Read", "mcp__ag3ntum__Bash",
+            ]),
+        )
+
+        options = self._build_options_with_patches(agent, mocks, ssh_context=None)
+
+        for tool_name in self.SSH_TOOL_NAMES:
+            assert tool_name not in options.tools, (
+                f"{tool_name} must NOT be in tools when ssh_context is None"
+            )
+            assert tool_name not in options.allowed_tools, (
+                f"{tool_name} must NOT be in allowed_tools when ssh_context is None"
+            )
+
+    def test_ssh_tools_not_in_disallowed_tools(self):
+        """SSH tools must never appear in disallowed_tools."""
+        mock_pm = self._make_permission_manager()
+        agent, mocks = _build_agent(
+            permission_manager=mock_pm,
+            config=_make_agent_config(allowed_tools=[
+                "mcp__ag3ntum__Read", "mcp__ag3ntum__Bash",
+            ]),
+        )
+
+        ssh_ctx = self._make_ssh_context()
+        options = self._build_options_with_patches(agent, mocks, ssh_context=ssh_ctx)
+
+        for tool_name in self.SSH_TOOL_NAMES:
+            assert tool_name not in options.disallowed_tools, (
+                f"{tool_name} must NOT be in disallowed_tools"
+            )
+
+    def test_existing_tools_preserved_with_ssh_context(self):
+        """Adding SSH tools must not remove existing pre-approved tools."""
+        mock_pm = self._make_permission_manager()
+        agent, mocks = _build_agent(
+            permission_manager=mock_pm,
+            config=_make_agent_config(allowed_tools=[
+                "mcp__ag3ntum__Read", "mcp__ag3ntum__Bash",
+                "mcp__ag3ntum__Write",
+            ]),
+        )
+
+        ssh_ctx = self._make_ssh_context()
+        options = self._build_options_with_patches(agent, mocks, ssh_context=ssh_ctx)
+
+        # Standard tools must still be present
+        for tool in ["mcp__ag3ntum__Read", "mcp__ag3ntum__Bash", "mcp__ag3ntum__Write"]:
+            assert tool in options.allowed_tools, (
+                f"Standard tool {tool} must remain pre-approved after SSH tools are added"
+            )

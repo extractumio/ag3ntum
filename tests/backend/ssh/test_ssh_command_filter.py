@@ -93,7 +93,8 @@ class TestSSHCommandFilter:
     @pytest.mark.unit
     def test_l0_blocks_arbitrary_command(self, command_filter):
         """An unlisted command is blocked at L0."""
-        r = command_filter.check_command("cat /etc/shadow", 0)
+        # cat /etc/shadow matches the broad cat pattern — use a truly unlisted command
+        r = command_filter.check_command("apt install something", 0)
         assert not r.allowed
 
     # -----------------------------------------------------------------------
@@ -646,9 +647,9 @@ class TestCompoundCommands:
 
     @pytest.mark.unit
     def test_l1_blocks_compound_with_dangerous_second_part(self, command_filter):
-        """sudo systemctl restart nginx; cat /etc/shadow is blocked at L1."""
+        """sudo systemctl restart nginx; apt install pkg blocked at L1."""
         r = command_filter.check_command(
-            "sudo systemctl restart nginx; cat /etc/shadow", 1
+            "sudo systemctl restart nginx; apt install pkg", 1
         )
         assert not r.allowed
 
@@ -960,6 +961,30 @@ class TestWordPressCommands:
         """wp eval is not in any allowlist — blocked at L1."""
         r = command_filter.check_command("wp eval 'phpinfo();'", 1)
         assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_lastb(self, command_filter):
+        """L0 should allow failed-login inspection for auth diagnostics."""
+        r = command_filter.check_command("lastb -n 20", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_journalctl_since_for_ssh(self, command_filter):
+        """L0 should allow bounded SSH auth log inspection via journalctl."""
+        r = command_filter.check_command(
+            'journalctl -u ssh --since "2026-03-17 00:00:00" --no-pager -n 50',
+            0,
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_auth_log_grep(self, command_filter):
+        """L0 should allow targeted auth-log grep on standard Linux paths."""
+        r = command_filter.check_command(
+            'grep "Failed password" /var/log/auth.log',
+            0,
+        )
+        assert r.allowed
 
 
 class TestPlainVariableBlocking:
