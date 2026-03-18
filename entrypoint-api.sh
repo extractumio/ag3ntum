@@ -37,5 +37,8 @@ chown -R 45045:45045 /data 2>/dev/null || true
 
 # Drop to ag3ntum_api with refreshed supplementary groups.
 # --init-groups reads /etc/group to set the correct group list.
+# Set HOME to match the target user — setpriv does not update env vars,
+# leaving HOME=/root which UID 45045 cannot access (mode 700).
+export HOME=/home/ag3ntum_api
 exec setpriv --reuid=45045 --regid=45045 --init-groups \
     --inh-caps=+setgid --ambient-caps=+setgid -- "$@"

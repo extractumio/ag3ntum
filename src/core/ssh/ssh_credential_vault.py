@@ -206,6 +206,8 @@ class SSHCredentialVault:
                 keepalive_count_max=3,
                 agent_path=None,
                 config=[],
+                x509_trusted_certs=None,
+                x509_trusted_cert_paths=[],
             )
 
         return connect
@@ -257,6 +259,8 @@ class SSHCredentialVault:
                 keepalive_count_max=3,
                 agent_path=None,
                 config=[],
+                x509_trusted_certs=None,
+                x509_trusted_cert_paths=[],
             )
 
         return connect
@@ -303,6 +307,8 @@ class SSHCredentialVault:
                 keepalive_count_max=3,
                 agent_path=None,
                 config=[],
+                x509_trusted_certs=None,
+                x509_trusted_cert_paths=[],
             )
 
         return connect
