@@ -244,8 +244,7 @@ Version: `VERSION` file (semver). Branch: `main` (dev) | `release` (stable). →
 27. **Shared Vite config** — `vite.shared.mjs` shared by `vite.config.mjs` + `vitest.config.mjs`. Entrypoint copies to `/tmp/vite-*/`.
 28. **`docker compose exec` = root** — Use `-u 45045:45045` for npm/vite/node to avoid root-owned files breaking entrypoint.
 29. **External mount dirs may be empty** — A configured mount pointing to an empty host dir is valid. Report "no files found", do not error or retry.
-30. **Rebase before commit** — Before committing, run `git pull --rebase origin main` to pick up changes that landed while working. Long sessions (testing cycles, multi-task batches) are especially prone to main diverging.
-31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
+30. **Rebase + verify commits** — Run `git pull --rebase origin main` before committing. After commit, `git status` + `git diff` to check completeness. Amend if needed. Re-run tests — hooks test the working tree, not the commit.
 32. **Reseller user creation = role=user only** — Reseller API hardcodes role='user'. Reseller cannot create admin or reseller accounts.
 33. **Use `./upgrade.sh` for upgrades** — not `git pull` + `./run.sh build`. Direct build skips DB migration, config migration, and backup.
-34. **Rebuild UI after frontend changes** — `.tsx`/`.ts`/`.css` changes require `./run.sh build` (or `build --dev`) to be visible. The frontend is served from a Docker-built bundle, not live source files.
+34. **Rebuild UI after frontend changes** — `.tsx`/`.ts`/`.css` changes require `./run.sh build` (or `build --dev`). Frontend is served from a Docker-built bundle.

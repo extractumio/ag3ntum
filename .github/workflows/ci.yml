@@ -59,7 +59,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest pyyaml
 
       - name: Run structural tests
         run: python -m pytest tests/structural/ -v --tb=long
