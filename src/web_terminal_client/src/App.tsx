@@ -2161,7 +2161,7 @@ function App({ initialSessionId }: AppProps): JSX.Element {
               onModelChange={handleModelChange}
               availableModels={availableModels}
               baseUrl={config?.api.base_url}
-              token={token}
+              token={token ?? undefined}
               dynamicMounts={dynamicMounts}
               onMountsChange={setDynamicMounts}
               registerInsertText={(fn) => { insertTextFnRef.current = fn; }}

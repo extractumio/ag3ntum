@@ -62,8 +62,8 @@ export function RightPanelDetails({
   // Type narrowing for agent_message and output types
   const toolCalls = message.type === 'agent_message' ? message.toolCalls : [];
   const subagents = message.type === 'agent_message' ? message.subagents : [];
-  const comments = message.comments;
-  const files = message.files;
+  const comments = (message.type === 'agent_message' || message.type === 'output') ? message.comments : undefined;
+  const files = (message.type === 'agent_message' || message.type === 'output') ? message.files : undefined;
 
   const hasContent = toolCalls.length > 0 || subagents.length > 0 || Boolean(comments) || Boolean(files?.length);
 

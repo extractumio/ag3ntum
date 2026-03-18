@@ -115,8 +115,13 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
       return undefined;
     };
 
-    const reuseLastAgentMessage = (): ConversationItem | null => {
+    type AgentMessage = Extract<ConversationItem, { type: 'agent_message' }>;
+
+    const reuseLastAgentMessage = (): AgentMessage | null => {
       if (!lastAgentMessage) {
+        return null;
+      }
+      if (lastAgentMessage.type !== 'agent_message') {
         return null;
       }
       if (lastAgentMessage.content || lastAgentMessage.status) {
@@ -142,7 +147,7 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
         if (!existing) {
           items.push(toolMessage);
         } else {
-          toolMessage.toolCalls = pendingTools;
+          existing.toolCalls = pendingTools;
         }
         lastAgentMessage = toolMessage;
         pendingTools = [];
@@ -151,6 +156,9 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
 
     const attachFilesToMessage = (message: ConversationItem | null) => {
       if (!message || pendingFiles.size === 0) {
+        return;
+      }
+      if (message.type !== 'agent_message' && message.type !== 'output') {
         return;
       }
       const files = Array.from(pendingFiles);
@@ -272,7 +280,11 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
           const toolName = String(event.data.tool_name ?? 'Tool');
           const toolId = String(event.data.tool_id ?? `tool-${toolIdCounter}`);
           // Handle tool_input that may come as string (JSON) or object
-          let toolInput: Record<string, unknown> | string | undefined = event.data.tool_input;
+          const rawToolInput = event.data.tool_input;
+          let toolInput: Record<string, unknown> | string | undefined =
+            typeof rawToolInput === 'string' || (rawToolInput !== null && typeof rawToolInput === 'object')
+              ? (rawToolInput as Record<string, unknown> | string)
+              : undefined;
           if (typeof toolInput === 'string' && toolInput.trim().startsWith('{')) {
             try {
               toolInput = JSON.parse(toolInput);
@@ -467,13 +479,14 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
             currentStreamMessage = null;
           } else if (bodyText || pendingTools.length > 0) {
             const existing = reuseLastAgentMessage();
+            const existingAgent = existing?.type === 'agent_message' ? existing : null;
             const agentMessage: ConversationItem = {
               type: 'agent_message',
               id: existing?.id ?? `agent-${items.length}`,
               time: existing?.time ?? formatTimestamp(event.timestamp),
               content: bodyText,
-              toolCalls: existing?.toolCalls ?? pendingTools,
-              subagents: existing?.subagents ?? pendingSubagents,
+              toolCalls: existingAgent?.toolCalls ?? pendingTools,
+              subagents: existingAgent?.subagents ?? pendingSubagents,
               messageStatus,
               messageErrorMessage,
               requestStatus,
@@ -575,28 +588,30 @@ export function useConversation(events: TerminalEvent[]): ConversationItem[] {
           break;
         }
         case 'error': {
-          const outputText = lastAgentMessage?.content?.trim() || 'Task failed.';
+          const lastAgent = lastAgentMessage?.type === 'agent_message' ? lastAgentMessage : null;
+          const outputText = lastAgent?.content?.trim() || 'Task failed.';
           items.push({
             type: 'output',
             id: `output-${items.length}`,
             time: formatTimestamp(event.timestamp),
             output: outputText,
             comments: undefined,
-            files: lastAgentMessage?.files ?? [],
+            files: lastAgent?.files ?? [],
             status: 'failed',
             error: String(event.data.message ?? 'Unknown error'),
           });
           break;
         }
         case 'cancelled': {
-          const outputText = lastAgentMessage?.content?.trim() || 'Task cancelled.';
+          const lastAgent = lastAgentMessage?.type === 'agent_message' ? lastAgentMessage : null;
+          const outputText = lastAgent?.content?.trim() || 'Task cancelled.';
           items.push({
             type: 'output',
             id: `output-${items.length}`,
             time: formatTimestamp(event.timestamp),
             output: outputText,
             comments: undefined,
-            files: lastAgentMessage?.files ?? [],
+            files: lastAgent?.files ?? [],
             status: 'cancelled',
             error: 'Task was cancelled.',
           });

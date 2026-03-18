@@ -516,22 +516,21 @@ export function extractTodos(toolCalls: ToolCallView[]): TodoItem[] | null {
     return null;
   }
 
-  return rawTodos
-    .map((todo) => {
-      if (!todo || typeof todo !== 'object') {
-        return null;
-      }
-      const item = todo as { content?: unknown; status?: unknown; activeForm?: unknown };
-      if (typeof item.content !== 'string' || typeof item.status !== 'string') {
-        return null;
-      }
-      return {
-        content: item.content,
-        status: item.status,
-        activeForm: typeof item.activeForm === 'string' ? item.activeForm : undefined,
-      };
-    })
-    .filter((item): item is TodoItem => Boolean(item));
+  const mapped: Array<TodoItem | null> = rawTodos.map((todo) => {
+    if (!todo || typeof todo !== 'object') {
+      return null;
+    }
+    const item = todo as { content?: unknown; status?: unknown; activeForm?: unknown };
+    if (typeof item.content !== 'string' || typeof item.status !== 'string') {
+      return null;
+    }
+    return {
+      content: item.content,
+      status: item.status,
+      activeForm: typeof item.activeForm === 'string' ? item.activeForm : undefined,
+    };
+  });
+  return mapped.filter((item): item is TodoItem => item !== null);
 }
 
 // Convert Python repr format to JSON string
