@@ -83,12 +83,16 @@ def _make_fake_connection(server_key=None):
 
 @pytest.fixture
 def mock_vault(test_app):
-    """Inject a test VaultService into the SSH profiles router."""
+    """Inject a test VaultService and bypass SSH feature-flag check."""
     encryption = VaultEncryption(master_key=b"test-master-key-for-hkdf-testing")
     vault = VaultService(vault_encryption=encryption)
-    with patch("src.api.routes.ssh_profiles._get_vault", return_value=vault):
-        with patch("src.api.routes.ssh_profiles._vault", vault):
-            yield vault
+    with patch("src.api.routes.ssh_profiles._get_vault", return_value=vault), \
+         patch(
+             "src.services.ssh_service_manager.SSHServiceManager.is_user_ssh_enabled",
+             new_callable=AsyncMock,
+             return_value=True,
+         ):
+        yield vault
 
 
 @pytest.fixture

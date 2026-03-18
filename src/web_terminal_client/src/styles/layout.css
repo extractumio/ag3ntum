@@ -251,6 +251,25 @@
   font-size: var(--font-base);
 }
 
+.settings-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-base);
+  font-weight: bold;
+  padding: var(--spacing-xs) var(--spacing-md);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition-normal);
+  margin-left: var(--spacing-xs);
+}
+
+.settings-button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .logout-button {
   background: transparent;
   border: 1px solid var(--color-border);
@@ -377,4 +396,3 @@
   font-weight: 600;
   font-family: inherit;
 }
-

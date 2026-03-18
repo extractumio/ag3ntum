@@ -71,6 +71,11 @@
   gap: var(--spacing-md);
 }
 
+.dash-back-to-chat {
+  font-weight: bold;
+  color: var(--color-accent) !important;
+}
+
 .dash-content {
   flex: 1;
   padding: var(--spacing-4xl);

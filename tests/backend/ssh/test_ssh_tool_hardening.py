@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tools.ag3ntum.ag3ntum_ssh.tool import (
     _redact_credentials,
@@ -41,6 +41,18 @@ def _load_example_redaction_patterns():
 
 
 _EXAMPLE_REDACTION_PATTERNS = _load_example_redaction_patterns()
+
+
+# Auto-mock _check_ssh_enabled to return True for all tests in this module
+@pytest.fixture(autouse=True)
+def mock_ssh_enabled_check():
+    """Default: SSH is enabled for the test user."""
+    with patch(
+        "tools.ag3ntum.ag3ntum_ssh.tool._check_ssh_enabled",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------

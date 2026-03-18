@@ -513,6 +513,31 @@ export async function getWebhookDeliveries(
 }
 
 // ---------------------------------------------------------------------------
+// Admin — User Features
+// ---------------------------------------------------------------------------
+
+export interface UserFeaturesResponse {
+  effective: Record<string, unknown>;
+  user_overrides: Record<string, unknown>;
+  toggleable: string[];
+}
+
+export async function getUserFeatures(
+  baseUrl: string, token: string, userId: string,
+): Promise<UserFeaturesResponse> {
+  return authenticatedRequest(baseUrl, `/api/v1/admin/users/${userId}/features`, token);
+}
+
+export async function updateUserFeatures(
+  baseUrl: string, token: string, userId: string, features: Record<string, unknown>,
+): Promise<UserFeaturesResponse> {
+  return authenticatedRequest(baseUrl, `/api/v1/admin/users/${userId}/features`, token, {
+    method: 'PUT',
+    body: JSON.stringify(features),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Admin — User SSH Profiles
 // ---------------------------------------------------------------------------
 

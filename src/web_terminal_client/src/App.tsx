@@ -1912,6 +1912,14 @@ function App({ initialSessionId }: AppProps): JSX.Element {
             <span className="header-divider">│</span>
             <span className="header-meta">user: {user?.username || 'unknown'}</span>
             <button
+              className="settings-button"
+              type="button"
+              onClick={() => navigate('/settings')}
+              title="Settings"
+            >
+              ⚙
+            </button>
+            <button
               className="logout-button"
               type="button"
               onClick={logout}

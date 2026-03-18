@@ -44,16 +44,21 @@ _BASE_PAYLOAD = {
 
 @pytest.fixture
 def mock_vault(test_app):
-    """Inject a test VaultService into the SSH profiles router.
+    """Inject a test VaultService and bypass SSH feature-flag check.
 
-    Patches both _get_vault() and the _vault module-level singleton so all
-    route calls use the in-memory test vault rather than reading secrets.yaml.
+    Patches _get_vault() so all route calls use the in-memory test vault
+    rather than reading secrets.yaml. Also patches is_user_ssh_enabled
+    to always return True so _require_ssh_enabled doesn't block requests.
     """
     encryption = VaultEncryption(master_key=b"test-master-key-for-hkdf-testing")
     vault = VaultService(vault_encryption=encryption)
-    with patch("src.api.routes.ssh_profiles._get_vault", return_value=vault):
-        with patch("src.api.routes.ssh_profiles._vault", vault):
-            yield vault
+    with patch("src.api.routes.ssh_profiles._get_vault", return_value=vault), \
+         patch(
+             "src.services.ssh_service_manager.SSHServiceManager.is_user_ssh_enabled",
+             new_callable=AsyncMock,
+             return_value=True,
+         ):
+        yield vault
 
 
 @pytest.fixture

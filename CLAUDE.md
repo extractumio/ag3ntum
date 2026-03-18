@@ -248,3 +248,4 @@ Version: `VERSION` file (semver). Branch: `main` (dev) | `release` (stable). →
 31. **Verify commit completeness** — After committing, run `git status` + `git diff`. If unstaged changes remain that belong in the commit, amend or follow up. Then run tests again — pre-commit tests run against the working tree (including unstaged files), so they can pass even when the commit is incomplete.
 32. **Reseller user creation = role=user only** — Reseller API hardcodes role='user'. Reseller cannot create admin or reseller accounts.
 33. **Use `./upgrade.sh` for upgrades** — not `git pull` + `./run.sh build`. Direct build skips DB migration, config migration, and backup.
+34. **Rebuild UI after frontend changes** — `.tsx`/`.ts`/`.css` changes require `./run.sh build` (or `build --dev`) to be visible. The frontend is served from a Docker-built bundle, not live source files.

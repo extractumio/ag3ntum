@@ -1,5 +1,4 @@
-import React from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../../AuthContext';
 
 interface NavItem {
@@ -14,6 +13,13 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ title, navItems }: DashboardLayoutProps) {
   const { user, logout } = useAuth();
+  const location = useLocation();
+
+  const isNavActive = (to: string) => {
+    const path = location.pathname.replace(/\/+$/, '') || '/';
+    const target = to.replace(/\/+$/, '') || '/';
+    return path === target;
+  };
 
   return (
     <div className="dash-layout">
@@ -27,17 +33,14 @@ export function DashboardLayout({ title, navItems }: DashboardLayoutProps) {
             <NavLink
               key={item.to}
               to={item.to}
-              className={({ isActive }) =>
-                `dash-nav-link${isActive ? ' dash-nav-active' : ''}`
-              }
-              end={item.to.split('/').length <= 3}
+              className={`dash-nav-link${isNavActive(item.to) ? ' dash-nav-active' : ''}`}
             >
               {item.label}
             </NavLink>
           ))}
         </nav>
         <div className="dash-sidebar-footer">
-          <NavLink to="/" className="dash-nav-link">Terminal</NavLink>
+          <NavLink to="/" className="dash-nav-link dash-back-to-chat">← Back to Chat</NavLink>
           <button className="dash-btn dash-btn-sm" onClick={logout}>Logout</button>
         </div>
       </aside>

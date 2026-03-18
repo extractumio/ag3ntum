@@ -33,53 +33,151 @@ def sample_profiles(sample_profile):
     return {sample_profile.name: sample_profile}
 
 
-@pytest.fixture
-def enabled_ssh_config():
-    """SSHSecurityConfig with SSH enabled."""
-    return SSHSecurityConfig(enabled=True)
-
-
-@pytest.fixture
-def disabled_ssh_config():
-    """SSHSecurityConfig with SSH disabled."""
-    return SSHSecurityConfig(enabled=False)
-
-
 class TestInitialize:
     """Tests for SSHServiceManager.initialize()."""
 
     @pytest.mark.asyncio
-    async def test_disabled_when_config_missing(self, manager):
-        """SSH disabled when config file doesn't exist."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=SSHSecurityConfig(enabled=False),
-        ):
-            await manager.initialize()
-        assert manager.enabled is False
-        assert manager._pool is None
-
-    @pytest.mark.asyncio
-    async def test_enabled_when_config_present(self, manager, enabled_ssh_config):
-        """SSH enabled when config has enabled=True."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+    async def test_always_initializes_without_yaml(self, manager):
+        """SSH infrastructure always initializes — no YAML needed."""
+        await manager.initialize()
         assert manager.enabled is True
         assert manager._pool is not None
         assert manager._command_filter is not None
         assert manager.security_config is not None
         assert manager.security_config.enabled is True
 
+    @pytest.mark.asyncio
+    async def test_logs_deprecation_when_yaml_exists(self, manager, tmp_path):
+        """Logs warning when legacy ssh-security.yaml is found."""
+        yaml_path = tmp_path / "ssh-security.yaml"
+        yaml_path.write_text("ssh:\n  enabled: true\n")
+
+        with patch(
+            "src.services.ssh_service_manager._LEGACY_SSH_SECURITY_CONFIG_PATH",
+            yaml_path,
+        ), patch(
+            "src.services.ssh_service_manager.logger"
+        ) as mock_logger:
+            await manager.initialize()
+
+        mock_logger.warning.assert_called_once()
+        assert "no longer used" in mock_logger.warning.call_args[0][0]
+        assert manager.enabled is True
+
+
+class TestIsUserSshEnabled:
+    """Tests for SSHServiceManager.is_user_ssh_enabled()."""
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_flag_disabled(self, manager):
+        """Returns False when user's ssh_enabled feature flag is False."""
+        await manager.initialize()
+
+        with patch.object(
+            SSHServiceManager,
+            "_resolve_user_ssh_flag",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            result = await manager.is_user_ssh_enabled("user-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_flag_enabled(self, manager):
+        """Returns True when user's ssh_enabled feature flag is True."""
+        await manager.initialize()
+
+        with patch.object(
+            SSHServiceManager,
+            "_resolve_user_ssh_flag",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            result = await manager.is_user_ssh_enabled("user-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_db(self, manager):
+        """Redis cache hit returns immediately without calling _resolve_user_ssh_flag."""
+        await manager.initialize()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value="1")
+
+        with (
+            patch(
+                "src.services.ssh_service_manager._redis"
+            ) as mock_redis,
+            patch.object(
+                SSHServiceManager,
+                "_resolve_user_ssh_flag",
+                new_callable=AsyncMock,
+            ) as mock_resolve,
+        ):
+            mock_redis.get.return_value = mock_client
+            result = await manager.is_user_ssh_enabled("user-1")
+
+        assert result is True
+        mock_resolve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_queries_db_and_sets_cache(self, manager):
+        """Redis cache miss falls through to DB then caches with 30s TTL."""
+        await manager.initialize()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=None)
+        mock_client.set = AsyncMock()
+
+        with (
+            patch(
+                "src.services.ssh_service_manager._redis"
+            ) as mock_redis,
+            patch.object(
+                SSHServiceManager,
+                "_resolve_user_ssh_flag",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            mock_redis.get.return_value = mock_client
+            result = await manager.is_user_ssh_enabled("user-1")
+
+        assert result is True
+        mock_client.set.assert_called_once_with(
+            "feature:ssh_enabled:user-1", "1", ex=30,
+        )
+
+    @pytest.mark.asyncio
+    async def test_redis_unavailable_falls_through(self, manager):
+        """When Redis raises, method still returns correct value from DB."""
+        await manager.initialize()
+
+        with (
+            patch(
+                "src.services.ssh_service_manager._redis"
+            ) as mock_redis,
+            patch.object(
+                SSHServiceManager,
+                "_resolve_user_ssh_flag",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            mock_redis.get.side_effect = RuntimeError("Redis down")
+            result = await manager.is_user_ssh_enabled("user-1")
+
+        assert result is False
+
 
 class TestBuildSessionContext:
     """Tests for SSHServiceManager.build_session_context()."""
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_disabled(self, manager, sample_profiles):
-        """Returns None when SSH is disabled."""
+    async def test_returns_none_when_not_initialized(self, manager, sample_profiles):
+        """Returns None when manager hasn't been initialized."""
         result = await manager.build_session_context(
             session_id="sess-1",
             user_id="user-1",
@@ -90,13 +188,9 @@ class TestBuildSessionContext:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_profiles(self, manager, enabled_ssh_config):
+    async def test_returns_none_when_no_profiles(self, manager):
         """Returns None when profiles dict is empty."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+        await manager.initialize()
 
         result = await manager.build_session_context(
             session_id="sess-1",
@@ -108,15 +202,9 @@ class TestBuildSessionContext:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_builds_context_with_profiles(
-        self, manager, enabled_ssh_config, sample_profiles,
-    ):
-        """Builds SSHToolContext when SSH enabled and profiles exist."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+    async def test_builds_context_with_profiles(self, manager, sample_profiles):
+        """Builds SSHToolContext when initialized and profiles exist."""
+        await manager.initialize()
 
         vault_svc = MagicMock()
         db_factory = AsyncMock()
@@ -137,15 +225,9 @@ class TestBuildSessionContext:
         assert ctx.command_semaphore is not None
 
     @pytest.mark.asyncio
-    async def test_multiple_sessions_share_pool(
-        self, manager, enabled_ssh_config, sample_profiles,
-    ):
+    async def test_multiple_sessions_share_pool(self, manager, sample_profiles):
         """Multiple sessions share the same connection pool."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+        await manager.initialize()
 
         vault_svc = MagicMock()
         ctx1 = await manager.build_session_context(
@@ -169,21 +251,18 @@ class TestCleanupSession:
     """Tests for SSHServiceManager.cleanup_session()."""
 
     @pytest.mark.asyncio
-    async def test_cleanup_calls_pool(self, manager, enabled_ssh_config):
+    async def test_cleanup_calls_pool(self, manager):
         """Cleanup calls close_session_connections on the pool."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+        await manager.initialize()
 
         manager._pool.close_session_connections = AsyncMock(return_value=2)
         await manager.cleanup_session("sess-1")
         manager._pool.close_session_connections.assert_awaited_once_with("sess-1")
 
     @pytest.mark.asyncio
-    async def test_cleanup_noop_when_disabled(self, manager):
-        """Cleanup is a no-op when SSH is disabled (no pool)."""
+    async def test_cleanup_noop_when_not_initialized(self, manager):
+        """Cleanup is a no-op when not initialized (no pool)."""
+        manager._pool = None
         await manager.cleanup_session("sess-1")  # Should not raise
 
 
@@ -191,21 +270,18 @@ class TestShutdown:
     """Tests for SSHServiceManager.shutdown()."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_closes_pool(self, manager, enabled_ssh_config):
+    async def test_shutdown_closes_pool(self, manager):
         """Shutdown calls pool.shutdown()."""
-        with patch(
-            "src.services.ssh_service_manager.load_ssh_security_config",
-            return_value=enabled_ssh_config,
-        ):
-            await manager.initialize()
+        await manager.initialize()
 
         manager._pool.shutdown = AsyncMock()
         await manager.shutdown()
         manager._pool.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_shutdown_noop_when_disabled(self, manager):
-        """Shutdown is a no-op when SSH was never initialized."""
+    async def test_shutdown_noop_when_not_initialized(self, manager):
+        """Shutdown is a no-op when never initialized."""
+        manager._pool = None
         await manager.shutdown()  # Should not raise
 
 
@@ -306,3 +382,36 @@ class TestSSHPromptRendering:
         rendered = engine.load_and_render(prompt_file, ctx)
         assert "SSH Remote Server Access" not in rendered
         assert rendered.strip() == ""
+
+
+class TestSSHSecurityDefaults:
+    """Tests for hardcoded SSH security defaults."""
+
+    def test_default_config_has_sane_limits(self):
+        """get_default_ssh_security_config returns config with sensible limits."""
+        from src.core.ssh.ssh_config import get_default_ssh_security_config
+        config = get_default_ssh_security_config()
+        assert config.enabled is True
+        assert config.limits.max_connections_per_user == 3
+        assert config.limits.command_timeout_seconds == 300
+        assert config.limits.max_output_bytes == 1_048_576
+        assert config.credentials.password_auth_allowed is False
+        assert config.host_key_verification.mode == "tofu"
+
+    def test_always_blocked_hosts_constant(self):
+        """ALWAYS_BLOCKED_HOSTS includes localhost and metadata IPs."""
+        from src.core.ssh.ssh_config import ALWAYS_BLOCKED_HOSTS
+        assert "127.0.0.1" in ALWAYS_BLOCKED_HOSTS
+        assert "localhost" in ALWAYS_BLOCKED_HOSTS
+        assert "::1" in ALWAYS_BLOCKED_HOSTS
+        assert "169.254.0.0/16" in ALWAYS_BLOCKED_HOSTS
+
+    def test_default_config_blocks_dangerous_hosts(self):
+        """Default config always_blocked list includes all ALWAYS_BLOCKED_HOSTS."""
+        from src.core.ssh.ssh_config import (
+            ALWAYS_BLOCKED_HOSTS,
+            get_default_ssh_security_config,
+        )
+        config = get_default_ssh_security_config()
+        for host in ALWAYS_BLOCKED_HOSTS:
+            assert host in config.hosts.always_blocked

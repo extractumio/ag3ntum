@@ -489,11 +489,11 @@ class AgentRunner:
                         f"{session_id}: {mount_error}"
                     )
 
-            # Build SSH context if SSH is enabled and user has active profiles
+            # Build SSH context if user has SSH enabled (feature flag) and active profiles
             ssh_context = None
             try:
                 from .ssh_service_manager import ssh_service_manager as ssh_mgr
-                if ssh_mgr and ssh_mgr.enabled:
+                if ssh_mgr and ssh_mgr.enabled and await ssh_mgr.is_user_ssh_enabled(params.user_id):
                     async with AsyncSessionLocal() as ssh_db:
                         from .ssh_profile_service import (
                             get_profiles,
@@ -520,6 +520,13 @@ class AgentRunner:
                                     "SSH context built for session %s (%d profiles)",
                                     session_id, len(profiles),
                                 )
+                        else:
+                            logger.debug(
+                                "SSH enabled for user %s but no active profiles",
+                                params.user_id,
+                            )
+                else:
+                    logger.debug("SSH disabled for user %s (feature flag)", params.user_id)
             except Exception as ssh_err:
                 logger.warning("Failed to build SSH context: %s", ssh_err)
 

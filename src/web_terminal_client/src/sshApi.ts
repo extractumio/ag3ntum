@@ -12,6 +12,17 @@ import type {
 import { authenticatedRequest } from './utils/apiClient';
 
 // ---------------------------------------------------------------------------
+// User Features
+// ---------------------------------------------------------------------------
+
+export async function getMyFeatures(
+  baseUrl: string,
+  token: string,
+): Promise<Record<string, unknown>> {
+  return authenticatedRequest(baseUrl, '/api/v1/settings/features', token);
+}
+
+// ---------------------------------------------------------------------------
 // SSH Profiles — User
 // ---------------------------------------------------------------------------
 

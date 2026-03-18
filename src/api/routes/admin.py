@@ -642,6 +642,116 @@ async def admin_delete_user(
 
 
 # =============================================================================
+# User feature flags
+# =============================================================================
+
+# Features that admins can toggle per user
+_ADMIN_TOGGLEABLE_FEATURES = frozenset({"ssh_enabled"})
+
+
+def _parse_features_json(raw: str | None) -> dict:
+    """Parse user.features_json safely, returning {} on any failure."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+async def _resolve_effective_features(
+    db: AsyncSession, user: User,
+) -> dict:
+    """Resolve effective features for a user through the 3-tier hierarchy."""
+    from ...services.feature_flag_service import feature_flag_service
+    await feature_flag_service.ensure_loaded(db)
+
+    reseller = None
+    if user.reseller_id:
+        res_result = await db.execute(
+            select(Reseller).where(Reseller.id == user.reseller_id)
+        )
+        reseller = res_result.scalar_one_or_none()
+
+    return feature_flag_service.get_user_effective_features(user, reseller)
+
+
+def _features_response(
+    effective: dict, user_overrides: dict,
+) -> dict:
+    """Build the standard features response dict."""
+    return {
+        "effective": effective,
+        "user_overrides": user_overrides,
+        "toggleable": list(_ADMIN_TOGGLEABLE_FEATURES),
+    }
+
+
+@router.get("/users/{user_id}/features")
+async def get_user_features(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+):
+    """Get effective features for a user (resolved through 3-tier hierarchy)."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    effective = await _resolve_effective_features(db, user)
+    return _features_response(effective, _parse_features_json(user.features_json))
+
+
+@router.put("/users/{user_id}/features")
+async def update_user_features(
+    user_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(_require_admin),
+):
+    """Toggle feature flags for a user. Only admin-toggleable features accepted."""
+    invalid_keys = set(body.keys()) - _ADMIN_TOGGLEABLE_FEATURES
+    if invalid_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot toggle features: {', '.join(invalid_keys)}. "
+                   f"Allowed: {', '.join(_ADMIN_TOGGLEABLE_FEATURES)}",
+        )
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Merge with existing overrides
+    current = _parse_features_json(user.features_json)
+    for key, value in body.items():
+        if value is None:
+            current.pop(key, None)  # Reset to inherit
+        else:
+            current[key] = value
+
+    user.features_json = json.dumps(current) if current else None
+    await db.commit()
+
+    # Invalidate Redis cache for SSH feature
+    if "ssh_enabled" in body:
+        try:
+            from ...services.ssh_service_manager import ssh_service_manager
+            await ssh_service_manager.invalidate_ssh_cache(user_id)
+        except Exception:
+            pass  # Non-fatal
+
+    effective = await _resolve_effective_features(db, user)
+    logger.info(
+        "Admin %s updated features for user %s: %s",
+        auth.user_id, user_id, body,
+    )
+    return _features_response(effective, current)
+
+
+# =============================================================================
 # Platform configuration
 # =============================================================================
 

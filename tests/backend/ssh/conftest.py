@@ -106,8 +106,13 @@ def ssh_security_config():
 
 @pytest.fixture
 def ssh_security_config_disabled():
-    """SSH security config with SSH disabled."""
-    return SSHSecurityConfig(enabled=False)
+    """SSH security config — kept for backward compatibility.
+
+    Note: SSH is now always enabled at platform level. Per-user disablement
+    is via feature flags, not config. This fixture is used by tests that
+    need a config object but the enabled field is no longer the gate.
+    """
+    return SSHSecurityConfig(enabled=True)
 
 
 @pytest.fixture
@@ -186,3 +191,18 @@ def audit_service():
 def host_key_resolver(vault_service):
     """SSHHostKeyResolver wired to the test VaultService."""
     return SSHHostKeyResolver(vault_service)
+
+
+@pytest.fixture
+def test_ssh_profile_l2():
+    """L2 configuration profile for write-mode testing."""
+    return SSHProfile(
+        name="config-server",
+        host="10.0.1.10",
+        port=22,
+        username="deployer",
+        auth_method="key",
+        key_ref="deploy-key",
+        mode="filtered_shell",
+        privilege_level=2,
+    )

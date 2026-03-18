@@ -4,15 +4,12 @@ Unit tests for SSH profile models and pure functions.
 Tests pure functions without any DB, HTTP, or external dependencies:
 - mask_ssh_key() masking behaviour
 - CreateSSHProfileRequest Pydantic validation
-- load_ssh_profiles() YAML / DB merge logic
 """
 import pytest
-from pathlib import Path
 
 from pydantic import ValidationError
 
 from src.api.ssh_profile_models import CreateSSHProfileRequest, mask_ssh_key
-from src.core.ssh.ssh_config import SSHProfile, load_ssh_profiles
 
 
 # ---------------------------------------------------------------------------
@@ -263,121 +260,3 @@ class TestCreateSSHProfileRequestValidation:
         req = CreateSSHProfileRequest(**_valid_payload(private_key=padded))
         assert not req.private_key.startswith(" ")
         assert not req.private_key.endswith(" ")
-
-
-# ---------------------------------------------------------------------------
-# load_ssh_profiles — YAML / DB merge
-# ---------------------------------------------------------------------------
-
-class TestLoadSSHProfilesMerge:
-
-    @pytest.mark.unit
-    def test_empty_dir_no_db_returns_empty(self, tmp_path: Path):
-        """No YAML file, no DB profiles → empty dict."""
-        result = load_ssh_profiles(tmp_path)
-        assert result == {}
-
-    @pytest.mark.unit
-    def test_db_profiles_loaded_when_no_yaml(self, tmp_path: Path):
-        """DB profiles are loaded when no YAML file exists."""
-        db_profiles = [
-            SSHProfile(name="db-server", host="10.0.0.1", username="deploy"),
-        ]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        assert "db-server" in result
-        assert result["db-server"].host == "10.0.0.1"
-        assert result["db-server"].username == "deploy"
-
-    @pytest.mark.unit
-    def test_yaml_overrides_db_on_name_collision(self, tmp_path: Path):
-        """YAML profile wins over DB profile with the same name."""
-        yaml_content = (
-            "profiles:\n"
-            "  shared-server:\n"
-            "    host: yaml-host.example.com\n"
-            "    username: yaml-user\n"
-        )
-        (tmp_path / "ssh-profiles.yaml").write_text(yaml_content)
-        db_profiles = [
-            SSHProfile(
-                name="shared-server",
-                host="db-host.example.com",
-                username="db-user",
-            ),
-        ]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        assert result["shared-server"].host == "yaml-host.example.com"
-        assert result["shared-server"].username == "yaml-user"
-
-    @pytest.mark.unit
-    def test_no_db_profiles_is_backward_compatible(self, tmp_path: Path):
-        """Calling without db_profiles works identically to the original API."""
-        result = load_ssh_profiles(tmp_path)
-        assert result == {}
-
-    @pytest.mark.unit
-    def test_mixed_db_and_yaml_profiles(self, tmp_path: Path):
-        """DB-only and YAML-only profiles both appear in the merged result."""
-        yaml_content = (
-            "profiles:\n"
-            "  yaml-server:\n"
-            "    host: yaml.example.com\n"
-            "    username: yaml-user\n"
-        )
-        (tmp_path / "ssh-profiles.yaml").write_text(yaml_content)
-        db_profiles = [
-            SSHProfile(name="db-server", host="db.example.com", username="db-user"),
-        ]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        assert "yaml-server" in result
-        assert "db-server" in result
-        assert len(result) == 2
-
-    @pytest.mark.unit
-    def test_multiple_db_profiles(self, tmp_path: Path):
-        """Multiple DB profiles are all loaded."""
-        db_profiles = [
-            SSHProfile(name="server-a", host="a.example.com", username="ua"),
-            SSHProfile(name="server-b", host="b.example.com", username="ub"),
-            SSHProfile(name="server-c", host="c.example.com", username="uc"),
-        ]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        assert len(result) == 3
-        assert result["server-a"].host == "a.example.com"
-        assert result["server-c"].username == "uc"
-
-    @pytest.mark.unit
-    def test_yaml_profile_without_host_is_skipped(self, tmp_path: Path):
-        """A YAML profile entry missing the required 'host' field is skipped."""
-        yaml_content = (
-            "profiles:\n"
-            "  bad-entry:\n"
-            "    username: whoever\n"
-            "  good-entry:\n"
-            "    host: good.example.com\n"
-            "    username: good-user\n"
-        )
-        (tmp_path / "ssh-profiles.yaml").write_text(yaml_content)
-        result = load_ssh_profiles(tmp_path)
-        assert "bad-entry" not in result
-        assert "good-entry" in result
-
-    @pytest.mark.unit
-    def test_yaml_parse_error_returns_db_profiles(self, tmp_path: Path):
-        """If YAML is malformed, DB profiles are still returned (no total failure)."""
-        (tmp_path / "ssh-profiles.yaml").write_text(":\ninvalid: [yaml\n")
-        db_profiles = [
-            SSHProfile(name="fallback", host="10.0.0.1", username="u"),
-        ]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        assert "fallback" in result
-
-    @pytest.mark.unit
-    def test_db_profile_defaults(self, tmp_path: Path):
-        """DB profiles use sensible defaults for optional fields."""
-        db_profiles = [SSHProfile(name="minimal", host="1.2.3.4")]
-        result = load_ssh_profiles(tmp_path, db_profiles=db_profiles)
-        profile = result["minimal"]
-        assert profile.port == 22
-        assert profile.mode == "readonly"
-        assert profile.privilege_level == 0

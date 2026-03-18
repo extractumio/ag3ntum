@@ -5,7 +5,7 @@ server:
 api:
   # API URL derived from server.hostname and server.protocol in api.yaml
   # Frontend will replace "localhost" with browser hostname if accessed remotely
-  base_url: "http://localhost:40080"
+  base_url: "http://rdp.extractum.io:40080"
 
 ui:
   max_output_lines: 1000

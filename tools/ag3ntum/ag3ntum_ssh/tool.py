@@ -1,15 +1,16 @@
 """
 SSH MCP tool implementations.
 
-Three tools following the 3-layer pattern:
+Four tools following the 3-layer pattern:
 1. _impl() functions — testable core logic
 2. create_*_tool() factories — MCP wrappers binding SSHToolContext
-3. create_ssh_tools() — returns all three as a list
+3. create_ssh_tools() — returns all four as a list
 
 Tool names:
 - mcp__ag3ntum__SSHConnect
 - mcp__ag3ntum__SSHExec
 - mcp__ag3ntum__SSHRead
+- mcp__ag3ntum__SSHWrite
 
 Security:
 - All operations check security_config.enabled first (fail-closed).
@@ -21,12 +22,18 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
+import json
 import logging
+import os
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any, Optional
 
 from claude_agent_sdk import tool
 
@@ -38,6 +45,10 @@ from src.core.ssh.ssh_config import SSHProfile, SSHSecurityConfig
 from src.core.ssh.ssh_connection_pool import SSHConnectionPool, SSHConnectionLimitError
 from src.core.ssh.ssh_command_filter import SSHCommandFilter
 from src.core.ssh.ssh_credential_vault import SSHCredentialVault
+from tools.ag3ntum.ag3ntum_ssh.batch_template import (
+    generate_batch_manifest,
+    generate_batch_script,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 AG3NTUM_SSH_EXEC_TOOL: str = "mcp__ag3ntum__SSHExec"
 AG3NTUM_SSH_READ_TOOL: str = "mcp__ag3ntum__SSHRead"
+AG3NTUM_SSH_WRITE_TOOL: str = "mcp__ag3ntum__SSHWrite"
 AG3NTUM_SSH_CONNECT_TOOL: str = "mcp__ag3ntum__SSHConnect"
 
 # Truncation notice appended when output is trimmed
@@ -145,6 +157,64 @@ class SSHApprovalStore:
 
 
 # ---------------------------------------------------------------------------
+# WriteTracker — mandatory pre-read enforcement for SSHWrite
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReadRecord:
+    """Record of a file read, used to enforce read-before-write."""
+    checksum: str       # SHA-256 of file content at read time
+    size: int           # File size at read time
+    read_at: float      # monotonic timestamp
+
+
+class WriteTracker:
+    """Session-scoped tracker ensuring files are read before written.
+
+    Populated by SSHRead. Consulted by SSHWrite.
+    """
+
+    def __init__(self) -> None:
+        self._reads: dict[tuple[str, str], ReadRecord] = {}
+
+    def record_read(self, profile_name: str, path: str,
+                    checksum: str, size: int) -> None:
+        """Called by SSHRead after successful file read."""
+        self._reads[(profile_name, path)] = ReadRecord(
+            checksum=checksum,
+            size=size,
+            read_at=time.monotonic(),
+        )
+
+    def get_read_record(self, profile_name: str, path: str
+                        ) -> ReadRecord | None:
+        """Called by SSHWrite to verify pre-read. Returns None if not read."""
+        return self._reads.get((profile_name, path))
+
+    def clear_session(self) -> None:
+        """Clear all records — called on session cleanup."""
+        self._reads.clear()
+
+
+class WriteBudget:
+    """Tracks total bytes written per session to prevent disk exhaustion."""
+
+    def __init__(self, max_bytes: int = 10_485_760) -> None:  # 10MB default
+        self._total: int = 0
+        self._max: int = max_bytes
+
+    def check(self, size: int) -> bool:
+        return (self._total + size) <= self._max
+
+    def record(self, size: int) -> None:
+        self._total += size
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self._max - self._total)
+
+
+# ---------------------------------------------------------------------------
 # SSHToolContext — binds all services to a session
 # ---------------------------------------------------------------------------
 
@@ -163,6 +233,9 @@ class SSHToolContext:
     rate_limiter: Any = field(default=None)   # SSHRateLimiter, optional
     approval_store: Any = field(default=None)  # SSHApprovalStore, optional
     command_semaphore: Any = field(default=None)  # asyncio.Semaphore, optional
+    ssh_enabled_check: Optional[Callable[[str], Awaitable[bool]]] = field(default=None)
+    write_tracker: Optional[WriteTracker] = field(default=None)
+    write_budget: Optional[WriteBudget] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +256,26 @@ def _error(message: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Runtime feature flag check
+# ---------------------------------------------------------------------------
+
+async def _check_ssh_enabled(ctx: SSHToolContext) -> bool:
+    """Check if SSH is still enabled for the user (runtime guard).
+
+    Uses cached feature flag lookup (30s TTL) so that admin revocation
+    takes effect within 30 seconds even for active sessions.
+    Callback is injected via SSHToolContext.ssh_enabled_check by the
+    service layer — no services import needed here.
+    """
+    if ctx.ssh_enabled_check is None:
+        return True  # No check configured — trust session setup
+    try:
+        return await ctx.ssh_enabled_check(ctx.user_id)
+    except Exception:
+        return False  # Fail-closed
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -200,6 +293,94 @@ def _sanitise_error(exc: Exception) -> str:
     exc_type = type(exc).__name__
     # Avoid returning internal paths / full tracebacks
     return f"{exc_type}: {exc!s}"
+
+
+async def _get_ssh_connection(
+    profile_name: str,
+    profile: SSHProfile,
+    ctx: SSHToolContext,
+    tool_name: str = "SSH",
+) -> tuple[Any, dict[str, Any] | None]:
+    """Get or establish an SSH connection, returning (conn, error_or_None).
+
+    Centralises the connection setup + error classification pattern
+    used across SSHExec, SSHRead, SSHWrite, cleanup, and rollback.
+    """
+    try:
+        async with ctx.db_session_factory() as db:
+            connect_fn = await ctx.credential_vault.get_connect_fn(
+                db, ctx.user_id, ctx.session_id, profile
+            )
+        conn = await ctx.connection_pool.get_connection(
+            ctx.session_id, profile_name, ctx.user_id, connect_fn
+        )
+        return conn, None
+    except SSHConnectionLimitError as exc:
+        return None, _error(f"SSH connection limit reached: {exc}")
+    except ValueError as exc:
+        return None, _error(f"SSH credential error: {exc}")
+    except Exception as exc:
+        err_msg = _classify_host_key_error(exc, profile_name)
+        if err_msg:
+            await _audit_host_key_failure(ctx, profile_name, profile, exc)
+            return None, _error(err_msg)
+        logger.error(
+            "%s: Connection failed for profile %s: %s",
+            tool_name, profile_name, exc,
+        )
+        return None, _error(
+            f"SSH connection failed: {_sanitise_error(exc)}"
+        )
+
+
+def _backup_dir(profile_name: str) -> str:
+    """Return the SFTP backup directory path for a profile."""
+    return f"~/.ag3ntum-backups/{profile_name}"
+
+
+async def _sftp_read_bytes(sftp: Any, path: str) -> bytes:
+    """Read a remote file's entire contents via SFTP."""
+    f = await sftp.open(path, "rb")
+    try:
+        return await f.read()
+    finally:
+        await f.close()
+
+
+async def _sftp_write_bytes(sftp: Any, path: str, data: bytes) -> None:
+    """Write bytes to a remote file via SFTP."""
+    f = await sftp.open(path, "wb")
+    try:
+        await f.write(data)
+    finally:
+        await f.close()
+
+
+async def _audit_file_access(
+    ctx: SSHToolContext,
+    profile_name: str,
+    profile: SSHProfile,
+    path: str,
+    operation: str,
+) -> None:
+    """Log a file access audit event (best-effort)."""
+    try:
+        async with ctx.db_session_factory() as db:
+            await ctx.audit_service.log_file_access(
+                db,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                ssh_profile=profile_name,
+                remote_host=profile.host,
+                remote_user=profile.username,
+                remote_port=profile.port,
+                path=path,
+                operation=operation,
+                privilege_level=profile.privilege_level,
+                mode=profile.mode,
+            )
+    except Exception as audit_exc:
+        logger.error("%s: Failed to log audit: %s", operation, audit_exc)
 
 
 def _resolve_profile(
@@ -367,8 +548,8 @@ async def _ssh_exec_impl(
     ctx: SSHToolContext,
 ) -> dict[str, Any]:
     """Core SSHExec logic — testable without MCP wrapper."""
-    if not ctx.security_config.enabled:
-        return _error("SSH is disabled. Enable it in the security configuration.")
+    if not await _check_ssh_enabled(ctx):
+        return _error("SSH access has been disabled by your administrator.")
 
     profile_name: str = args.get("profile_name", "")
     command: str = args.get("command", "").strip()
@@ -505,25 +686,11 @@ async def _ssh_exec_inner(
     """Inner execution logic after filter checks and semaphore acquisition."""
     # Get or establish connection
     start_ms = int(time.monotonic() * 1000)
-    try:
-        async with ctx.db_session_factory() as db:
-            connect_fn = await ctx.credential_vault.get_connect_fn(
-                db, ctx.user_id, ctx.session_id, profile
-            )
-        conn = await ctx.connection_pool.get_connection(
-            ctx.session_id, profile_name, ctx.user_id, connect_fn
-        )
-    except SSHConnectionLimitError as exc:
-        return _error(f"SSH connection limit reached: {exc}")
-    except ValueError as exc:
-        return _error(f"SSH credential error: {exc}")
-    except Exception as exc:
-        err_msg = _classify_host_key_error(exc, profile_name)
-        if err_msg:
-            await _audit_host_key_failure(ctx, profile_name, profile, exc)
-            return _error(err_msg)
-        logger.error("SSHExec: Connection failed for profile %s: %s", profile_name, exc)
-        return _error(f"SSH connection failed: {_sanitise_error(exc)}")
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHExec"
+    )
+    if conn_err is not None:
+        return conn_err
 
     # Execute command with streaming byte budget
     max_bytes = ctx.security_config.limits.max_output_bytes
@@ -635,8 +802,8 @@ async def _ssh_read_impl(
     ctx: SSHToolContext,
 ) -> dict[str, Any]:
     """Core SSHRead logic — testable without MCP wrapper."""
-    if not ctx.security_config.enabled:
-        return _error("SSH is disabled. Enable it in the security configuration.")
+    if not await _check_ssh_enabled(ctx):
+        return _error("SSH access has been disabled by your administrator.")
 
     profile_name: str = args.get("profile_name", "")
     remote_path: str = args.get("path", "").strip()
@@ -650,25 +817,11 @@ async def _ssh_read_impl(
     assert profile is not None  # guaranteed by _resolve_profile when err is None
 
     # Get or establish connection
-    try:
-        async with ctx.db_session_factory() as db:
-            connect_fn = await ctx.credential_vault.get_connect_fn(
-                db, ctx.user_id, ctx.session_id, profile
-            )
-        conn = await ctx.connection_pool.get_connection(
-            ctx.session_id, profile_name, ctx.user_id, connect_fn
-        )
-    except SSHConnectionLimitError as exc:
-        return _error(f"SSH connection limit reached: {exc}")
-    except ValueError as exc:
-        return _error(f"SSH credential error: {exc}")
-    except Exception as exc:
-        err_msg = _classify_host_key_error(exc, profile_name)
-        if err_msg:
-            await _audit_host_key_failure(ctx, profile_name, profile, exc)
-            return _error(err_msg)
-        logger.error("SSHRead: Connection failed for profile %s: %s", profile_name, exc)
-        return _error(f"SSH connection failed: {_sanitise_error(exc)}")
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHRead"
+    )
+    if conn_err is not None:
+        return conn_err
 
     max_bytes = ctx.security_config.limits.max_file_read_bytes
 
@@ -688,20 +841,20 @@ async def _ssh_read_impl(
                 # stat failed — still attempt the read; let the read fail naturally
                 pass
 
-            # Resolve symlinks and check target path for L2
+            # Resolve symlinks and check target path
             real_path = remote_path
             try:
                 resolved = await sftp.realpath(remote_path)
                 if resolved != remote_path:
                     real_path = resolved
-                    # Symlink detected — verify target is allowed
-                    path_check = ctx.command_filter.check_path_writable(
+                    # Symlink detected — verify target is readable
+                    path_check = ctx.command_filter.check_path_readable(
                         real_path, profile.privilege_level
                     )
-                    if not path_check.allowed and profile.privilege_level <= 2:
+                    if not path_check.allowed:
                         return _error(
-                            f"Symlink target '{real_path}' is outside "
-                            "allowed paths for this privilege level."
+                            f"Symlink target '{real_path}' is blocked "
+                            "for this privilege level."
                         )
             except Exception:
                 pass  # realpath failed — proceed with the original path
@@ -747,25 +900,16 @@ async def _ssh_read_impl(
 
     content = raw.decode("utf-8", errors="replace")
 
+    # Record read in WriteTracker for SSHWrite pre-read enforcement
+    if ctx.write_tracker is not None:
+        read_checksum = hashlib.sha256(raw).hexdigest()
+        ctx.write_tracker.record_read(
+            profile_name, remote_path, read_checksum, len(raw)
+        )
+
     # Record activity and audit
     ctx.connection_pool.record_activity(ctx.session_id, profile_name)
-    try:
-        async with ctx.db_session_factory() as db:
-            await ctx.audit_service.log_file_access(
-                db,
-                session_id=ctx.session_id,
-                user_id=ctx.user_id,
-                ssh_profile=profile_name,
-                remote_host=profile.host,
-                remote_user=profile.username,
-                remote_port=profile.port,
-                path=remote_path,
-                operation="read_file",
-                privilege_level=profile.privilege_level,
-                mode=profile.mode,
-            )
-    except Exception as audit_exc:
-        logger.error("SSHRead: Failed to log file access: %s", audit_exc)
+    await _audit_file_access(ctx, profile_name, profile, remote_path, "read_file")
 
     # Format with line numbers (matching local Read tool style)
     lines = content.splitlines()
@@ -813,6 +957,570 @@ Examples:
 
 
 # ---------------------------------------------------------------------------
+# L2 extension allowlist for SSHWrite
+# ---------------------------------------------------------------------------
+
+_L2_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({
+    # Configuration formats
+    ".conf", ".cfg", ".cnf", ".ini",
+    ".yaml", ".yml", ".json", ".toml", ".xml",
+    ".properties",
+    # Web server specifics
+    ".htaccess", ".htpasswd",
+    # Systemd
+    ".service", ".timer", ".socket", ".mount",
+    # SSL/TLS
+    ".pem", ".crt", ".key",
+    # Text
+    ".txt", ".log", ".md",
+})
+
+
+def _compute_diff(old: str, new: str, path: str, max_lines: int = 50) -> str:
+    """Generate unified diff, truncated to max_lines."""
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a{path}", tofile=f"b{path}",
+    ))
+    if len(diff) > max_lines:
+        diff = diff[:max_lines] + [f"\n... ({len(diff) - max_lines} more lines)\n"]
+    return "".join(diff) if diff else "(no changes)"
+
+
+# ---------------------------------------------------------------------------
+# SSHWrite — write a file to a remote server via SFTP
+# ---------------------------------------------------------------------------
+
+async def _ssh_write_impl(
+    args: dict[str, Any],
+    *,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """Core SSHWrite logic — testable without MCP wrapper.
+
+    Four-phase execution:
+      Phase 0: Validation (no I/O)
+      Phase 1: Preflight (read-only I/O)
+      Phase 2: Backup (single mutation)
+      Phase 3: Write (atomic mutation)
+    """
+    if not await _check_ssh_enabled(ctx):
+        return _error("SSH access has been disabled by your administrator.")
+
+    profile_name: str = args.get("profile_name", "")
+    path: str = args.get("path", "").strip()
+    content: str = args.get("content", "")
+    dry_run: bool = args.get("dry_run", False)
+
+    # Batch mode dispatch
+    batch = args.get("batch")
+    if batch is not None:
+        return await _ssh_write_batch_impl(
+            batch, profile_name=profile_name, dry_run=dry_run, ctx=ctx
+        )
+
+    # --- Phase 0: Validation (no I/O) ---
+
+    if not path:
+        return _error("path is required")
+    if not path.startswith("/"):
+        return _error("Absolute path required (must start with '/').")
+    if not content:
+        return _error("content is required (empty writes not allowed).")
+
+    profile, err = _resolve_profile(profile_name, ctx.profiles)
+    if err is not None:
+        return err
+    assert profile is not None
+
+    # Rate limit check
+    if ctx.rate_limiter is not None:
+        if not ctx.rate_limiter.check(ctx.session_id, profile_name):
+            return _error(
+                "SSH command rate limit exceeded. "
+                f"Maximum {ctx.security_config.limits.rate_limit_commands_per_minute}"
+                " commands per minute."
+            )
+
+    # Content size check
+    content_bytes = content.encode("utf-8")
+    max_bytes = ctx.security_config.limits.max_file_write_bytes
+    if len(content_bytes) > max_bytes:
+        return _error(
+            f"Content size ({len(content_bytes)} bytes) exceeds "
+            f"limit ({max_bytes} bytes)."
+        )
+
+    # Write budget check
+    if ctx.write_budget is not None:
+        if not ctx.write_budget.check(len(content_bytes)):
+            return _error(
+                f"Session write budget exceeded. "
+                f"Remaining: {ctx.write_budget.remaining} bytes."
+            )
+
+    # Path security check
+    path_check = ctx.command_filter.check_path_writable(path, profile.privilege_level)
+    if not path_check.allowed:
+        return _error(f"Write denied: {path_check.reason}")
+
+    # L2 extension allowlist
+    if profile.privilege_level == 2:
+        ext = PurePosixPath(path).suffix.lower()
+        if ext not in _L2_ALLOWED_EXTENSIONS:
+            return _error(
+                f"File extension '{ext}' not allowed at L2. "
+                f"Allowed: {', '.join(sorted(_L2_ALLOWED_EXTENSIONS))}"
+            )
+
+    # Pre-read check (WriteTracker)
+    if ctx.write_tracker is not None:
+        read_record = ctx.write_tracker.get_read_record(profile_name, path)
+        if read_record is None:
+            return _error(
+                "File must be read with SSHRead before writing. "
+                "This ensures you see the current content before modifying it."
+            )
+    else:
+        read_record = None
+
+    # --- Phase 1: Preflight (read-only I/O) ---
+
+    start_ms = int(time.monotonic() * 1000)
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHWrite"
+    )
+    if conn_err is not None:
+        return conn_err
+
+    conflict_warning = ""
+    old_content = ""
+
+    try:
+        async with conn.start_sftp_client() as sftp:
+            # Disk space check
+            try:
+                dir_path = os.path.dirname(path)
+                vfs = await sftp.statvfs(dir_path)
+                free_bytes = vfs.avail * vfs.bsize
+                required = max(len(content_bytes) * 3, 10_485_760)
+                if free_bytes < required:
+                    return _error(
+                        f"Insufficient disk space: {free_bytes} bytes free, "
+                        f"need {required} bytes."
+                    )
+            except Exception:
+                pass  # statvfs not supported on all systems — proceed
+
+            # File stat
+            file_exists = False
+            original_mode = 0o644
+            try:
+                stat_result = await sftp.stat(path)
+                file_exists = True
+                if stat_result.permissions is not None:
+                    original_mode = stat_result.permissions
+            except Exception:
+                pass  # File doesn't exist — new file
+
+            # Symlink resolution
+            try:
+                resolved = await sftp.realpath(path)
+                if resolved != path:
+                    re_check = ctx.command_filter.check_path_writable(
+                        resolved, profile.privilege_level
+                    )
+                    if not re_check.allowed:
+                        return _error(
+                            f"Symlink target '{resolved}' write denied: "
+                            f"{re_check.reason}"
+                        )
+            except Exception:
+                pass  # realpath failed — proceed with original path
+
+            # Read current content for binary detection, diff, and
+            # checksum comparison — single SFTP read for all three.
+            old_raw: bytes = b""
+            if file_exists:
+                try:
+                    old_raw = await _sftp_read_bytes(sftp, path)
+                    # Binary detection on first 8KB
+                    sample = old_raw[:8192]
+                    if sample and sample.count(b'\x00') > len(sample) * 0.01:
+                        return _error(
+                            "Target file is binary. SSHWrite only supports text files."
+                        )
+                    old_content = old_raw.decode("utf-8", errors="replace")
+                except Exception:
+                    old_content = ""
+
+                # Checksum conflict detection (hash raw bytes, not re-encoded)
+                if read_record is not None and old_raw:
+                    current_hash = hashlib.sha256(old_raw).hexdigest()
+                    if current_hash != read_record.checksum:
+                        conflict_warning = (
+                            "WARNING: File has been modified since you last read it. "
+                            "Your write will overwrite those changes.\n"
+                        )
+
+            # Dry run
+            if dry_run:
+                diff_text = _compute_diff(old_content, content, path)
+                preview = (
+                    f"[DRY RUN] SSHWrite preview — no changes made.\n"
+                    f"Profile:  {profile_name} ({profile.username}@{profile.host})\n"
+                    f"Path:     {path}\n"
+                    f"Size:     {len(content_bytes)} bytes\n"
+                    f"Exists:   {'yes' if file_exists else 'no (new file)'}\n"
+                )
+                if conflict_warning:
+                    preview += conflict_warning
+                preview += f"\nDiff:\n{diff_text}"
+                return _result(preview)
+
+            # --- Phase 2: Backup ---
+
+            backup_path = ""
+            if file_exists:
+                backup_dir = _backup_dir(profile_name)
+                try:
+                    await sftp.makedirs(backup_dir, exist_ok=True)
+                except Exception:
+                    # makedirs may not exist on all asyncssh versions
+                    try:
+                        await sftp.mkdir(backup_dir)
+                    except Exception:
+                        # Try creating parent first
+                        try:
+                            await sftp.mkdir("~/.ag3ntum-backups")
+                        except Exception:
+                            pass
+                        try:
+                            await sftp.mkdir(backup_dir)
+                        except Exception as mkdir_exc:
+                            return _error(
+                                f"Cannot create backup directory: {_sanitise_error(mkdir_exc)}"
+                            )
+
+                # Rotate: keep max 5 per filename
+                filename = PurePosixPath(path).name
+                try:
+                    existing = await sftp.listdir(backup_dir)
+                    matching = sorted([
+                        f for f in existing
+                        if f.startswith(filename) and f.endswith(".bak")
+                    ])
+                    while len(matching) >= 5:
+                        oldest = matching.pop(0)
+                        try:
+                            await sftp.remove(f"{backup_dir}/{oldest}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass  # listdir failed — proceed without rotation
+
+                # Create backup
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                backup_name = f"{filename}.{timestamp}.bak"
+                backup_path = f"{backup_dir}/{backup_name}"
+
+                try:
+                    await _sftp_write_bytes(sftp, backup_path, old_raw)
+                except Exception as backup_exc:
+                    return _error(
+                        f"Backup creation failed: {_sanitise_error(backup_exc)}. "
+                        "Write aborted — target file is untouched."
+                    )
+
+            # --- Phase 3: Write (atomic) ---
+
+            dir_name = str(PurePosixPath(path).parent)
+            temp_name = f"{dir_name}/.{PurePosixPath(path).name}.ag3ntum-tmp"
+
+            try:
+                await _sftp_write_bytes(sftp, temp_name, content_bytes)
+
+                # Preserve original permissions
+                if file_exists:
+                    try:
+                        await sftp.chmod(temp_name, original_mode)
+                    except Exception:
+                        pass  # chmod failure is non-fatal
+
+                # Atomic rename (posix_rename supports overwrite)
+                try:
+                    await sftp.posix_rename(temp_name, path)
+                except AttributeError:
+                    await sftp.rename(temp_name, path)
+            except Exception as write_exc:
+                # Clean up temp file
+                try:
+                    await sftp.remove(temp_name)
+                except Exception:
+                    pass
+                return _error(
+                    f"Write failed: {_sanitise_error(write_exc)}. "
+                    f"{'Backup at: ' + backup_path if backup_path else 'No backup (new file).'}"
+                )
+
+    except Exception as exc:
+        logger.warning(
+            "SSHWrite: SFTP operation failed on profile %s: %s",
+            profile_name, exc,
+        )
+        return _error(f"SFTP operation failed: {_sanitise_error(exc)}")
+
+    duration_ms = int(time.monotonic() * 1000) - start_ms
+
+    # Record activity on pool
+    ctx.connection_pool.record_activity(ctx.session_id, profile_name)
+
+    # Deduct from write budget
+    if ctx.write_budget is not None:
+        ctx.write_budget.record(len(content_bytes))
+
+    # Audit log
+    await _audit_file_access(ctx, profile_name, profile, path, "write_file")
+
+    # Response with diff
+    diff_text = _compute_diff(old_content, content, path)
+    response_lines = [
+        "File written successfully.",
+        f"Profile:  {profile_name} ({profile.username}@{profile.host})",
+        f"Path:     {path}",
+        f"Size:     {len(content_bytes)} bytes",
+    ]
+    if backup_path:
+        response_lines.append(f"Backup:   {backup_path}")
+    response_lines.append(f"Duration: {duration_ms}ms")
+    if conflict_warning:
+        response_lines.append(f"\n{conflict_warning}")
+    response_lines.append(f"\nDiff:\n{diff_text}")
+
+    return _result("\n".join(response_lines))
+
+
+# ---------------------------------------------------------------------------
+# SSHWrite batch implementation
+# ---------------------------------------------------------------------------
+
+async def _ssh_write_batch_impl(
+    batch: list[dict[str, Any]],
+    *,
+    profile_name: str,
+    dry_run: bool,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """Batch write implementation — generates and executes a hardened script.
+
+    Requires minimum L2 privilege. At L2, all files must have been
+    read via SSHRead. At L3+, the pre-read check is skipped.
+    """
+    if not batch:
+        return _error("batch list is empty.")
+
+    profile, err = _resolve_profile(profile_name, ctx.profiles)
+    if err is not None:
+        return err
+    assert profile is not None
+
+    if profile.privilege_level < 2:
+        return _error("Batch mode requires minimum privilege level 2.")
+
+    # Validate all entries
+    total_size = 0
+    for entry in batch:
+        path = entry.get("path", "").strip()
+        content = entry.get("content", "")
+        if not path or not path.startswith("/"):
+            return _error(f"Batch: absolute path required, got '{path}'.")
+        if not content:
+            return _error(f"Batch: empty content for '{path}'.")
+
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > ctx.security_config.limits.max_file_write_bytes:
+            return _error(
+                f"Batch: content for '{path}' exceeds size limit "
+                f"({len(content_bytes)} bytes)."
+            )
+        total_size += len(content_bytes)
+
+        # Path security
+        path_check = ctx.command_filter.check_path_writable(
+            path, profile.privilege_level
+        )
+        if not path_check.allowed:
+            return _error(f"Batch: write denied for '{path}': {path_check.reason}")
+
+        # L2 extension filter
+        if profile.privilege_level == 2:
+            ext = PurePosixPath(path).suffix.lower()
+            if ext not in _L2_ALLOWED_EXTENSIONS:
+                return _error(
+                    f"Batch: extension '{ext}' not allowed at L2 for '{path}'."
+                )
+
+        # Pre-read check (L2 requires all read; L3+ can skip)
+        if profile.privilege_level == 2 and ctx.write_tracker is not None:
+            record = ctx.write_tracker.get_read_record(profile_name, path)
+            if record is None:
+                return _error(
+                    f"Batch: file '{path}' must be read with SSHRead first "
+                    "(required at L2)."
+                )
+
+    # Write budget check
+    if ctx.write_budget is not None:
+        if not ctx.write_budget.check(total_size):
+            return _error(
+                f"Batch: total size ({total_size} bytes) exceeds session "
+                f"write budget. Remaining: {ctx.write_budget.remaining} bytes."
+            )
+
+    # Generate snapshot ID and script
+    snapshot_id = (
+        f"ag3ntum-batch-"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    manifest = generate_batch_manifest(
+        profile_name, ctx.session_id, batch, snapshot_id
+    )
+    script = generate_batch_script(
+        profile_name, snapshot_id, batch, manifest
+    )
+
+    if dry_run:
+        file_list = "\n".join(
+            f"  {e['path']} ({len(e.get('content', '').encode('utf-8'))} bytes)"
+            for e in batch
+        )
+        return _result(
+            f"[DRY RUN] Batch write preview — no changes made.\n"
+            f"Profile:    {profile_name}\n"
+            f"Files:      {len(batch)}\n"
+            f"Total size: {total_size} bytes\n"
+            f"Snapshot:   {snapshot_id}\n\n"
+            f"Files:\n{file_list}"
+        )
+
+    # Get connection
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHWrite:batch"
+    )
+    if conn_err is not None:
+        return conn_err
+
+    # Upload script via SFTP
+    script_path = f"/tmp/{snapshot_id}.sh"
+    try:
+        async with conn.start_sftp_client() as sftp:
+            await _sftp_write_bytes(sftp, script_path, script.encode("utf-8"))
+            await sftp.chmod(script_path, 0o700)
+    except Exception as exc:
+        return _error(f"Failed to upload batch script: {_sanitise_error(exc)}")
+
+    # Execute via SSH
+    try:
+        stdout, stderr, exit_code, _ = await _stream_process_output(
+            conn,
+            f"bash {script_path}",
+            ctx.security_config.limits.command_timeout_seconds,
+            ctx.security_config.limits.max_output_bytes,
+        )
+    except Exception as exc:
+        return _error(f"Batch script execution failed: {_sanitise_error(exc)}")
+
+    # Record activity and budget
+    ctx.connection_pool.record_activity(ctx.session_id, profile_name)
+    if ctx.write_budget is not None:
+        ctx.write_budget.record(total_size)
+
+    # Audit log
+    await _audit_file_access(
+        ctx, profile_name, profile, f"batch:{snapshot_id}", "write_file_batch"
+    )
+
+    # Parse output for status
+    status = "success" if exit_code == 0 else "failed"
+    response = (
+        f"Batch write {status}.\n"
+        f"Profile:    {profile_name} ({profile.username}@{profile.host})\n"
+        f"Files:      {len(batch)}\n"
+        f"Snapshot:   {snapshot_id}\n"
+        f"Exit code:  {exit_code}\n"
+    )
+    if stdout:
+        response += f"\nOutput:\n{stdout}"
+    if stderr:
+        response += f"\nErrors:\n{stderr}"
+    if exit_code != 0:
+        response += (
+            "\nRollback was triggered automatically. "
+            "Original files have been restored from the snapshot."
+        )
+
+    return _result(response) if exit_code == 0 else _error(response)
+
+
+def create_ssh_write_tool(ctx: SSHToolContext):
+    """Create SSHWrite tool bound to the given context."""
+    bound_ctx = ctx
+
+    @tool(
+        "SSHWrite",
+        """Write a file to a remote server via SSH/SFTP with automatic backup.
+
+Args:
+    profile_name: SSH profile name (configured in ssh-profiles.yaml)
+    path:         Absolute path to the file on the remote server
+    content:      Full file content to write
+    dry_run:      If true, preview the write without making changes (default: false)
+
+Returns:
+    Write confirmation with backup path, size, duration, and unified diff.
+
+Safety:
+    - File must be read with SSHRead BEFORE writing (enforced).
+    - Automatic backup created before every write (~/.ag3ntum-backups/).
+    - Atomic write: temp file + rename prevents corruption.
+    - L0-L1 profiles cannot write files.
+    - L2 profiles restricted to writable_paths and allowed extensions.
+    - L3+ can write to any non-blocked path.
+
+Batch mode:
+    Pass a 'batch' list of {path, content} dicts instead of single path/content.
+    All files are validated, then written atomically with snapshot-first backup.
+    Requires minimum L2. At L2, all files must be pre-read. L3+ can skip pre-read.
+    Example: SSHWrite(profile_name="prod", batch=[{"path": "/etc/a.conf", "content": "..."},
+                      {"path": "/etc/b.conf", "content": "..."}])
+
+When to use single-file vs batch mode:
+    | Scenario                         | Mode              |
+    |----------------------------------|-------------------|
+    | Edit 1 config file               | Single-file       |
+    | Edit 2-5 related configs         | Single-file (loop)|
+    | Update 6+ files with same pattern| Batch             |
+    | Search-and-replace across codebase| Batch            |
+    | One-off emergency fix            | Single-file       |
+
+Examples:
+    SSHWrite(profile_name="prod-web", path="/etc/nginx/nginx.conf",
+             content="...new config...", dry_run=true)
+    SSHWrite(profile_name="prod-web", path="/etc/nginx/nginx.conf",
+             content="...new config...")
+""",
+        {"profile_name": str, "path": str, "content": str},
+    )
+    async def ssh_write(args: dict[str, Any]) -> dict[str, Any]:
+        """Write file to remote server via SFTP."""
+        return await _ssh_write_impl(args, ctx=bound_ctx)
+
+    return ssh_write
+
+
+# ---------------------------------------------------------------------------
 # SSHConnect — connection lifecycle management
 # ---------------------------------------------------------------------------
 
@@ -822,8 +1530,8 @@ async def _ssh_connect_impl(
     ctx: SSHToolContext,
 ) -> dict[str, Any]:
     """Core SSHConnect logic — testable without MCP wrapper."""
-    if not ctx.security_config.enabled:
-        return _error("SSH is disabled. Enable it in the security configuration.")
+    if not await _check_ssh_enabled(ctx):
+        return _error("SSH access has been disabled by your administrator.")
 
     action: str = args.get("action", "").strip().lower()
     profile_name: str = args.get("profile_name", "")
@@ -839,10 +1547,11 @@ async def _ssh_connect_impl(
     if action == "approve":
         return _ssh_connect_approve(args, ctx)
 
-    if action not in ("connect", "disconnect", "status"):
+    if action not in ("connect", "disconnect", "status", "cleanup_backups", "rollback"):
         return _error(
             f"Invalid action '{action}'. "
-            "Valid actions: connect, disconnect, status, list, approve"
+            "Valid actions: connect, disconnect, status, list, approve, "
+            "cleanup_backups, rollback"
         )
 
     # All other actions need a profile
@@ -850,6 +1559,12 @@ async def _ssh_connect_impl(
     if err is not None:
         return err
     assert profile is not None  # guaranteed by _resolve_profile when err is None
+
+    if action == "cleanup_backups":
+        return await _ssh_connect_cleanup_backups(args, profile_name, profile, ctx)
+
+    if action == "rollback":
+        return await _ssh_connect_rollback(args, profile_name, profile, ctx)
 
     if action == "connect":
         return await _ssh_connect_connect(profile_name, profile, ctx)
@@ -917,27 +1632,11 @@ async def _ssh_connect_connect(
 ) -> dict[str, Any]:
     """Establish connection for a profile."""
     start_ms = int(time.monotonic() * 1000)
-    try:
-        async with ctx.db_session_factory() as db:
-            connect_fn = await ctx.credential_vault.get_connect_fn(
-                db, ctx.user_id, ctx.session_id, profile
-            )
-        await ctx.connection_pool.get_connection(
-            ctx.session_id, profile_name, ctx.user_id, connect_fn
-        )
-    except SSHConnectionLimitError as exc:
-        return _error(f"SSH connection limit reached: {exc}")
-    except ValueError as exc:
-        return _error(f"SSH credential error: {exc}")
-    except Exception as exc:
-        err_msg = _classify_host_key_error(exc, profile_name)
-        if err_msg:
-            await _audit_host_key_failure(ctx, profile_name, profile, exc)
-            return _error(err_msg)
-        logger.error(
-            "SSHConnect: Connection failed for profile %s: %s", profile_name, exc
-        )
-        return _error(f"SSH connection failed: {_sanitise_error(exc)}")
+    _, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHConnect"
+    )
+    if conn_err is not None:
+        return conn_err
 
     duration_ms = int(time.monotonic() * 1000) - start_ms
 
@@ -1029,6 +1728,202 @@ def _ssh_connect_status(profile_name: str, ctx: SSHToolContext) -> dict[str, Any
     return _result("\n".join(lines))
 
 
+async def _ssh_connect_cleanup_backups(
+    args: dict[str, Any],
+    profile_name: str,
+    profile: SSHProfile,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """List or clean up backup files for a profile."""
+    cleanup_id = args.get("cleanup_id", "").strip()
+    confirm = args.get("confirm", False)
+
+    # Sanitize cleanup_id — reject path traversal
+    if cleanup_id and (".." in cleanup_id or "/" in cleanup_id):
+        return _error("Invalid cleanup_id — must not contain '..' or '/'.")
+
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHConnect:cleanup"
+    )
+    if conn_err is not None:
+        return conn_err
+
+    backup_dir = _backup_dir(profile_name)
+
+    try:
+        async with conn.start_sftp_client() as sftp:
+            if not cleanup_id:
+                # List all backups
+                try:
+                    entries = await sftp.listdir(backup_dir)
+                except Exception:
+                    return _result(f"No backups found for profile '{profile_name}'.")
+
+                if not entries:
+                    return _result(f"No backups found for profile '{profile_name}'.")
+
+                lines = [f"Backups for profile '{profile_name}':\n"]
+                for entry in sorted(entries):
+                    entry_path = f"{backup_dir}/{entry}"
+                    try:
+                        stat = await sftp.stat(entry_path)
+                        size = stat.size if stat.size is not None else 0
+                        lines.append(f"  {entry} ({size} bytes)")
+                    except Exception:
+                        lines.append(f"  {entry} (size unknown)")
+
+                lines.append(f"\nTotal: {len(entries)} backup(s)")
+                lines.append(
+                    "Use cleanup_id=<name> to delete a specific backup, "
+                    "or cleanup_id='all' with confirm=true to delete all."
+                )
+                return _result("\n".join(lines))
+
+            if cleanup_id == "all":
+                if not confirm:
+                    return _error(
+                        "Deleting ALL backups requires confirm=true. "
+                        "This action cannot be undone."
+                    )
+                try:
+                    entries = await sftp.listdir(backup_dir)
+                    for entry in entries:
+                        entry_path = f"{backup_dir}/{entry}"
+                        try:
+                            # Try as directory first (batch snapshots)
+                            sub_entries = await sftp.listdir(entry_path)
+                            for sub in sub_entries:
+                                await sftp.remove(f"{entry_path}/{sub}")
+                            await sftp.rmdir(entry_path)
+                        except Exception:
+                            # It's a file
+                            await sftp.remove(entry_path)
+                    count = len(entries)
+                except Exception as exc:
+                    return _error(f"Cleanup failed: {_sanitise_error(exc)}")
+
+                await _audit_file_access(
+                    ctx, profile_name, profile, backup_dir, "cleanup_backups"
+                )
+
+                return _result(
+                    f"Deleted {count} backup(s) for profile '{profile_name}'."
+                )
+
+            # Delete specific backup
+            target = f"{backup_dir}/{cleanup_id}"
+            try:
+                try:
+                    # Try as directory (batch snapshot)
+                    sub_entries = await sftp.listdir(target)
+                    for sub in sub_entries:
+                        await sftp.remove(f"{target}/{sub}")
+                    await sftp.rmdir(target)
+                except Exception:
+                    # It's a file
+                    await sftp.remove(target)
+            except Exception as exc:
+                return _error(
+                    f"Failed to delete backup '{cleanup_id}': "
+                    f"{_sanitise_error(exc)}"
+                )
+
+            await _audit_file_access(
+                ctx, profile_name, profile,
+                f"{backup_dir}/{cleanup_id}", "cleanup_backups"
+            )
+
+            return _result(f"Deleted backup '{cleanup_id}' for profile '{profile_name}'.")
+
+    except Exception as exc:
+        return _error(f"SFTP operation failed: {_sanitise_error(exc)}")
+
+
+async def _ssh_connect_rollback(
+    args: dict[str, Any],
+    profile_name: str,
+    profile: SSHProfile,
+    ctx: SSHToolContext,
+) -> dict[str, Any]:
+    """Rollback files from a batch snapshot."""
+    snapshot_id = args.get("snapshot_id", "").strip()
+    if not snapshot_id:
+        return _error("snapshot_id is required for rollback action.")
+
+    # Sanitize snapshot_id — reject path traversal
+    if ".." in snapshot_id or "/" in snapshot_id:
+        return _error("Invalid snapshot_id — must not contain '..' or '/'.")
+
+    conn, conn_err = await _get_ssh_connection(
+        profile_name, profile, ctx, "SSHConnect:rollback"
+    )
+    if conn_err is not None:
+        return conn_err
+
+    backup_dir = _backup_dir(profile_name)
+    snapshot_dir = f"{backup_dir}/{snapshot_id}"
+
+    try:
+        async with conn.start_sftp_client() as sftp:
+            # Read manifest
+            manifest_path = f"{snapshot_dir}/manifest.json"
+            try:
+                manifest_raw = await _sftp_read_bytes(sftp, manifest_path)
+                manifest = json.loads(manifest_raw.decode("utf-8"))
+            except Exception as exc:
+                return _error(
+                    f"Cannot read manifest for snapshot '{snapshot_id}': "
+                    f"{_sanitise_error(exc)}"
+                )
+
+            # Validate all paths before restoring
+            files = manifest.get("files", [])
+            for file_entry in files:
+                file_path = file_entry.get("path", "")
+                path_check = ctx.command_filter.check_path_writable(
+                    file_path, profile.privilege_level
+                )
+                if not path_check.allowed:
+                    return _error(
+                        f"Cannot rollback — path '{file_path}' is not writable: "
+                        f"{path_check.reason}"
+                    )
+
+            # Restore each file
+            results = []
+            for file_entry in files:
+                file_path = file_entry["path"]
+                backup_name = file_entry["backup_name"]
+                backup_file_path = f"{snapshot_dir}/{backup_name}"
+                try:
+                    backup_content = await _sftp_read_bytes(sftp, backup_file_path)
+                    dir_name = str(PurePosixPath(file_path).parent)
+                    temp_name = (
+                        f"{dir_name}/.{PurePosixPath(file_path).name}.ag3ntum-tmp"
+                    )
+                    await _sftp_write_bytes(sftp, temp_name, backup_content)
+                    try:
+                        await sftp.posix_rename(temp_name, file_path)
+                    except AttributeError:
+                        await sftp.rename(temp_name, file_path)
+                    results.append(f"  {file_path}: restored")
+                except Exception as exc:
+                    results.append(f"  {file_path}: FAILED ({_sanitise_error(exc)})")
+
+            # Audit
+            await _audit_file_access(
+                ctx, profile_name, profile, snapshot_dir, "rollback"
+            )
+
+            return _result(
+                f"Rollback from snapshot '{snapshot_id}':\n"
+                + "\n".join(results)
+            )
+
+    except Exception as exc:
+        return _error(f"SFTP operation failed: {_sanitise_error(exc)}")
+
+
 def create_ssh_connect_tool(ctx: SSHToolContext):
     """Create SSHConnect tool bound to the given context."""
     bound_ctx = ctx
@@ -1038,16 +1933,24 @@ def create_ssh_connect_tool(ctx: SSHToolContext):
         """Manage SSH connection lifecycle for a profile.
 
 Args:
-    profile_name: SSH profile name (required for connect, disconnect, status)
-    action:       One of: connect | disconnect | status | list | approve
+    profile_name: SSH profile name (required for most actions)
+    action:       One of: connect | disconnect | status | list | approve |
+                  cleanup_backups | rollback
     command:      Exact command to approve (required for approve action)
+    cleanup_id:   Backup name to delete, or 'all' (for cleanup_backups action)
+    confirm:      Required true when cleanup_id='all' (for cleanup_backups action)
+    snapshot_id:  Snapshot directory name to restore from (for rollback action)
 
 Actions:
-    connect:    Establish an SSH connection for the profile
-    disconnect: Close an active SSH connection
-    status:     Check connection state for a specific profile
-    list:       List all configured profiles and active connections
-    approve:    Approve a command requiring human approval (requires 'command' parameter)
+    connect:         Establish an SSH connection for the profile
+    disconnect:      Close an active SSH connection
+    status:          Check connection state for a specific profile
+    list:            List all configured profiles and active connections
+    approve:         Approve a command requiring human approval (requires 'command')
+    cleanup_backups: List or delete backup files (requires profile_name;
+                     optional cleanup_id and confirm parameters)
+    rollback:        Restore files from a batch snapshot (requires profile_name
+                     and snapshot_id)
 
 Notes:
     - SSHExec and SSHRead connect automatically; explicit connect is optional.
@@ -1062,6 +1965,13 @@ Examples:
     SSHConnect(profile_name="prod-web", action="status")
     SSHConnect(profile_name="prod-web", action="disconnect")
     SSHConnect(action="approve", command="mysqldump mydb > /backup/mydb.sql")
+    SSHConnect(profile_name="prod-web", action="cleanup_backups")
+    SSHConnect(profile_name="prod-web", action="cleanup_backups",
+               cleanup_id="nginx.conf.20260318T120000Z.bak")
+    SSHConnect(profile_name="prod-web", action="cleanup_backups",
+               cleanup_id="all", confirm=true)
+    SSHConnect(profile_name="prod-web", action="rollback",
+               snapshot_id="snapshot-20260318T120000Z")
 """,
         {"profile_name": str, "action": str},
     )
@@ -1073,17 +1983,18 @@ Examples:
 
 
 # ---------------------------------------------------------------------------
-# Public factory — returns all three tools
+# Public factory — returns all four tools
 # ---------------------------------------------------------------------------
 
 def create_ssh_tools(ctx: SSHToolContext) -> list:
     """Create all SSH tool functions bound to context.
 
     Returns:
-        List of @tool-decorated functions: [SSHExec, SSHRead, SSHConnect]
+        List of @tool-decorated functions: [SSHExec, SSHRead, SSHWrite, SSHConnect]
     """
     return [
         create_ssh_exec_tool(ctx),
         create_ssh_read_tool(ctx),
+        create_ssh_write_tool(ctx),
         create_ssh_connect_tool(ctx),
     ]

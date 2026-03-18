@@ -1,8 +1,8 @@
 """
 SSH Service Manager — singleton managing shared SSH infrastructure.
 
-Initialised once at API startup. Provides per-session SSH context building
-for agent chat integration. Fail-closed: SSH disabled if config missing.
+Initialised once at API startup. Always ready at platform level.
+Per-user SSH access is controlled by feature flags (admin toggle).
 """
 from __future__ import annotations
 
@@ -10,21 +10,33 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
-from ..core.ssh.ssh_config import SSHSecurityConfig, SSHProfile, load_ssh_security_config
+from ..core.ssh.ssh_config import (
+    SSHProfile,
+    SSHSecurityConfig,
+    _LEGACY_SSH_SECURITY_CONFIG_PATH,
+    get_default_ssh_security_config,
+)
 from ..core.ssh.ssh_connection_pool import SSHConnectionPool
 from ..core.ssh.ssh_command_filter import SSHCommandFilter
+from .redis_client import LazyRedisClient
 
 if TYPE_CHECKING:
     from ..services.vault_service import VaultService
 
 logger = logging.getLogger(__name__)
 
+# Redis cache key template and TTL for per-user SSH feature check
+_SSH_FEATURE_CACHE_KEY = "feature:ssh_enabled:{user_id}"
+_SSH_FEATURE_CACHE_TTL = 30  # seconds
+
+_redis = LazyRedisClient()
+
 
 class SSHServiceManager:
     """Manages shared SSH infrastructure across all sessions.
 
     Lifecycle:
-      API startup  → initialize()
+      API startup  → initialize()  (always succeeds — hardcoded defaults)
       Per-session   → build_session_context()
       Session end   → cleanup_session()
       API shutdown  → shutdown()
@@ -32,32 +44,121 @@ class SSHServiceManager:
 
     def __init__(self) -> None:
         self._pool: Optional[SSHConnectionPool] = None
-        self._security_config: Optional[SSHSecurityConfig] = None
+        self._security_config = get_default_ssh_security_config()
         self._command_filter: Optional[SSHCommandFilter] = None
-        self._enabled: bool = False
+        self._initialized: bool = False
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        """Platform-level SSH readiness — always True after initialize()."""
+        return self._initialized
 
     @property
-    def security_config(self) -> Optional[SSHSecurityConfig]:
+    def security_config(self) -> SSHSecurityConfig:
         return self._security_config
 
     async def initialize(self) -> None:
-        """Load config and create shared services. Called once at API startup."""
-        self._security_config = load_ssh_security_config()
-        if not self._security_config.enabled:
-            logger.info("SSH agent integration disabled (ssh.enabled=false)")
-            return
+        """Create shared services. Called once at API startup.
 
-        self._enabled = True
+        Always succeeds — no YAML dependency. SSH infrastructure is
+        always ready; per-user access is gated by feature flags.
+        """
+        # Warn about legacy YAML config if it exists
+        if _LEGACY_SSH_SECURITY_CONFIG_PATH.exists():
+            logger.warning(
+                "ssh-security.yaml found at %s but is no longer used. "
+                "SSH is now managed per-user via admin panel feature flags.",
+                _LEGACY_SSH_SECURITY_CONFIG_PATH,
+            )
+
         self._pool = SSHConnectionPool(
             idle_timeout_seconds=self._security_config.limits.session_timeout_seconds,
             max_connections_per_session=self._security_config.limits.max_connections_per_user,
         )
         self._command_filter = SSHCommandFilter()
-        logger.info("SSH agent integration enabled")
+        self._initialized = True
+        logger.info("SSH agent integration ready (per-user access via feature flags)")
+
+    async def is_user_ssh_enabled(self, user_id: str) -> bool:
+        """Check if SSH is enabled for a user via feature flags.
+
+        Uses Redis cache with 30s TTL to avoid DB queries on every call.
+        Falls back to direct DB query if Redis is unavailable.
+        """
+        cache_key = _SSH_FEATURE_CACHE_KEY.format(user_id=user_id)
+
+        # Try Redis cache first
+        client = None
+        try:
+            client = _redis.get()
+            cached = await client.get(cache_key)
+            if cached is not None:
+                return cached == "1"
+        except Exception:
+            client = None  # Redis unavailable — fall through to DB
+
+        # Query feature flags from DB
+        enabled = await self._resolve_user_ssh_flag(user_id)
+
+        # Cache the result (reuse client from above)
+        if client is not None:
+            try:
+                await client.set(
+                    cache_key,
+                    "1" if enabled else "0",
+                    ex=_SSH_FEATURE_CACHE_TTL,
+                )
+            except Exception:
+                pass  # Cache write failure is non-fatal
+
+        return enabled
+
+    @staticmethod
+    async def _resolve_user_ssh_flag(user_id: str) -> bool:
+        """Resolve ssh_enabled for a user through the 3-tier feature flag system."""
+        from ..db.database import AsyncSessionLocal
+        from ..db.models import User, Reseller
+        from ..services.feature_flag_service import feature_flag_service
+        from sqlalchemy import select
+
+        try:
+            async with AsyncSessionLocal() as db:
+                await feature_flag_service.ensure_loaded(db)
+
+                result = await db.execute(
+                    select(User).where(User.id == user_id)
+                )
+                user = result.scalar_one_or_none()
+                if not user:
+                    return False
+
+                reseller = None
+                if user.reseller_id:
+                    res_result = await db.execute(
+                        select(Reseller).where(Reseller.id == user.reseller_id)
+                    )
+                    reseller = res_result.scalar_one_or_none()
+
+                features = feature_flag_service.get_user_effective_features(
+                    user, reseller
+                )
+                return bool(features.get("ssh_enabled", False))
+        except Exception as e:
+            logger.warning("Failed to resolve SSH feature flag for user %s: %s", user_id, e)
+            return False  # Fail-closed
+
+    @staticmethod
+    async def invalidate_ssh_cache(user_id: str) -> None:
+        """Invalidate the Redis cache for a user's SSH feature flag.
+
+        Called when admin toggles SSH for a user.
+        """
+        cache_key = _SSH_FEATURE_CACHE_KEY.format(user_id=user_id)
+        try:
+            client = _redis.get()
+            await client.delete(cache_key)
+        except Exception:
+            pass  # Non-fatal
 
     async def build_session_context(
         self,
@@ -67,16 +168,15 @@ class SSHServiceManager:
         db_session_factory: Any,
         vault_service: VaultService,
     ) -> Optional[Any]:
-        """Build per-session SSH context. Returns None if SSH disabled or no profiles.
+        """Build per-session SSH context. Returns None if not ready or no profiles.
 
         The returned object is an SSHToolContext dataclass from
         tools.ag3ntum.ag3ntum_ssh.tool — imported lazily to avoid
         circular dependencies at module level.
         """
         if (
-            not self._enabled
+            not self._initialized
             or not profiles
-            or self._security_config is None
             or self._pool is None
             or self._command_filter is None
         ):
@@ -86,6 +186,8 @@ class SSHServiceManager:
         from tools.ag3ntum.ag3ntum_ssh.tool import (
             SSHApprovalStore,
             SSHToolContext,
+            WriteTracker,
+            WriteBudget,
         )
         from ..core.ssh.ssh_credential_vault import SSHCredentialVault
         from ..core.ssh.ssh_host_key_resolver import SSHHostKeyResolver
@@ -98,6 +200,8 @@ class SSHServiceManager:
             host_key_resolver=host_key_resolver,
         )
         approval_store = SSHApprovalStore()
+        write_tracker = WriteTracker()
+        write_budget = WriteBudget()
 
         # Local refs satisfy type narrowing (None guards above)
         pool = self._pool
@@ -118,6 +222,9 @@ class SSHServiceManager:
             command_semaphore=asyncio.Semaphore(
                 sec_config.limits.max_concurrent_commands,
             ),
+            ssh_enabled_check=self.is_user_ssh_enabled,
+            write_tracker=write_tracker,
+            write_budget=write_budget,
         )
 
     async def cleanup_session(self, session_id: str) -> None:

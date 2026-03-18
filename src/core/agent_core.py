@@ -1050,17 +1050,25 @@ class ClaudeAgent:
                 ag3ntum_tool_names.append("mcp__ag3ntum__Bash")
 
             # Add SSH tool names if SSH context is available
+            # SSH tools are pre-approved (added to allowed_tools) because
+            # access is already gated by feature flags + per-user enablement,
+            # and the tools enforce their own security (command filter, host
+            # blocking, rate limiting, credential vault).
             if ssh_context is not None:
                 from tools.ag3ntum.ag3ntum_ssh.tool import (
                     AG3NTUM_SSH_EXEC_TOOL,
                     AG3NTUM_SSH_READ_TOOL,
                     AG3NTUM_SSH_CONNECT_TOOL,
                 )
-                ag3ntum_tool_names.extend([
+                ssh_tool_names = [
                     AG3NTUM_SSH_EXEC_TOOL,
                     AG3NTUM_SSH_READ_TOOL,
                     AG3NTUM_SSH_CONNECT_TOOL,
-                ])
+                ]
+                ag3ntum_tool_names.extend(ssh_tool_names)
+                # Pre-approve SSH tools so the SDK permission system doesn't
+                # block them — SSH security is enforced by the tools themselves
+                allowed_tools.extend(ssh_tool_names)
 
             # Add to all_tools so they're available for subagent tool filtering
             all_tools.extend(ag3ntum_tool_names)

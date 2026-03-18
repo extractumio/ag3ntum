@@ -9,7 +9,7 @@ All service dependencies are mocked. No real SSH connections are made.
 import asyncio
 import pytest
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tools.ag3ntum.ag3ntum_ssh.tool import (
     SSHToolContext,
@@ -19,6 +19,19 @@ from tools.ag3ntum.ag3ntum_ssh.tool import (
 )
 from src.core.ssh.ssh_config import SSHSecurityConfig, SSHConnectionLimits
 from src.core.ssh.ssh_command_filter import SSHCommandFilter, SSHFilterResult
+
+
+# Auto-mock _check_ssh_enabled to return True for all tests in this module
+# (disabled tests explicitly override this to return False)
+@pytest.fixture(autouse=True)
+def mock_ssh_enabled_check():
+    """Default: SSH is enabled for the test user."""
+    with patch(
+        "tools.ag3ntum.ag3ntum_ssh.tool._check_ssh_enabled",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +126,7 @@ def mock_services(
 
 @pytest.fixture
 def ctx_disabled(
+    ssh_security_config,
     test_ssh_profile,
     mock_db_session,
     mock_connection_pool,
@@ -120,11 +134,15 @@ def ctx_disabled(
     mock_credential_vault,
     mock_audit_service,
 ):
-    """SSHToolContext with SSH disabled."""
+    """SSHToolContext representing a user with SSH disabled by admin.
+
+    SSH is always enabled at platform level; per-user disablement is
+    achieved by mocking _check_ssh_enabled to return False.
+    """
     return SSHToolContext(
         session_id="test-session",
-        user_id="test-user",
-        security_config=SSHSecurityConfig(enabled=False),
+        user_id="disabled-user",
+        security_config=ssh_security_config,
         connection_pool=mock_connection_pool,
         command_filter=mock_command_filter,
         credential_vault=mock_credential_vault,
@@ -172,10 +190,15 @@ class TestSSHExecImpl:
 
     @pytest.mark.unit
     async def test_ssh_disabled_returns_error(self, ctx_disabled):
-        result = await _ssh_exec_impl(
-            {"profile_name": "test-server", "command": "uptime"},
-            ctx=ctx_disabled,
-        )
+        with patch(
+            "tools.ag3ntum.ag3ntum_ssh.tool._check_ssh_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            result = await _ssh_exec_impl(
+                {"profile_name": "test-server", "command": "uptime"},
+                ctx=ctx_disabled,
+            )
         assert result.get("is_error") is True
         assert "disabled" in result["content"][0]["text"].lower()
 
@@ -380,10 +403,15 @@ class TestSSHReadImpl:
 
     @pytest.mark.unit
     async def test_ssh_disabled_returns_error(self, ctx_disabled):
-        result = await _ssh_read_impl(
-            {"profile_name": "test-server", "path": "/etc/hostname"},
-            ctx=ctx_disabled,
-        )
+        with patch(
+            "tools.ag3ntum.ag3ntum_ssh.tool._check_ssh_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            result = await _ssh_read_impl(
+                {"profile_name": "test-server", "path": "/etc/hostname"},
+                ctx=ctx_disabled,
+            )
         assert result.get("is_error") is True
         assert "disabled" in result["content"][0]["text"].lower()
 
@@ -581,10 +609,15 @@ class TestSSHConnectImpl:
 
     @pytest.mark.unit
     async def test_ssh_disabled(self, ctx_disabled):
-        result = await _ssh_connect_impl(
-            {"action": "list", "profile_name": ""},
-            ctx=ctx_disabled,
-        )
+        with patch(
+            "tools.ag3ntum.ag3ntum_ssh.tool._check_ssh_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            result = await _ssh_connect_impl(
+                {"action": "list", "profile_name": ""},
+                ctx=ctx_disabled,
+            )
         assert result.get("is_error") is True
         assert "disabled" in result["content"][0]["text"].lower()
 

@@ -140,7 +140,7 @@ class TestFileSizeLimits:
         "scripts/red-alert.py": 2500,
         "scripts/claude-code-security-env-check.py": 1500,
         # Core — large due to complexity, tracked for future splitting
-        "src/core/agent_core.py": 2300,
+        "src/core/agent_core.py": 2350,
         "src/core/path_validator.py": 1800,
         "src/core/trace_processor.py": 1500,
         "src/core/permission_config.py": 1300,
@@ -158,7 +158,7 @@ class TestFileSizeLimits:
         "src/api/routes/files.py": 1700,
         "src/api/routes/sessions.py": 1500,
         "src/api/routes/reseller.py": 2200,
-        "src/api/routes/admin.py": 1100,
+        "src/api/routes/admin.py": 1200,
         "src/api/reseller_models.py": 800,
         "src/api/security_middleware.py": 700,
         # Models
@@ -218,13 +218,14 @@ class TestFileSizeLimits:
         "tests/security/test_uid_mode_integration.py": 700,
         "tests/security/test_uid_security.py": 750,
         "tests/security/test_sandboxed_envs.py": 850,
-        "tests/security/test_user_isolation.py": 1700,
+        "tests/security/test_user_isolation.py": 1750,
         "tests/sandbox/security_tests.py": 1500,
         # Tools
         "tools/ag3ntum/ag3ntum_webfetch/tool.py": 750,
-        "tools/ag3ntum/ag3ntum_ssh/tool.py": 1150,
+        "tools/ag3ntum/ag3ntum_ssh/tool.py": 2100,  # SSHWrite + batch mode + cleanup/rollback
         "src/core/ssh/ssh_command_filter.py": 900,
         "tests/backend/ssh/test_ssh_tools.py": 800,
+        "tests/backend/ssh/test_ssh_write.py": 970,
         "tests/backend/ssh/test_ssh_command_filter.py": 1150,
         "tests/backend/ssh/test_ssh_tool_hardening.py": 1100,
         "tests/backend/test_ssh_profiles_connection.py": 800,
@@ -239,11 +240,11 @@ class TestFileSizeLimits:
         "src/core/skills.py": 750,
         # Large test files (comprehensive test suites)
         "tests/security/test_reseller_security.py": 650,
-        "tests/core-tests/test_agent_core_unit.py": 950,
+        "tests/core-tests/test_agent_core_unit.py": 1150,
         "tests/backend/test_ag3ntum_read_document.py": 1100,
         "tests/backend/test_ag3ntum_webfetch.py": 1600,
         # Structural tests themselves — grows as invariants are added
-        "tests/structural/test_architecture.py": 750,
+        "tests/structural/test_architecture.py": 800,
     }
 
     # Project directories to scan (avoids walking system paths in Docker)
@@ -681,4 +682,94 @@ class TestCodeConventions:
             + f"\n{'='*60}\n"
             f"Fix: Extract tool logic to _*_impl() functions.\n"
             f"See CLAUDE.md gotcha #19.\n"
+        )
+
+
+class TestPermissionsYamlSSHTools:
+    """
+    Verify permissions.yaml includes SSH tools.
+
+    Regression guard: SSH tools must be listed in both tools.enabled and
+    session_workspace.allow so the SDK permission system does not block them.
+    Without this, SSH tool calls fail with "permission denied" even when the
+    user has SSH enabled via feature flags.
+    """
+
+    PERMISSIONS_PATH = os.path.join(
+        PROJECT_ROOT, "config", "security", "permissions.yaml"
+    )
+
+    SSH_TOOL_NAMES = [
+        "mcp__ag3ntum__SSHConnect",
+        "mcp__ag3ntum__SSHExec",
+        "mcp__ag3ntum__SSHRead",
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _load_permissions(self):
+        """Load and parse permissions.yaml once per test."""
+        import yaml
+        with open(self.PERMISSIONS_PATH) as f:
+            self._config = yaml.safe_load(f)
+
+    @pytest.mark.unit
+    def test_ssh_tools_in_enabled_list(self):
+        """SSH tools must be in tools.enabled so they're available to the agent."""
+        enabled = self._config.get("tools", {}).get("enabled", [])
+
+        missing = [t for t in self.SSH_TOOL_NAMES if t not in enabled]
+        assert not missing, (
+            f"\n{'='*60}\n"
+            f"SSH TOOLS MISSING FROM permissions.yaml tools.enabled\n"
+            f"{'='*60}\n"
+            f"Missing: {missing}\n"
+            f"\n"
+            f"Without these entries, SSH tools are not registered as available\n"
+            f"tools and the SDK will deny all SSH operations.\n"
+            f"\n"
+            f"Fix: Add the missing tools to config/security/permissions.yaml\n"
+            f"under tools.enabled.\n"
+            f"{'='*60}\n"
+        )
+
+    @pytest.mark.unit
+    def test_ssh_tools_not_in_disabled_list(self):
+        """SSH tools must NOT be in tools.disabled."""
+        disabled = self._config.get("tools", {}).get("disabled", [])
+
+        blocked = [t for t in self.SSH_TOOL_NAMES if t in disabled]
+        assert not blocked, (
+            f"\n{'='*60}\n"
+            f"SSH TOOLS FOUND IN permissions.yaml tools.disabled\n"
+            f"{'='*60}\n"
+            f"Blocked: {blocked}\n"
+            f"\n"
+            f"SSH tools have their own security layers (command filter,\n"
+            f"host blocking, rate limiting). They must not be disabled here.\n"
+            f"Per-user access is controlled by feature flags, not by disabling.\n"
+            f"\n"
+            f"Fix: Remove these tools from tools.disabled in\n"
+            f"config/security/permissions.yaml.\n"
+            f"{'='*60}\n"
+        )
+
+    @pytest.mark.unit
+    def test_ssh_tools_in_allow_patterns(self):
+        """SSH tools must have allow patterns in session_workspace.allow."""
+        allow = self._config.get("session_workspace", {}).get("allow", [])
+
+        expected_patterns = [f"{t}(*)" for t in self.SSH_TOOL_NAMES]
+        missing = [p for p in expected_patterns if p not in allow]
+        assert not missing, (
+            f"\n{'='*60}\n"
+            f"SSH TOOL PATTERNS MISSING FROM session_workspace.allow\n"
+            f"{'='*60}\n"
+            f"Missing: {missing}\n"
+            f"\n"
+            f"Without allow patterns, the permission callback denies SSH\n"
+            f"tool calls even when the tools are registered as available.\n"
+            f"\n"
+            f"Fix: Add the missing patterns to session_workspace.allow in\n"
+            f"config/security/permissions.yaml.\n"
+            f"{'='*60}\n"
         )

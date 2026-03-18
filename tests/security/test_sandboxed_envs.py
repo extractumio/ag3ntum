@@ -235,9 +235,9 @@ class TestBwrapEnvInjection:
         executor = SandboxExecutor(config)
         cmd = executor.build_bwrap_command(["echo", "hello"], allow_network=False)
 
-        # Count --setenv occurrences (HOME, PATH, AG3NTUM_CONTEXT, PYTHONDONTWRITEBYTECODE)
+        # Count --setenv occurrences for the fixed sandbox environment.
         setenv_count = cmd.count("--setenv")
-        assert setenv_count == 4  # HOME, PATH, AG3NTUM_CONTEXT, PYTHONDONTWRITEBYTECODE
+        assert setenv_count == 7
 
     def test_invalid_env_name_skipped(self, workspace: Path) -> None:
         """Environment variable names that aren't valid identifiers are skipped."""

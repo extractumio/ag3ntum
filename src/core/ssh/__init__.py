@@ -8,12 +8,12 @@ Provides secure SSH connectivity with:
 - Configuration management (profiles, security settings)
 """
 from .ssh_config import (
+    ALWAYS_BLOCKED_HOSTS,
     SSHProfile,
     SSHSecurityConfig,
     SSHConnectionLimits,
     SSHHostKeyVerificationConfig,
-    load_ssh_security_config,
-    load_ssh_profiles,
+    get_default_ssh_security_config,
 )
 from .ssh_command_filter import SSHCommandFilter, SSHFilterResult
 from .ssh_connection_pool import (
@@ -31,8 +31,8 @@ __all__ = [
     "SSHSecurityConfig",
     "SSHConnectionLimits",
     "SSHHostKeyVerificationConfig",
-    "load_ssh_security_config",
-    "load_ssh_profiles",
+    "ALWAYS_BLOCKED_HOSTS",
+    "get_default_ssh_security_config",
     "SSHCommandFilter",
     "SSHFilterResult",
     "SSHConnectionPool",

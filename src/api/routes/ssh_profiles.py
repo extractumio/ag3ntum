@@ -42,12 +42,49 @@ async def _check_ssh_test_rate(user: User) -> None:
 
 
 # =========================================================================
+# User feature check
+# =========================================================================
+
+async def _require_ssh_enabled(user: User = Depends(get_current_user)):
+    """Dependency that checks SSH is enabled for the current user."""
+    from ...services.ssh_service_manager import ssh_service_manager
+    if not await ssh_service_manager.is_user_ssh_enabled(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="SSH is not enabled for your account. Contact your administrator.",
+        )
+    return user
+
+
+@router.get("/settings/features")
+async def get_my_features(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get effective features for the current user (read-only)."""
+    from ...services.feature_flag_service import feature_flag_service
+    from ...db.models import Reseller
+    from sqlalchemy import select as sa_select
+
+    await feature_flag_service.ensure_loaded(db)
+
+    reseller = None
+    if user.reseller_id:
+        result = await db.execute(
+            sa_select(Reseller).where(Reseller.id == user.reseller_id)
+        )
+        reseller = result.scalar_one_or_none()
+
+    return feature_flag_service.get_user_effective_features(user, reseller)
+
+
+# =========================================================================
 # User self-service endpoints
 # =========================================================================
 
 @router.get("/ssh-profiles", response_model=SSHProfileListResponse)
 async def list_my_profiles(
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """List all SSH profiles for the current user."""
@@ -59,7 +96,7 @@ async def list_my_profiles(
              status_code=status.HTTP_201_CREATED)
 async def create_profile(
     req: CreateSSHProfileRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new SSH profile for the current user."""
@@ -93,7 +130,7 @@ async def create_profile(
 @router.get("/ssh-profiles/{profile_id}", response_model=SSHProfileResponse)
 async def get_profile(
     profile_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single SSH profile by ID."""
@@ -107,7 +144,7 @@ async def get_profile(
 async def update_profile(
     profile_id: str,
     req: UpdateSSHProfileRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Update an SSH profile."""
@@ -134,7 +171,7 @@ async def update_profile(
 @router.delete("/ssh-profiles/{profile_id}")
 async def delete_profile(
     profile_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete an SSH profile and its vault secrets."""
@@ -148,7 +185,7 @@ async def delete_profile(
              response_model=TestSSHConnectionResponse)
 async def test_connection(
     req: TestSSHConnectionRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Test an SSH connection without saving."""
@@ -167,7 +204,7 @@ async def test_connection(
              response_model=TestSSHConnectionResponse)
 async def test_saved_connection(
     profile_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_require_ssh_enabled),
     db: AsyncSession = Depends(get_db),
 ):
     """Test an existing saved profile's connection."""

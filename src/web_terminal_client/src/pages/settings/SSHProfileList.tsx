@@ -27,7 +27,7 @@ function profileStatus(profile: SSHProfile): string {
 function profileStatusLabel(profile: SSHProfile): string {
   if (!profile.is_active) return 'inactive';
   if (profile.last_connection_error) return 'error';
-  if (profile.last_connected_at) return 'connected';
+  if (profile.last_connected_at) return 'tested';
   return 'never used';
 }
 
@@ -126,11 +126,13 @@ export function SSHProfileList() {
     },
     { key: 'username', header: 'Username', sortable: true },
     {
-      key: 'mode',
-      header: 'Mode',
-      render: (r) => (
-        <span className="badge">{String(r.mode)}</span>
-      ),
+      key: 'privilege_level',
+      header: 'Access',
+      render: (r) => {
+        const level = Number(r.privilege_level);
+        const labels: Record<number, string> = { 0: 'Monitor', 1: 'Manage', 2: 'Config' };
+        return <span className="badge">L{level} {labels[level] || ''}</span>;
+      },
     },
     {
       key: 'is_active',

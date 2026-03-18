@@ -1,9 +1,11 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { DashboardLayout } from '../../components/dashboard';
 import { UserSettings } from './UserSettings';
+import { SSHSettingsPage } from './SSHSettingsPage';
 
 const NAV_ITEMS = [
-  { to: '/settings', label: 'SSH Connections' },
+  { to: '/settings', label: 'General' },
+  { to: '/settings/ssh', label: 'SSH Connections' },
 ];
 
 export default function SettingsRoutes() {
@@ -11,7 +13,7 @@ export default function SettingsRoutes() {
     <Routes>
       <Route element={<DashboardLayout title="Settings" navItems={NAV_ITEMS} />}>
         <Route index element={<UserSettings />} />
-        <Route path="ssh" element={<Navigate to="/settings" replace />} />
+        <Route path="ssh" element={<SSHSettingsPage />} />
         <Route path="*" element={<Navigate to="/settings" replace />} />
       </Route>
     </Routes>
