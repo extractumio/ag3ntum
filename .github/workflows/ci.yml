@@ -86,6 +86,9 @@ jobs:
     runs-on: [self-hosted, linux, docker]
     needs: [fast-checks, structural-tests]
     steps:
+      - name: Fix workspace ownership
+        run: sudo chown -R $(id -u):$(id -g) "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Create secrets config for CI
