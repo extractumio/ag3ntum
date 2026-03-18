@@ -87,7 +87,9 @@ jobs:
     needs: [fast-checks, structural-tests]
     steps:
       - name: Fix workspace ownership
-        run: sudo chown -R $(id -u):$(id -g) "$GITHUB_WORKSPACE" 2>/dev/null || true
+        run: |
+          # Docker builds leave files owned by UID 45045. Use a container to reclaim.
+          docker run --rm -v "$GITHUB_WORKSPACE":/ws alpine chown -R "$(id -u):$(id -g)" /ws || true
 
       - uses: actions/checkout@v4
 
