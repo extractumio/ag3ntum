@@ -314,7 +314,7 @@ class TestPromptContext:
         block = ctx.strings["SSH_PROFILES_BLOCK"]
         assert "test-server" in block
         assert "deploy@192.168.1.100:22" in block
-        assert "L0 readonly" in block
+        assert "L0 monitoring" in block
         assert "Test server" in block
 
     def test_tool_names_registered(self, sample_profiles):
@@ -345,8 +345,8 @@ class TestPromptContext:
         assert "staging-db" in block
         assert "root@10.0.0.1:22" in block
         assert "admin@10.0.0.2:2222" in block
-        assert "L1 operations" in block
-        assert "L0 readonly" in block
+        assert "L1 service" in block
+        assert "L0 monitoring" in block
 
 
 class TestSSHPromptRendering:
