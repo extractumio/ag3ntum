@@ -160,31 +160,35 @@ def build_prompt_context(
         from tools.ag3ntum.ag3ntum_ssh.tool import (
             AG3NTUM_SSH_EXEC_TOOL,
             AG3NTUM_SSH_READ_TOOL,
+            AG3NTUM_SSH_WRITE_TOOL,
             AG3NTUM_SSH_CONNECT_TOOL,
         )
         context.flags["SSH_ENABLED"] = True
-        mode_labels = {
-            "readonly": "L0 readonly",
-            "operations": "L1 operations",
-            "filtered_shell": "L2 filtered",
+
+        # Build per-profile summary with privilege level capabilities
+        _LEVEL_LABELS: dict[int, str] = {
+            0: "L0 monitoring — read-only commands only",
+            1: "L1 service — read + targeted sudo (restart/reload)",
+            2: "L2 config — read + write to config paths (.conf/.yaml/.json only)",
+            3: "L3 admin — broad access, dangerous commands blocked",
+            4: "L4 emergency — minimal filter, time-boxed",
         }
         lines = []
         for name, profile in ssh_profiles.items():
-            mode = getattr(profile, "mode", "readonly")
+            level = getattr(profile, "privilege_level", 0)
             desc = getattr(profile, "description", "")
             host = getattr(profile, "host", "?")
             port = getattr(profile, "port", 22)
             user = getattr(profile, "username", "?")
-            line = (
-                f"- **{name}**: {user}@{host}:{port} "
-                f"({mode_labels.get(mode, mode)})"
-            )
+            level_desc = _LEVEL_LABELS.get(level, f"L{level}")
+            line = f"- **{name}**: {user}@{host}:{port} ({level_desc})"
             if desc:
                 line += f" — {desc}"
             lines.append(line)
         context.strings["SSH_PROFILES_BLOCK"] = "\n".join(lines)
         context.tool_names["AG3NTUM_SSH_EXEC_TOOL"] = AG3NTUM_SSH_EXEC_TOOL
         context.tool_names["AG3NTUM_SSH_READ_TOOL"] = AG3NTUM_SSH_READ_TOOL
+        context.tool_names["AG3NTUM_SSH_WRITE_TOOL"] = AG3NTUM_SSH_WRITE_TOOL
         context.tool_names["AG3NTUM_SSH_CONNECT_TOOL"] = AG3NTUM_SSH_CONNECT_TOOL
     else:
         context.flags["SSH_ENABLED"] = False
