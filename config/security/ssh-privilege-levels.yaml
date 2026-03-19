@@ -29,81 +29,179 @@ privilege_levels:
         description: "Environment variables"
       - pattern: '^which\s+[\w-]+$'
         description: "Command location"
+      - pattern: '^type\s+[\w-]+$'
+        description: "Command type"
+      - pattern: '^nproc$'
+        description: "Number of CPU cores"
+
       # --- Directory and file listing ---
-      - pattern: '^ls(\s+-[laSrhta]+)*(\s+[\w/.~*-]+)*$'
-        description: "List directory contents"
+      - pattern: '^ls(\s+-[\w]+)*(\s+[\w/.~*-]+)*$'
+        description: "List directory contents (any flags, optional path)"
+      - pattern: '^tree(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Directory tree view"
+      - pattern: '^find\s+[\w/.~-]+(\s+-[\w]+(\s+[\w/.~*-]+)?)*$'
+        description: "Find files and directories"
+      - pattern: '^(locate|mlocate)\s+[\w.*-]+$'
+        description: "Locate files by name"
+      - pattern: '^readlink(\s+-[\w]+)*\s+[\w/.~-]+$'
+        description: "Resolve symlinks"
+
       # --- File reading ---
-      - pattern: '^cat\s+/var/log/[\w/.+-]+$'
-        description: "Read log files"
-      - pattern: '^cat\s+[\w/.~-]+$'
+      - pattern: '^cat(\s+-[\w]+)*\s+[\w/.~+-]+$'
         description: "Read file contents"
-      - pattern: '^head(\s+-[n]?\s*\d+)?\s+[\w/.~-]+$'
-        description: "Head file contents"
-      - pattern: '^head\s+-[n]?\s*\d+$'
-        description: "Head first N lines (pipe target)"
+      - pattern: '^cat\s+/etc/[\w-]*release$'
+        description: "Read OS release file"
+      - pattern: '^head(\s+-[\w]*\s*\d*)*(\s+[\w/.~+-]+)?$'
+        description: "Head file contents or pipe target"
+      - pattern: '^tail(\s+-[\w]*\s*\d*)*(\s+[\w/.~+-]+)?$'
+        description: "Tail file contents or pipe target"
       - pattern: '^tail\s+-[nf]\s+\d*\s+/var/log/[\w/.+-]+$'
         description: "Tail log files"
-      - pattern: '^tail(\s+-[nf]\s*\d*)?\s+[\w/.~-]+$'
-        description: "Tail file contents"
-      - pattern: '^tail\s+-[n]?\s*\d+$'
-        description: "Tail last N lines (pipe target)"
-      - pattern: '^grep\s+.*\s+/var/log/[\w/.+-]+$'
-        description: "Search log files"
-      - pattern: '^grep(\s+-[rilnHcvEw]+)*\s+(".*?"|''.*?''|[\w.*-]+)\s+[\w/.~-]+$'
-        description: "Search any file for patterns"
-      - pattern: '^wc\s+-[lwc]+\s+[\w/.~-]+$'
-        description: "Word/line/char count of a file"
-      - pattern: '^du\s+-[sh]+(\s+[\w/.~*-]+)+$'
-        description: "Directory disk usage with glob"
+      - pattern: '^(less|more)$'
+        description: "Pager (pipe target only)"
+      - pattern: '^strings\s+[\w/.~-]+$'
+        description: "Print printable strings from binary"
+      - pattern: '^(md5|sha1|sha256|sha512)sum\s+[\w/.~-]+$'
+        description: "Checksum a file"
+      - pattern: '^wc(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Word/line/char count"
+      - pattern: '^du\s+(-[\w]+\s*)*(\s+[\w/.~*-]+)*$'
+        description: "Directory disk usage"
+
       # --- File metadata ---
       - pattern: '^file\s+[\w/.~-]+$'
         description: "File type identification"
       - pattern: '^stat\s+[\w/.~-]+$'
         description: "File metadata"
+
       # --- Disk and storage ---
-      - pattern: '^df\s+-[hT]+$'
-        description: "Disk usage"
-      - pattern: '^du\s+-[sh]+(\s+[\w/.~-]+)?$'
-        description: "Directory disk usage"
+      - pattern: '^df(\s+-[\w]+)*(\s+[\w/.~-]+)*$'
+        description: "Disk usage (any flags, optional path)"
+      - pattern: '^ls(cpu|blk|mem|pci|usb)(\s+-[\w]+)*$'
+        description: "Hardware listing (lscpu, lsblk, lsmem, lspci, lsusb)"
+
       # --- System info ---
-      - pattern: '^free\s+-[hm]+$'
-        description: "Memory usage"
+      - pattern: '^free(\s+-[\w]+)*$'
+        description: "Memory usage (any flags)"
       - pattern: '^uptime$'
         description: "System uptime"
-      - pattern: '^uname\s+-[a]+$'
-        description: "System info"
-      - pattern: '^ps\s+aux$'
+      - pattern: '^uname(\s+-[\w]+)*$'
+        description: "System info (any flags)"
+      - pattern: '^ps(\s+[-]?[\w]+)*$'
         description: "Process list"
-      - pattern: '^cat\s+/etc/os-release$'
-        description: "OS version"
+      - pattern: '^top\s+-bn?\s*\d+$'
+        description: "Non-interactive top snapshot"
+      - pattern: '^iostat(\s+-[\w]+)*(\s+\d+)*$'
+        description: "I/O statistics"
+      - pattern: '^vmstat(\s+\d+)*(\s+\d+)?$'
+        description: "Virtual memory statistics"
+      - pattern: '^mpstat(\s+-[\w]+)*(\s+\d+)*$'
+        description: "CPU statistics"
+      - pattern: '^lsb_release(\s+-[\w]+)*$'
+        description: "Linux distribution info"
+      - pattern: '^hostnamectl(\s+status)?$'
+        description: "Hostname and OS info"
+      - pattern: '^timedatectl(\s+status)?$'
+        description: "Date/time and timezone info"
+      - pattern: '^getent\s+(passwd|group|hosts|services)\s*[\w.-]*$'
+        description: "Query system databases"
+
       # --- Service and journal ---
       - pattern: '^systemctl\s+status\s+[\w@.-]+$'
         description: "Check service status"
+      - pattern: '^systemctl\s+list-units(\s+--[\w-]+(=[\w,]+)?)*$'
+        description: "List systemd units (read-only)"
+      - pattern: '^systemctl\s+list-unit-files(\s+--[\w-]+(=[\w,]+)?)*$'
+        description: "List systemd unit files (read-only)"
+      - pattern: '^systemctl\s+is-active\s+[\w@.-]+$'
+        description: "Check if a service is active"
+      - pattern: '^systemctl\s+is-enabled\s+[\w@.-]+$'
+        description: "Check if a service is enabled"
+      - pattern: '^systemctl\s+show\s+[\w@.-]+(\s+-p\s+[\w]+)?$'
+        description: "Show systemd unit properties"
       - pattern: '^journalctl\s+(-u\s+[\w@.-]+\s+)?--no-pager(\s+-n\s+\d+)?$'
         description: "Read journal logs"
       - pattern: '^journalctl\s+(-u\s+(ssh|sshd|[\w@.-]+)\s+)?(--since|--until)\s+["''\w\s:.-]+(\s+--no-pager)?(\s+-n\s+\d+)?$'
         description: "Read journal logs in a bounded time window"
-      # --- Pipeline helpers ---
-      - pattern: '^wc\s+-[lwc]+$'
-        description: "Word/line/char count (pipe target)"
-      - pattern: '^sort(\s+-[rnuk]+)*$'
-        description: "Sort output (pipe target)"
-      - pattern: '^uniq(\s+-c)?$'
-        description: "Unique filter (pipe target)"
+
+      # --- Pipeline utilities (safe pipe targets, all read-only) ---
+      - pattern: "^grep(\\s+-[\\w]+)*\\s+(\"[^\"]*\"|'[^']*'|[^\\s]+)(\\s+[\\w/.~*-]+)*$"
+        description: "Search for patterns (with or without file)"
+      - pattern: '^awk\s+.*$'
+        description: "Awk text processing (pipe target)"
+      - pattern: '^sed(\s+-[n])?(\s+-e)?\s+.*$'
+        description: "Sed read-only text processing (no -i)"
+      - pattern: '^cut(\s+-[\w]+)*(\s+-[\w]+\s+[\w,.:-]+)*$'
+        description: "Cut fields from lines"
+      - pattern: '^tr(\s+-[\w]+)*\s+.*$'
+        description: "Translate characters"
+      - pattern: '^column(\s+-[\w]+)*$'
+        description: "Format output in columns (pipe target)"
+      - pattern: '^tac(\s+[\w/.~-]+)?$'
+        description: "Reverse line order"
+      - pattern: '^rev(\s+[\w/.~-]+)?$'
+        description: "Reverse characters in lines"
+      - pattern: '^nl(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Number lines"
+      - pattern: '^fmt(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Reformat text"
+      - pattern: '^sort(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Sort output"
+      - pattern: '^uniq(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Unique filter"
+      - pattern: '^echo\s+[^><|;&\n]+$'
+        description: "Echo text (redirect operators blocked)"
+      - pattern: '^printf\s+[^><|;&\n]+$'
+        description: "Printf text output (redirect operators blocked)"
+      - pattern: '^(true|false)$'
+        description: "Boolean no-op commands"
+      - pattern: '^test\s+.*$'
+        description: "Test/conditional expression"
+      - pattern: '^\[.*\]$'
+        description: "Bracket conditional expression"
+
       # --- Network diagnostics ---
-      - pattern: '^netstat\s+-[tlnup]+$|^ss\s+-[tlnup]+$'
-        description: "Network connections"
-      - pattern: '^ip\s+(addr|route|link)\s*(show)?(\s+[\w.-]+)?$'
-        description: "Network configuration"
+      - pattern: '^netstat(\s+-[\w]+)*$'
+        description: "Network connections (any flags)"
+      - pattern: '^ss(\s+-[\w]+)*$'
+        description: "Socket statistics (any flags)"
+      - pattern: '^ip(\s+-[\w]+)*\s+[\w]+(\s+[\w]+)*(\s+[\w./:-]+)?$'
+        description: "Network configuration (ip addr, ip route, etc.)"
       - pattern: '^dig\s+[\w.-]+$'
+        description: "DNS lookup"
+      - pattern: '^nslookup\s+[\w.-]+(\s+[\w.-]+)?$'
+        description: "DNS lookup"
+      - pattern: '^host(\s+-[\w]+)*\s+[\w.-]+$'
         description: "DNS lookup"
       - pattern: '^ping\s+-c\s+\d+\s+[\w.-]+$'
         description: "Network connectivity"
+      - pattern: '^(traceroute|tracepath)\s+[\w.-]+$'
+        description: "Network route trace"
       - pattern: '^openssl\s+s_client\s+-connect\s+[\w.-]+:\d+$'
         description: "SSL certificate check"
-      # --- Find and locate ---
-      - pattern: '^find\s+[\w/.~-]+\s+-name\s+[''"\w.*-]+(\s+-type\s+[fd])?$'
-        description: "Find files by name"
+      - pattern: '^curl(\s+-[\w]+)*\s+[\w:/.?&=%@+-]+$'
+        description: "HTTP request (no pipe to shell — caught by always_blocked)"
+      - pattern: '^wget\s+--spider\s+[\w:/.?&=%-]+$'
+        description: "HTTP head check (wget spider)"
+      - pattern: '^(sudo\s+)?iptables\s+-[LnvS]+(\s+--[\w-]+)*$'
+        description: "Read iptables rules"
+
+      # --- Docker read-only ---
+      - pattern: '^docker\s+ps(\s+-[\w]+)*$'
+        description: "List containers"
+      - pattern: '^docker\s+stats\s+--no-stream$'
+        description: "Container resource stats (non-streaming)"
+      - pattern: '^docker\s+logs(\s+-[\w]+)*\s+[\w.-]+$'
+        description: "View container logs"
+      - pattern: '^docker\s+inspect\s+[\w.-]+$'
+        description: "Inspect container or image"
+      - pattern: '^docker\s+images(\s+-[\w]+)*$'
+        description: "List Docker images"
+      - pattern: '^docker\s+(info|version)$'
+        description: "Docker info or version"
+      - pattern: '^docker\s+compose\s+ps(\s+-[\w]+)*$'
+        description: "Docker compose container status"
+
       # --- Authentication diagnostics ---
       - pattern: '^last(\s+-[fniwxR]+)*(\s+[\w.-]+)?$'
         description: "Recent login history"
@@ -111,17 +209,13 @@ privilege_levels:
         description: "Recent failed login history"
       - pattern: '^faillog(\s+-[au])?(\s+[\w.-]+)?$'
         description: "Failed login counters"
-      - pattern: '^grep\s+.*\s+/var/log/(auth\.log|secure)(\.\d+)?$'
-        description: "Search SSH authentication logs"
-      - pattern: '^tail\s+-[nf]\s+\d*\s+/var/log/(auth\.log|secure)(\.\d+)?$'
-        description: "Tail SSH authentication logs"
+
       # --- Runtime and config checks ---
       - pattern: '^nginx\s+-t$|^apache2ctl\s+-t$|^httpd\s+-t$'
         description: "Config syntax check"
       - pattern: '^php\s+-v$|^python3?\s+--version$|^node\s+--version$'
         description: "Runtime version check"
-      - pattern: '^docker\s+ps(\s+-a)?$|^docker\s+stats\s+--no-stream$'
-        description: "Container status"
+
       # WordPress wp-cli read-only commands
       - pattern: '^wp\s+(plugin|theme|core)\s+(list|status|version|verify-checksums)(\s+--[\w-]+(=\S+)?)*$'
         description: "wp-cli read-only listing/version commands"
@@ -147,9 +241,15 @@ privilege_levels:
     sudo_allowed: true
     sudo_restricted_to:
       - '^sudo\s+systemctl\s+(restart|reload|start|stop|status)\s+[\w@.-]+$'
+      - '^sudo\s+systemctl\s+list-units(\s+--[\w-]+(=[\w,]+)?)*$'
       - '^sudo\s+service\s+[\w.-]+\s+(restart|reload|start|stop)$'
       - '^sudo\s+nginx\s+-s\s+(reload|reopen)$'
       - '^sudo\s+apachectl\s+graceful$'
+      - '^sudo\s+kill\s+-\w+\s+\d+$'
+      - '^sudo\s+journalctl(\s+-[\w]+)*(\s+[\w@.-]+)*(\s+--[\w-]+(=[\w"''./ -]+)?)*$'
+      - '^sudo\s+nginx\s+-t$'
+      - '^sudo\s+(apache2ctl|httpd)\s+-t$'
+      - '^sudo\s+certbot\s+(renew|certificates)(\s+--[\w-]+)*$'
     allowed_commands:
       # WordPress wp-cli operational commands (no sudo needed — runs as web user)
       - pattern: '^wp\s+plugin\s+update\s+[\w-]+(\s+--[\w-]+(=\S+)?)*$'
@@ -179,6 +279,7 @@ privilege_levels:
     writable_paths:
       - '/etc/nginx/'
       - '/etc/apache2/'
+      - '/etc/httpd/'
       - '/etc/caddy/'
       - '/etc/php/'
       - '/etc/mysql/'
@@ -186,6 +287,10 @@ privilege_levels:
       - '/etc/redis/'
       - '/etc/letsencrypt/'
       - '/etc/systemd/system/'
+      - '/etc/postfix/'
+      - '/etc/dovecot/'
+      - '/etc/fail2ban/'
+      - '/var/www/'
     blocked_paths:
       - '/etc/shadow'
       - '/etc/passwd'

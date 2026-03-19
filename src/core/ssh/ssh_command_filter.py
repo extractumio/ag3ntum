@@ -20,9 +20,77 @@ import yaml
 
 from .ssh_config import SSHSecurityConfig
 
-# Regex to split compound commands on shell operators.
-# Ported from command_security.py for SSH command filtering.
-_SSH_COMPOUND_SPLIT_RE = re.compile(r'\s*(?:&&|\|\||[;|])\s*')
+# Strip harmless stderr redirects before matching — they are noise.
+# Dangerous redirects (> /etc/, > /root/) are caught by always_blocked.
+_STDERR_REDIRECT_RE = re.compile(r'\s*2>\s*/dev/null\s*|\s*2>&1\s*')
+
+
+def _split_compound_command(command: str) -> list[str]:
+    """Split a command on shell operators (;, |, &&, ||) respecting quotes.
+
+    Naive regex splitting breaks on | inside quoted strings like
+    grep -E "nginx|apache". This parser tracks quote state so those
+    pipe characters are preserved in the subcommand.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+
+    while i < n:
+        ch = command[i]
+
+        # Track quote state (no escaping needed — always_blocked prevents
+        # shell expansion, so backslash escapes are not security-relevant)
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+            i += 1
+            continue
+
+        # Inside quotes — everything is literal
+        if in_single or in_double:
+            current.append(ch)
+            i += 1
+            continue
+
+        # Outside quotes — check for shell operators
+        # && and || (two-char operators, check first)
+        if i + 1 < n:
+            two = command[i:i + 2]
+            if two in ("&&", "||"):
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                i += 2
+                continue
+
+        # Single-char operators: ; and |
+        if ch in (";", "|"):
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    # Remainder
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+
+    return parts
 
 logger = logging.getLogger(__name__)
 
@@ -438,13 +506,15 @@ class SSHCommandFilter:
                 )
 
         # 4. Split compound commands and check each subcommand individually.
+        # Uses quote-aware parser so | inside "nginx|apache" is preserved.
         # Splitting prevents ``uptime; rm -rf /`` from matching ``^uptime$``
         # because we check each part in isolation.
-        subcommands = [
-            s.strip()
-            for s in _SSH_COMPOUND_SPLIT_RE.split(command)
-            if s.strip()
-        ]
+        subcommands = _split_compound_command(command)
+        # Strip harmless stderr redirects (2>/dev/null, 2>&1) from each
+        # subcommand before pattern matching — they add no useful information
+        # and make allowlist patterns unnecessarily complex.
+        subcommands = [_STDERR_REDIRECT_RE.sub('', s).strip() for s in subcommands]
+        subcommands = [s for s in subcommands if s]  # drop empty after strip
         if not subcommands:
             logger.info(
                 f"SSHCommandFilter: BLOCK empty command cmd={command[:80]}"

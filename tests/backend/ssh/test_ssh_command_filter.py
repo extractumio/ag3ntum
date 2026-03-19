@@ -1128,3 +1128,304 @@ class TestEncodingObfuscationBlocking:
             r = command_filter.check_command(cmd, level)
             assert not r.allowed, f"Should be blocked at L{level}"
             assert r.rule == "always_blocked:lateral_movement"
+
+
+class TestStderrRedirectStripping:
+    """Tests for the 2>/dev/null and 2>&1 stripping pre-processing."""
+
+    @pytest.mark.unit
+    def test_stderr_devnull_stripped_before_match(self, command_filter):
+        """lsb_release -a 2>/dev/null is allowed — stderr redirect stripped."""
+        r = command_filter.check_command("lsb_release -a 2>/dev/null", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_stderr_redirect_21_stripped_before_match(self, command_filter):
+        """systemctl status svc 2>&1 is allowed — 2>&1 redirect stripped."""
+        r = command_filter.check_command("systemctl status nginx 2>&1", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_compound_with_stderr_redirect_allowed(self, command_filter):
+        """ls -la /etc/nginx/ 2>/dev/null || echo nginx not found is allowed at L0."""
+        r = command_filter.check_command(
+            "ls -la /etc/nginx/ 2>/dev/null || echo nginx not found", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_stderr_redirect_does_not_bypass_security(self, command_filter):
+        """Adding 2>/dev/null to a blocked command does not allow it."""
+        r = command_filter.check_command(
+            "apt install something 2>/dev/null", 0
+        )
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_stderr_redirect_on_always_blocked_still_blocked(self, command_filter):
+        """Always-blocked check runs on full string before redirect stripping."""
+        r = command_filter.check_command(
+            "ssh user@host 2>/dev/null", 0
+        )
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_compound_all_subcommands_with_stderr_redirect(self, command_filter):
+        """Multi-part compound with 2>/dev/null on each part is evaluated correctly."""
+        r = command_filter.check_command(
+            "df -h / 2>/dev/null | tail -1 2>/dev/null", 0
+        )
+        assert r.allowed
+
+
+class TestExpandedL0Allowlist:
+    """Tests for newly added L0 monitoring allowlist patterns."""
+
+    @pytest.mark.unit
+    def test_l0_allows_lsb_release(self, command_filter):
+        """lsb_release -a is allowed at L0."""
+        r = command_filter.check_command("lsb_release -a", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_df_with_path(self, command_filter):
+        """df -h / is allowed at L0 (df with path argument)."""
+        r = command_filter.check_command("df -h /", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_free_any_flags(self, command_filter):
+        """free -m is allowed at L0."""
+        r = command_filter.check_command("free -m", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_uname_any_flags(self, command_filter):
+        """uname -r is allowed at L0."""
+        r = command_filter.check_command("uname -r", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_ps_aux_variants(self, command_filter):
+        """ps -ef is allowed at L0."""
+        r = command_filter.check_command("ps -ef", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_systemctl_list_units(self, command_filter):
+        """systemctl list-units --type=service is allowed at L0."""
+        r = command_filter.check_command(
+            "systemctl list-units --type=service --state=running --no-pager", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_systemctl_list_unit_files(self, command_filter):
+        """systemctl list-unit-files is allowed at L0."""
+        r = command_filter.check_command("systemctl list-unit-files", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_systemctl_is_active(self, command_filter):
+        """systemctl is-active nginx is allowed at L0."""
+        r = command_filter.check_command("systemctl is-active nginx", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_systemctl_is_enabled(self, command_filter):
+        """systemctl is-enabled nginx is allowed at L0."""
+        r = command_filter.check_command("systemctl is-enabled nginx", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_ls_with_path(self, command_filter):
+        """ls -la /etc/ is allowed at L0."""
+        r = command_filter.check_command("ls -la /etc/", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_grep_without_file(self, command_filter):
+        """grep -E nginx (no file — pipe target) is allowed at L0."""
+        r = command_filter.check_command("grep -E nginx", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_grep_quoted_pattern_with_file(self, command_filter):
+        """grep "Failed password" /var/log/auth.log is allowed at L0."""
+        r = command_filter.check_command(
+            'grep "Failed password" /var/log/auth.log', 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_echo_simple_message(self, command_filter):
+        """echo nginx not found is allowed at L0 (pipe target use case)."""
+        r = command_filter.check_command("echo nginx not found", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_blocks_echo_with_redirect(self, command_filter):
+        """echo test > /fake/path is blocked at L0 (redirect operator present)."""
+        r = command_filter.check_command("echo test > /fake/path/file.conf", 0)
+        assert not r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_hostnamectl(self, command_filter):
+        """hostnamectl is allowed at L0."""
+        r = command_filter.check_command("hostnamectl", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_timedatectl(self, command_filter):
+        """timedatectl status is allowed at L0."""
+        r = command_filter.check_command("timedatectl status", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_getent_passwd(self, command_filter):
+        """getent passwd is allowed at L0."""
+        r = command_filter.check_command("getent passwd", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_docker_logs(self, command_filter):
+        """docker logs mycontainer is allowed at L0."""
+        r = command_filter.check_command("docker logs mycontainer", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_docker_images(self, command_filter):
+        """docker images is allowed at L0."""
+        r = command_filter.check_command("docker images", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_docker_compose_ps(self, command_filter):
+        """docker compose ps is allowed at L0."""
+        r = command_filter.check_command("docker compose ps", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l0_allows_ss_any_flags(self, command_filter):
+        """ss -tlnp is allowed at L0."""
+        r = command_filter.check_command("ss -tlnp", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_lsb_release_fallback(self, command_filter):
+        """The compound OS detection command used in real sessions is allowed at L0."""
+        r = command_filter.check_command(
+            "lsb_release -a 2>/dev/null || cat /etc/os-release | head -5", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_df_pipe_tail(self, command_filter):
+        """df -h / | tail -1 is allowed at L0."""
+        r = command_filter.check_command("df -h / | tail -1", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_free_pipe_grep(self, command_filter):
+        """free -h | grep Mem is allowed at L0."""
+        r = command_filter.check_command("free -h | grep Mem", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_systemctl_list_pipe_head(self, command_filter):
+        """systemctl list-units piped to head is allowed at L0."""
+        r = command_filter.check_command(
+            "systemctl list-units --type=service --state=running --no-pager | head -20",
+            0,
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_ls_nginx_devnull_or_echo(self, command_filter):
+        """ls -la /etc/nginx/ 2>/dev/null || echo nginx not found is allowed at L0."""
+        r = command_filter.check_command(
+            "ls -la /etc/nginx/ 2>/dev/null || echo nginx not found", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_ls_etc_pipe_grep_e(self, command_filter):
+        """ls -la /etc/ | grep -E nginx is allowed at L0."""
+        r = command_filter.check_command("ls -la /etc/ | grep -E nginx", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_ps_aux_pipe_grep_pipe_head(self, command_filter):
+        """ps aux | grep -E nginx | head -15 is allowed at L0."""
+        r = command_filter.check_command(
+            "ps aux | grep -E nginx | head -15", 0
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_real_session_command_systemctl_status_redirect(self, command_filter):
+        """systemctl status apache2.service 2>&1 is allowed at L0."""
+        r = command_filter.check_command("systemctl status apache2.service 2>&1", 0)
+        assert r.allowed
+
+
+class TestExpandedL1L2Allowlist:
+    """Tests for newly added L1 sudo and L2 writable path expansions."""
+
+    @pytest.mark.unit
+    def test_l1_allows_sudo_journalctl(self, command_filter):
+        """sudo journalctl -u nginx --no-pager is allowed at L1."""
+        r = command_filter.check_command(
+            "sudo journalctl -u nginx --no-pager", 1
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_sudo_systemctl_list_units(self, command_filter):
+        """sudo systemctl list-units --type=service is allowed at L1."""
+        r = command_filter.check_command(
+            "sudo systemctl list-units --type=service", 1
+        )
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l1_allows_sudo_kill_signal(self, command_filter):
+        """sudo kill -HUP 1234 is allowed at L1."""
+        r = command_filter.check_command("sudo kill -HUP 1234", 1)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_write_to_postfix(self, command_filter):
+        """/etc/postfix/ is in writable_paths — allowed at L2."""
+        r = command_filter.check_path_writable("/etc/postfix/main.cf", 2)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_write_to_fail2ban(self, command_filter):
+        """/etc/fail2ban/ is in writable_paths — allowed at L2."""
+        r = command_filter.check_path_writable("/etc/fail2ban/jail.conf", 2)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_write_to_var_www(self, command_filter):
+        """/var/www/ is in writable_paths — allowed at L2."""
+        r = command_filter.check_path_writable("/var/www/html/index.html", 2)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_sudo_nginx_configtest(self, command_filter):
+        """sudo nginx -t is allowed at L2."""
+        r = command_filter.check_command("sudo nginx -t", 2)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_sudo_apache2ctl_configtest(self, command_filter):
+        """sudo apache2ctl -t is allowed at L2."""
+        r = command_filter.check_command("sudo apache2ctl -t", 2)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_l2_allows_sudo_certbot_renew(self, command_filter):
+        """sudo certbot renew is allowed at L2."""
+        r = command_filter.check_command("sudo certbot renew", 2)
+        assert r.allowed
