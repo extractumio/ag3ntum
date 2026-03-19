@@ -21,6 +21,8 @@ const ACCESS_LEVELS: AccessLevel[] = [
   { value: 0, label: 'L0 Monitor (readonly)', mode: 'readonly' },
   { value: 1, label: 'L1 Manage', mode: 'operations', recommended: true },
   { value: 2, label: 'L2 Edit Configs', mode: 'filtered_shell' },
+  { value: 3, label: 'L3 Admin', mode: 'filtered_shell' },
+  { value: 4, label: 'L4 Emergency', mode: 'filtered_shell' },
 ];
 
 // ---------------------------------------------------------------------------

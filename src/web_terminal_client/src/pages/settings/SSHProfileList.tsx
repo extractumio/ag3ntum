@@ -130,7 +130,7 @@ export function SSHProfileList() {
       header: 'Access',
       render: (r) => {
         const level = Number(r.privilege_level);
-        const labels: Record<number, string> = { 0: 'Monitor', 1: 'Manage', 2: 'Config' };
+        const labels: Record<number, string> = { 0: 'Monitor', 1: 'Manage', 2: 'Config', 3: 'Admin', 4: 'Emergency' };
         return <span className="badge">L{level} {labels[level] || ''}</span>;
       },
     },
