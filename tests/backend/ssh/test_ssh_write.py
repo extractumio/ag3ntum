@@ -239,8 +239,12 @@ def _make_mock_sftp(
 
     # rename
     if rename_fails:
+        # posix_rename is tried first — make it fail so fallback rename is used,
+        # which is also mocked to fail (simulating a real rename failure).
+        mock_sftp.posix_rename = AsyncMock(side_effect=PermissionError("posix_rename denied"))
         mock_sftp.rename = AsyncMock(side_effect=PermissionError("rename denied"))
     else:
+        mock_sftp.posix_rename = AsyncMock()
         mock_sftp.rename = AsyncMock()
 
     mock_sftp_cm = MagicMock()

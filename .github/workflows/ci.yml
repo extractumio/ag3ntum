@@ -86,6 +86,11 @@ jobs:
     runs-on: [self-hosted, linux, docker]
     needs: [fast-checks, structural-tests]
     steps:
+      - name: Fix workspace ownership
+        run: |
+          # Docker builds leave files owned by UID 45045. Use a container to reclaim.
+          docker run --rm -v "$GITHUB_WORKSPACE":/ws alpine chown -R "$(id -u):$(id -g)" /ws || true
+
       - uses: actions/checkout@v4
 
       - name: Create secrets config for CI
