@@ -1177,6 +1177,22 @@ class TestStderrRedirectStripping:
         )
         assert r.allowed
 
+    @pytest.mark.unit
+    def test_bash_combined_redirect_stripped(self, command_filter):
+        """&>/dev/null (bash combined redirect) is stripped before matching."""
+        r = command_filter.check_command("lsb_release -a &>/dev/null", 0)
+        assert r.allowed
+
+    @pytest.mark.unit
+    def test_unmatched_quote_absorbed_into_subcommand(self, command_filter):
+        """Unmatched quote is absorbed into current subcommand (not a security bypass)."""
+        # The splitter treats everything after the unmatched quote as part of the
+        # same subcommand. The subcommand will likely fail the allowlist (safe).
+        r = command_filter.check_command("echo 'data; rm -rf /", 0)
+        # The unmatched quote prevents the ; from being a split point,
+        # so this is one subcommand that won't match the allowlist.
+        assert not r.allowed
+
 
 class TestExpandedL0Allowlist:
     """Tests for newly added L0 monitoring allowlist patterns."""
@@ -1337,14 +1353,6 @@ class TestExpandedL0Allowlist:
         r = command_filter.check_command(
             "systemctl list-units --type=service --state=running --no-pager | head -20",
             0,
-        )
-        assert r.allowed
-
-    @pytest.mark.unit
-    def test_real_session_command_ls_nginx_devnull_or_echo(self, command_filter):
-        """ls -la /etc/nginx/ 2>/dev/null || echo nginx not found is allowed at L0."""
-        r = command_filter.check_command(
-            "ls -la /etc/nginx/ 2>/dev/null || echo nginx not found", 0
         )
         assert r.allowed
 

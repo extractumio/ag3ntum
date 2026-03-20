@@ -22,7 +22,13 @@ from .ssh_config import SSHSecurityConfig
 
 # Strip harmless stderr redirects before matching — they are noise.
 # Dangerous redirects (> /etc/, > /root/) are caught by always_blocked.
-_STDERR_REDIRECT_RE = re.compile(r'\s*2>\s*/dev/null\s*|\s*2>&1\s*')
+_STDERR_REDIRECT_RE = re.compile(
+    r'\s*2>>\s*/dev/null\s*'   # 2>>/dev/null (append)
+    r'|\s*2>\s*/dev/null\s*'   # 2>/dev/null
+    r'|\s*&>>\s*/dev/null\s*'  # &>>/dev/null (bash combined append)
+    r'|\s*&>\s*/dev/null\s*'   # &>/dev/null  (bash combined)
+    r'|\s*2>&1\s*'             # 2>&1
+)
 
 
 def _split_compound_command(command: str) -> list[str]:
@@ -31,6 +37,13 @@ def _split_compound_command(command: str) -> list[str]:
     Naive regex splitting breaks on | inside quoted strings like
     grep -E "nginx|apache". This parser tracks quote state so those
     pipe characters are preserved in the subcommand.
+
+    Why not shlex: shlex.split() does full POSIX word splitting (backslash
+    escapes, heredocs, subshells) and raises ValueError on malformed input
+    which would be fail-open. We only need operator splitting, and
+    always_blocked already prevents shell expansion, so a simple quote-aware
+    scanner suffices. Unmatched quotes are absorbed into the current
+    subcommand (safe — each part is still individually checked).
     """
     parts: list[str] = []
     current: list[str] = []
@@ -61,8 +74,9 @@ def _split_compound_command(command: str) -> list[str]:
             i += 1
             continue
 
-        # Outside quotes — check for shell operators
-        # && and || (two-char operators, check first)
+        # Outside quotes — check for shell operators.
+        # Two-char operators (&&, ||) MUST be checked before single-char
+        # (;, |) — otherwise || would be consumed as two separate | splits.
         if i + 1 < n:
             two = command[i:i + 2]
             if two in ("&&", "||"):
@@ -549,8 +563,8 @@ class SSHCommandFilter:
                             category=result.category,
                         )
                     return result
-            # All subcommands passed — return allow from the last check
-            return self._check_allowlist(subcommands[-1], level, level_key)
+            # All subcommands passed — return the last result (already computed)
+            return result  # type: ignore[possibly-undefined]
         else:
             # Blocklist mode: check full string first (catches multi-part
             # patterns like fork bombs that span shell operators), then
@@ -574,8 +588,8 @@ class SSHCommandFilter:
                             category=result.category,
                         )
                     return result
-            # No subcommand blocked — allow
-            return self._check_blocklist(subcommands[-1], level, level_key)
+            # No subcommand blocked — return the last result (already computed)
+            return result  # type: ignore[possibly-undefined]
 
     def _check_allowlist(
         self, command: str, level: int, level_key: str
