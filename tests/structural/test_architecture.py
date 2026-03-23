@@ -223,10 +223,10 @@ class TestFileSizeLimits:
         # Tools
         "tools/ag3ntum/ag3ntum_webfetch/tool.py": 750,
         "tools/ag3ntum/ag3ntum_ssh/tool.py": 2100,  # SSHWrite + batch mode + cleanup/rollback
-        "src/core/ssh/ssh_command_filter.py": 900,
+        "src/core/ssh/ssh_command_filter.py": 1100,  # 4-tier profile system with shell/path/sudo gating
         "tests/backend/ssh/test_ssh_tools.py": 800,
         "tests/backend/ssh/test_ssh_write.py": 970,
-        "tests/backend/ssh/test_ssh_command_filter.py": 1150,
+        "tests/backend/ssh/test_ssh_command_filter.py": 2050,  # 270+ tests for 4-tier profile system
         "tests/backend/ssh/test_ssh_tool_hardening.py": 1100,
         "tests/backend/test_ssh_profiles_connection.py": 800,
         # Skills
