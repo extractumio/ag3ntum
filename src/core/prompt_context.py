@@ -167,11 +167,10 @@ def build_prompt_context(
 
         # Build per-profile summary with privilege level capabilities
         _LEVEL_LABELS: dict[int, str] = {
-            0: "L0 monitoring — read-only commands only",
-            1: "L1 service — read + targeted sudo (restart/reload)",
-            2: "L2 config — read + write to config paths (.conf/.yaml/.json only)",
-            3: "L3 admin — broad access, dangerous commands blocked",
-            4: "L4 emergency — minimal filter, time-boxed",
+            0: "P0 Observer — read-only monitoring and diagnostics",
+            1: "P1 Site Manager — complete WordPress site management",
+            2: "P2 Server Admin — full server administration",
+            3: "P3 Full Access — unrestricted, time-boxed to 60 min",
         }
         lines = []
         for name, profile in ssh_profiles.items():
@@ -180,7 +179,7 @@ def build_prompt_context(
             host = getattr(profile, "host", "?")
             port = getattr(profile, "port", 22)
             user = getattr(profile, "username", "?")
-            level_desc = _LEVEL_LABELS.get(level, f"L{level}")
+            level_desc = _LEVEL_LABELS.get(level, f"P{level}")
             line = f"- **{name}**: {user}@{host}:{port} ({level_desc})"
             if desc:
                 line += f" — {desc}"

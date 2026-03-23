@@ -132,7 +132,7 @@ export function SSHProfileList() {
       render: (r) => {
         const level = Number(r.privilege_level);
         const match = SSH_ACCESS_LEVELS.find(l => l.value === level);
-        return <span className="badge">L{level} {match?.shortLabel ?? ''}</span>;
+        return <span className="badge">{match?.shortLabel ?? `P${level}`}</span>;
       },
     },
     {

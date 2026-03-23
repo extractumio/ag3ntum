@@ -2,7 +2,7 @@
 SSH tool infrastructure for Ag3ntum.
 
 Provides secure SSH connectivity with:
-- SSH-specific command filtering (privilege tiers L0-L4)
+- SSH-specific command filtering (privilege tiers P0-P3)
 - Persistent connection pool with keepalive and transparent reconnection
 - Credential vault integration (agent never sees raw keys)
 - Configuration management (profiles, security settings)

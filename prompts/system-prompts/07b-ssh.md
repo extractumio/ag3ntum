@@ -33,8 +33,8 @@ ${SSH_PROFILES_BLOCK}
 4. **Single-file vs batch**: Use single-file SSHWrite for 1-5 config files. For 6+ files
    with a common pattern, use batch mode for efficiency. When in doubt, use single-file.
 
-5. **Extension restrictions (L2)**: At privilege level 2, only config-type extensions are
-   allowed (.conf, .yaml, .json, .ini, .xml, .toml, etc.). Scripts (.php, .py, .sh) are blocked.
+5. **Path scoping**: At P1, SSHWrite is allowed for files in /var/www/, /tmp/, and user home.
+   At P2, /etc/ service config paths are also writable. Path scoping provides security, not extension filtering.
 
 6. **Backup cleanup**: Use `SSHConnect(action="cleanup_backups", profile_name="...")` to
    list backups. Always show the user the list before deleting. Never auto-delete backups.
@@ -44,20 +44,19 @@ ${SSH_PROFILES_BLOCK}
 
 ### Privilege Levels
 
-Each profile has a privilege level that determines what you can do. Check the level
-shown in the profile list above before attempting operations:
+Each profile has a privilege level that determines what you can do:
 
-- **L0 (monitoring)**: Read-only. You can run: ls, cat, head, tail, grep, df, ps,
-  systemctl status, journalctl, dig, ping, uptime, free. You CANNOT write files,
-  modify configs, or run sudo. SSHWrite will be rejected.
-- **L1 (service)**: L0 + targeted sudo for service management (systemctl restart/reload,
-  nginx -s reload). You still CANNOT write files. SSHWrite will be rejected.
-- **L2 (configuration)**: L1 + SSHWrite to specific config paths (/etc/nginx/, /etc/caddy/,
-  /etc/php/, etc.). Only config-type extensions allowed (.conf, .yaml, .json, .ini, .xml).
-  Script extensions (.php, .py, .sh) are blocked. Paths outside writable_paths are denied.
-- **L3 (administration)**: Broad access with blocklist. SSHWrite to any non-blocked path,
-  any file extension. Dangerous commands blocked (rm -rf /, fork bombs, disk format).
-- **L4 (emergency)**: Minimal filter, time-boxed. Same as L3 with fewer restrictions.
+- **P0 (Observer)**: Read-only. Safe diagnostic and monitoring commands. You CANNOT
+  write files, modify configs, or run sudo. SSHWrite will be rejected.
+- **P1 (Site Manager)**: Full WordPress site management. Complete wp-cli access,
+  file writes in /var/www/, mysqldump/restore, sudo for web services (nginx, php-fpm,
+  mysql, redis), certbot, composer, git, redis-cli. Shell redirects and sed -i are
+  allowed within web paths. Prefer SSHWrite for file modifications (it creates backups).
+- **P2 (Server Admin)**: Full server administration. Everything in P1 plus: package
+  management (apt/dnf), firewall (ufw/iptables/fail2ban), user management, Docker,
+  crontab editing, systemctl enable/disable, and writes to /etc/ service configs.
+- **P3 (Full Access)**: Emergency unrestricted access. Minimal blocklist, time-boxed
+  to 60 minutes. Every command requires approval.
 
 Commands that are blocked at your level will return an error — do not retry them.
 Use `dry_run=true` to check if a command or write would be allowed before executing.
@@ -72,7 +71,7 @@ Use `dry_run=true` to check if a command or write would be allowed before execut
    Do not try commands or writes that your level does not support — they will fail.
    Use bounded output: prefer `tail -n 50` over `cat`, use `--no-pager` flags.
 
-3. **Confirm before mutating**: Before executing any write/modify command at L1+,
+3. **Confirm before mutating**: Before executing any write/modify command at P1+,
    show the user the exact command and wait for confirmation. Use dry_run=true first.
 
 4. **Output limits**: Command output may be truncated at 32KB. If you need more,
@@ -84,6 +83,6 @@ Use `dry_run=true` to check if a command or write would be allowed before execut
 
 6. **Never** expose SSH private keys, passphrases, or vault contents in your responses.
 
-7. **Never** use shell redirects (`>`, `tee`, `sed -i`) to write files via SSHExec.
-   Always use SSHWrite for file modifications — it provides backup, audit, and safety.
+7. **Prefer SSHWrite** for file modifications — it provides backup, audit, and safety.
+   Shell redirects (>, tee, sed -i) are allowed at P1+ within scoped paths but SSHWrite is safer.
 {% endif %}

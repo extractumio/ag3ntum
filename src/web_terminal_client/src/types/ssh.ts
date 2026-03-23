@@ -13,15 +13,14 @@ export interface SSHAccessLevel {
 }
 
 /**
- * All privilege levels. L0-L2 use distinct modes; L3/L4 share 'filtered_shell'
+ * All privilege profiles. P0–P1 use distinct modes; P2/P3 share 'filtered_shell'
  * and are differentiated by privilege_level number in the backend filter.
  */
 export const SSH_ACCESS_LEVELS: SSHAccessLevel[] = [
-  { value: 0, label: 'L0 Monitor (readonly)', shortLabel: 'Monitor', mode: 'readonly' },
-  { value: 1, label: 'L1 Manage', shortLabel: 'Manage', mode: 'operations', recommended: true },
-  { value: 2, label: 'L2 Edit Configs', shortLabel: 'Config', mode: 'filtered_shell' },
-  { value: 3, label: 'L3 Admin', shortLabel: 'Admin', mode: 'filtered_shell' },
-  { value: 4, label: 'L4 Emergency', shortLabel: 'Emergency', mode: 'filtered_shell' },
+  { value: 0, label: 'Observer', shortLabel: 'Observer', mode: 'readonly' },
+  { value: 1, label: 'Site Manager', shortLabel: 'Site Mgr', mode: 'operations', recommended: true },
+  { value: 2, label: 'Server Admin', shortLabel: 'Srv Admin', mode: 'filtered_shell' },
+  { value: 3, label: 'Full Access', shortLabel: 'Full', mode: 'filtered_shell' },
 ];
 
 export interface SSHProfile {

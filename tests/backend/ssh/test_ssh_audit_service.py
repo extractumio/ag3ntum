@@ -41,7 +41,7 @@ class TestSSHAuditService:
             remote_port=22,
             command="rm -rf /",
             reason="Destructive command blocked",
-            rule="L0_monitoring:allowlist",
+            rule="P0_observer:allowlist",
             privilege_level=0,
             mode="readonly",
         )
