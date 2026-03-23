@@ -18,7 +18,6 @@ from tools.ag3ntum.ag3ntum_ssh.tool import (
     ReadRecord,
     _ssh_write_impl,
     _compute_diff,
-    _L2_ALLOWED_EXTENSIONS,
 )
 from src.core.ssh.ssh_config import SSHProfile, SSHSecurityConfig, SSHConnectionLimits
 from src.core.ssh.ssh_command_filter import SSHCommandFilter, SSHFilterResult
@@ -373,23 +372,6 @@ class TestComputeDiff:
 
 
 # ---------------------------------------------------------------------------
-# TestL2AllowedExtensions
-# ---------------------------------------------------------------------------
-
-class TestL2AllowedExtensions:
-
-    @pytest.mark.unit
-    def test_allowed_extensions_present(self):
-        for ext in [".conf", ".yaml", ".yml", ".json", ".toml", ".ini", ".txt"]:
-            assert ext in _L2_ALLOWED_EXTENSIONS, f"{ext} should be in allowlist"
-
-    @pytest.mark.unit
-    def test_dangerous_extensions_absent(self):
-        for ext in [".py", ".sh", ".rb", ".php", ".exe", ".bin"]:
-            assert ext not in _L2_ALLOWED_EXTENSIONS, f"{ext} should NOT be in allowlist"
-
-
-# ---------------------------------------------------------------------------
 # TestSSHWriteImpl — validation phase
 # ---------------------------------------------------------------------------
 
@@ -490,45 +472,6 @@ class TestSSHWriteImplValidation:
         )
         assert result.get("is_error") is True
         assert "must be read" in result["content"][0]["text"].lower()
-
-    @pytest.mark.unit
-    async def test_l2_extension_blocked(self, mock_write_services, test_l3_profile):
-        """L2 profile: .py extension is not allowed."""
-        from src.core.ssh.ssh_config import SSHProfile
-        l2_profile = SSHProfile(
-            name="l2-server",
-            host="10.0.1.1",
-            port=22,
-            username="ops",
-            auth_method="key",
-            key_ref="ops-key",
-            mode="operations",
-            privilege_level=2,
-        )
-        # Override the context with L2 profile
-        mock_write_services.write_tracker.record_read(
-            "l2-server", "/app/script.py", "hash", 100
-        )
-        ctx = SSHToolContext(
-            session_id=mock_write_services.session_id,
-            user_id=mock_write_services.user_id,
-            security_config=mock_write_services.security_config,
-            connection_pool=mock_write_services.connection_pool,
-            command_filter=mock_write_services.command_filter,
-            credential_vault=mock_write_services.credential_vault,
-            audit_service=mock_write_services.audit_service,
-            profiles={"l2-server": l2_profile},
-            db_session_factory=mock_write_services.db_session_factory,
-            write_tracker=mock_write_services.write_tracker,
-            write_budget=mock_write_services.write_budget,
-        )
-        result = await _ssh_write_impl(
-            {"profile_name": "l2-server", "path": "/app/script.py",
-             "content": "code"},
-            ctx=ctx,
-        )
-        assert result.get("is_error") is True
-        assert "extension" in result["content"][0]["text"].lower()
 
     @pytest.mark.unit
     async def test_l2_allowed_extension_passes_filter(self, mock_write_services):

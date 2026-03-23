@@ -1,7 +1,12 @@
 """
 SSH-specific command security filter.
 
-Implements the 5-tier privilege model (L0-L4) for SSH command validation.
+Implements the 4-tier privilege model (P0-P3) for SSH command validation:
+  P0 = Observer       (read-only, allowlist)
+  P1 = Site Manager   (website management, blocklist + path scoping)
+  P2 = Server Admin   (full server admin, blocklist + broad sudo)
+  P3 = Full Access    (minimal blocklist, time-boxed)
+
 All security decisions are made at the Python level — zero dependence on
 LLM capability, reasoning, or judgment.
 
@@ -20,13 +25,105 @@ import yaml
 
 from .ssh_config import SSHSecurityConfig
 
-# Regex to split compound commands on shell operators.
-# Ported from command_security.py for SSH command filtering.
-_SSH_COMPOUND_SPLIT_RE = re.compile(r'\s*(?:&&|\|\||[;|])\s*')
+# Strip harmless stderr redirects before matching — they are noise.
+_STDERR_REDIRECT_RE = re.compile(
+    r'\s*2>>\s*/dev/null\s*'   # 2>>/dev/null (append)
+    r'|\s*2>\s*/dev/null\s*'   # 2>/dev/null
+    r'|\s*&>>\s*/dev/null\s*'  # &>>/dev/null (bash combined append)
+    r'|\s*&>\s*/dev/null\s*'   # &>/dev/null  (bash combined)
+    r'|\s*2>&1\s*'             # 2>&1
+)
+
+# Pre-compiled path extraction patterns for file mutation commands.
+# Used by _extract_target_path on the hot path — avoids per-call re.compile.
+#
+# sed: skip the script expression (single/double quoted or unquoted) then capture
+# the absolute path that follows.  The naive .*? approach would match inside a
+# quoted expression like 's/80/8080/'.
+_SED_PATH_RE = re.compile(
+    r"\bsed\s+-i[^\s]*\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s+(/[\w/.~-]+)"
+)
+_TEE_PATH_RE = re.compile(r'\btee\s+(?:-\w+\s+)*(/[\w/.~-]+)')
+_REDIRECT_PATH_RE = re.compile(r'>>?\s*(/[\w/.~-]+)')
+_DD_PATH_RE = re.compile(r'\bdd\s+.*of=(/[\w/.~-]+)')
+
+# Constant mapping: shell feature name → list of YAML gate pattern keys.
+# The bool (allowed/blocked) comes from the per-level _ShellFeatures object;
+# only the pattern key mapping is constant.
+_SHELL_FEATURE_PATTERN_KEYS: dict[str, list[str]] = {
+    "subshell": ["subshell"],
+    "backticks": ["backticks"],
+    "brace_expansion": ["brace_expansion"],
+    "var_reference": ["var_reference"],
+    "eval": ["eval"],
+    "exec": ["exec"],
+    "source": ["source"],
+    "inline_shell": ["inline_shell", "inline_python", "inline_perl"],
+}
+
+
+def _split_compound_command(command: str) -> list[str]:
+    """Split a command on shell operators (;, |, &&, ||) respecting quotes.
+
+    Uses a quote-aware scanner so | inside "nginx|apache" is preserved.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+
+    while i < n:
+        ch = command[i]
+
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+            i += 1
+            continue
+
+        if in_single or in_double:
+            current.append(ch)
+            i += 1
+            continue
+
+        # Two-char operators checked before single-char
+        if i + 1 < n:
+            two = command[i:i + 2]
+            if two in ("&&", "||"):
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                i += 2
+                continue
+
+        if ch in (";", "|"):
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+
+    return parts
+
 
 logger = logging.getLogger(__name__)
 
-# Primary and fallback config paths
 _CONFIG_PRIMARY = (
     Path(__file__).parent.parent.parent.parent
     / "config" / "security" / "ssh-privilege-levels.yaml"
@@ -36,13 +133,13 @@ _CONFIG_FALLBACK = (
     / "config" / "security" / "ssh-privilege-levels.yaml.example"
 )
 
-# Maps privilege integer (0-4) to YAML level key
+# Maps privilege integer (0-3) to YAML level key.
+# Indexed directly after clamping — fallback is never needed.
 _LEVEL_KEYS = {
-    0: "L0_monitoring",
-    1: "L1_service_management",
-    2: "L2_configuration",
-    3: "L3_administration",
-    4: "L4_emergency",
+    0: "P0_observer",
+    1: "P1_site_manager",
+    2: "P2_server_admin",
+    3: "P3_full_access",
 }
 
 
@@ -52,7 +149,7 @@ class SSHFilterResult:
     allowed: bool
     action: str      # "allow", "block", "requires_approval"
     reason: str      # Human-readable explanation
-    rule: str        # Which rule matched (e.g., "L0_monitoring:allowlist")
+    rule: str        # Which rule matched (e.g., "P0_observer:allowlist")
     category: str    # e.g., "persistence", "lateral_movement", "safe_read"
 
 
@@ -86,46 +183,78 @@ def _compile_pattern(
         return None
 
 
+@dataclass
+class _ShellFeatures:
+    """Shell feature flags for a privilege level."""
+    var_reference: bool = False
+    brace_expansion: bool = False
+    subshell: bool = False
+    backticks: bool = False
+    eval: bool = False
+    exec: bool = False
+    source: bool = False
+    inline_shell: bool = False
+
+
 class SSHCommandFilter:
-    """5-tier privilege model for SSH command validation.
+    """4-tier privilege model for SSH command validation.
 
     All security decisions are at Python level — zero LLM dependence.
     Fail-closed: config errors block all commands.
 
-    Levels:
-        L0 (0): Monitoring — allowlist of ~20 safe read-only patterns
-        L1 (1): Service management — L0 + targeted sudo patterns
-        L2 (2): Configuration — L1 + writes to writable_paths
-        L3 (3): Administration — blocklist only (broad access)
-        L4 (4): Emergency — minimal blocklist (time-boxed)
+    Profiles:
+        P0 (0): Observer     — allowlist of safe read-only patterns
+        P1 (1): Site Manager — blocklist + path-scoped file mutations
+        P2 (2): Server Admin — blocklist + broad sudo
+        P3 (3): Full Access  — minimal blocklist, time-boxed
     """
 
     def __init__(self, config_path: Optional[Path] = None) -> None:
         self._config_valid = False
 
-        # always_blocked: (category, rule) — blocks at ALL levels
-        self._always_blocked: list[tuple[str, _CompiledRule]] = []
+        # hard_blocked: (category, rule) — blocks at ALL levels including P3
+        self._hard_blocked: list[tuple[str, _CompiledRule]] = []
 
         # Requires approval at all levels (not full block)
         self._requires_approval: list[_CompiledRule] = []
 
-        # Accumulated allowlists for L0-L2 (each level includes prior levels)
-        self._level_allowlists: dict[int, list[_CompiledRule]] = {
-            0: [], 1: [], 2: [],
-        }
+        # P0 allowlist
+        self._p0_allowlist: list[_CompiledRule] = []
 
-        # Blocklists for L3-L4
+        # Blocklists for P1-P3 (P2 pre-merged with P1 at load time)
         self._level_blocklists: dict[int, list[_CompiledRule]] = {
-            3: [], 4: [],
+            1: [], 2: [], 3: [],
         }
 
-        # L2 path control
-        self._writable_paths: list[str] = []
-        self._blocked_paths: list[str] = []
+        # Sudo restrictions per level (P2 pre-merged with P1 at load time)
+        self._sudo_restricted: dict[int, list[_CompiledRule]] = {
+            1: [], 2: [],
+        }
+
+        # Approval triggers per level
+        self._approval_triggers: dict[int, list[_CompiledRule]] = {
+            1: [], 2: [],
+        }
+
+        # Path control per level
+        self._writable_paths: dict[int, list[str]] = {1: [], 2: []}
+        self._blocked_paths: dict[int, list[str]] = {1: [], 2: []}
+
+        # Shell feature flags per level
+        self._shell_features: dict[int, _ShellFeatures] = {}
+
+        # Level-gated shell patterns (compiled from level_gated_shell)
+        self._shell_gate_patterns: dict[str, _CompiledRule] = {}
+
+        # Level-gated file mutation patterns
+        self._file_mutation_patterns: list[tuple[_CompiledRule, int]] = []
+
+        # Level-gated capabilities (min_level gated commands)
+        self._level_gated_caps: list[tuple[_CompiledRule, int]] = []
 
         # Raw operations per level (for get_allowed_operations)
         self._level_operations: dict[int, list[dict]] = {
-            0: [], 1: [], 2: [], 3: [], 4: [],
+            0: [], 1: [], 2: [], 3: [],
         }
 
         # Output redaction patterns: (compiled_pattern, replacement_string)
@@ -164,70 +293,100 @@ class SSHCommandFilter:
             )
             return
 
-        # --- always_blocked: persistence + lateral_movement + shell_expansion ---
-        always_blocked_cfg = config.get("always_blocked", {})
-        for category in ("persistence", "lateral_movement", "shell_expansion", "output_redirect"):
-            for rule_data in always_blocked_cfg.get(category, []):
-                pattern = rule_data.get("pattern", "")
-                desc = rule_data.get("description", "")
-                if not pattern:
-                    continue
-                compiled = _compile_pattern(pattern, desc, "always_blocked")
-                if compiled:
-                    self._always_blocked.append((category, compiled))
+        # --- hard_blocked: persistence + lateral_movement ---
+        hard_blocked_cfg = config.get("hard_blocked", {})
+        for category in ("persistence", "lateral_movement"):
+            for rule in self._parse_rule_list(
+                hard_blocked_cfg.get(category, []), "hard_blocked"
+            ):
+                self._hard_blocked.append((category, rule))
 
-        # --- data_exfiltration_require_approval ---
-        for rule_data in always_blocked_cfg.get(
-            "data_exfiltration_require_approval", []
-        ):
+        self._requires_approval = self._parse_rule_list(
+            hard_blocked_cfg.get("data_exfiltration_require_approval", []),
+            "hard_blocked",
+        )
+
+        # --- Level-gated shell patterns ---
+        shell_gate_cfg = config.get("level_gated_shell", {})
+        for feature_name, rule_data in shell_gate_cfg.items():
             pattern = rule_data.get("pattern", "")
             desc = rule_data.get("description", "")
             if not pattern:
                 continue
-            compiled = _compile_pattern(pattern, desc, "always_blocked")
+            compiled = _compile_pattern(pattern, desc, "level_gated_shell")
             if compiled:
-                self._requires_approval.append(compiled)
+                self._shell_gate_patterns[feature_name] = compiled
+
+        # --- Level-gated file mutation patterns ---
+        file_mut_cfg = config.get("level_gated_file_mutation", {})
+        for _, rule_data in file_mut_cfg.items():
+            pattern = rule_data.get("pattern", "")
+            desc = rule_data.get("description", "")
+            min_level = rule_data.get("min_level", 1)
+            if not pattern:
+                continue
+            compiled = _compile_pattern(pattern, desc, "level_gated_file_mutation")
+            if compiled:
+                self._file_mutation_patterns.append((compiled, min_level))
+
+        # --- Level-gated capabilities ---
+        cap_cfg = config.get("level_gated_capabilities", {})
+        for _, rule_data in cap_cfg.items():
+            pattern = rule_data.get("pattern", "")
+            desc = rule_data.get("description", "")
+            min_level = rule_data.get("min_level", 1)
+            if not pattern:
+                continue
+            compiled = _compile_pattern(pattern, desc, "level_gated_capability")
+            if compiled:
+                self._level_gated_caps.append((compiled, min_level))
 
         # --- Privilege levels ---
         levels_cfg = config.get("privilege_levels", {})
 
-        # L0: allowlist only
-        l0_data = levels_cfg.get("L0_monitoring", {})
-        l0_rules = self._parse_allowed_commands(l0_data, "L0_monitoring")
-        self._level_allowlists[0] = l0_rules
-        self._level_operations[0] = self._extract_operations(l0_data)
-
-        # L1: inherits L0 + targeted sudo patterns + L1 allowed_commands
-        l1_data = levels_cfg.get("L1_service_management", {})
-        l1_sudo = self._parse_sudo_restricted(l1_data, "L1_service_management")
-        l1_allowed = self._parse_allowed_commands(l1_data, "L1_service_management")
-        self._level_allowlists[1] = l0_rules + l1_sudo + l1_allowed
-        self._level_operations[1] = (
-            self._level_operations[0]
-            + [{"pattern": r.pattern_str, "description": r.description}
-               for r in l1_sudo]
-            + self._extract_operations(l1_data)
+        # P0: allowlist only
+        p0_data = levels_cfg.get("P0_observer", {})
+        self._p0_allowlist = self._parse_rule_list(
+            p0_data.get("allowed_commands", []), "P0_observer"
         )
+        self._level_operations[0] = self._extract_operations(p0_data)
+        self._shell_features[0] = self._parse_shell_features(p0_data)
 
-        # L2: inherits L1 + path-based write allowance
-        l2_data = levels_cfg.get("L2_configuration", {})
-        self._writable_paths = l2_data.get("writable_paths", [])
-        self._blocked_paths = l2_data.get("blocked_paths", [])
-        # The path-based extension is checked dynamically in _check_allowlist
-        self._level_allowlists[2] = list(self._level_allowlists[1])
-        self._level_operations[2] = list(self._level_operations[1])
-
-        # L3: blocklist mode (broad access minus specific dangerous commands)
-        l3_data = levels_cfg.get("L3_administration", {})
-        self._level_blocklists[3] = self._parse_blocked_commands(
-            l3_data, "L3_administration"
+        # P1: blocklist + path scoping + sudo restrictions
+        p1_data = levels_cfg.get("P1_site_manager", {})
+        p1_blocklist = self._parse_rule_list(
+            p1_data.get("blocked_commands", []), "P1_site_manager"
         )
-
-        # L4: minimal blocklist (emergency access)
-        l4_data = levels_cfg.get("L4_emergency", {})
-        self._level_blocklists[4] = self._parse_blocked_commands(
-            l4_data, "L4_emergency"
+        self._level_blocklists[1] = p1_blocklist
+        self._sudo_restricted[1] = self._parse_sudo_restricted(
+            p1_data, "P1_site_manager"
         )
+        self._approval_triggers[1] = self._parse_rule_list(
+            p1_data.get("approval_triggers", []), "P1_site_manager"
+        )
+        self._writable_paths[1] = p1_data.get("writable_paths", [])
+        self._blocked_paths[1] = p1_data.get("blocked_paths", [])
+        self._shell_features[1] = self._parse_shell_features(p1_data)
+
+        # P2: blocklist + broader paths + broader sudo
+        # Pre-merge P1 blocklist and sudo rules into P2 for O(1) inheritance
+        p2_data = levels_cfg.get("P2_server_admin", {})
+        p2_own_blocklist = self._parse_rule_list(
+            p2_data.get("blocked_commands", []), "P2_server_admin"
+        )
+        self._level_blocklists[2] = p2_own_blocklist + p1_blocklist
+        p2_own_sudo = self._parse_sudo_restricted(p2_data, "P2_server_admin")
+        self._sudo_restricted[2] = p2_own_sudo + self._sudo_restricted[1]
+        self._writable_paths[2] = p2_data.get("writable_paths", [])
+        self._blocked_paths[2] = p2_data.get("blocked_paths", [])
+        self._shell_features[2] = self._parse_shell_features(p2_data)
+
+        # P3: minimal blocklist
+        p3_data = levels_cfg.get("P3_full_access", {})
+        self._level_blocklists[3] = self._parse_rule_list(
+            p3_data.get("blocked_commands", []), "P3_full_access"
+        )
+        self._shell_features[3] = self._parse_shell_features(p3_data)
 
         # --- output_redaction patterns ---
         for rule_data in config.get("output_redaction", []):
@@ -245,10 +404,14 @@ class SSHCommandFilter:
                 )
 
         rule_count = (
-            len(self._always_blocked)
+            len(self._hard_blocked)
             + len(self._requires_approval)
-            + sum(len(v) for v in self._level_allowlists.values())
+            + len(self._p0_allowlist)
             + sum(len(v) for v in self._level_blocklists.values())
+            + sum(len(v) for v in self._sudo_restricted.values())
+            + len(self._shell_gate_patterns)
+            + len(self._file_mutation_patterns)
+            + len(self._level_gated_caps)
         )
         logger.info(
             f"SSHCommandFilter: Loaded from {path}. "
@@ -259,12 +422,13 @@ class SSHCommandFilter:
 
     # --- Config parsing helpers ---
 
-    def _parse_allowed_commands(
-        self, level_data: dict, level_key: str
+    @staticmethod
+    def _parse_rule_list(
+        items: list[dict], level_key: str
     ) -> list[_CompiledRule]:
-        """Parse and compile allowed_commands from a level config dict."""
+        """Parse and compile a list of {pattern, description} dicts."""
         rules = []
-        for rule_data in level_data.get("allowed_commands", []):
+        for rule_data in items:
             pattern = rule_data.get("pattern", "")
             desc = rule_data.get("description", "")
             if not pattern:
@@ -277,7 +441,7 @@ class SSHCommandFilter:
     def _parse_sudo_restricted(
         self, level_data: dict, level_key: str
     ) -> list[_CompiledRule]:
-        """Parse and compile sudo_restricted_to patterns."""
+        """Parse and compile sudo_restricted_to patterns (flat string list)."""
         rules = []
         for pattern in level_data.get("sudo_restricted_to", []):
             if not pattern:
@@ -287,20 +451,20 @@ class SSHCommandFilter:
                 rules.append(compiled)
         return rules
 
-    def _parse_blocked_commands(
-        self, level_data: dict, level_key: str
-    ) -> list[_CompiledRule]:
-        """Parse and compile blocked_commands from a level config dict."""
-        rules = []
-        for rule_data in level_data.get("blocked_commands", []):
-            pattern = rule_data.get("pattern", "")
-            desc = rule_data.get("description", "")
-            if not pattern:
-                continue
-            compiled = _compile_pattern(pattern, desc, level_key)
-            if compiled:
-                rules.append(compiled)
-        return rules
+    @staticmethod
+    def _parse_shell_features(level_data: dict) -> _ShellFeatures:
+        """Parse shell_features from a level config dict."""
+        sf = level_data.get("shell_features", {})
+        return _ShellFeatures(
+            var_reference=sf.get("var_reference", False),
+            brace_expansion=sf.get("brace_expansion", False),
+            subshell=sf.get("subshell", False),
+            backticks=sf.get("backticks", False),
+            eval=sf.get("eval", False),
+            exec=sf.get("exec", False),
+            source=sf.get("source", False),
+            inline_shell=sf.get("inline_shell", False),
+        )
 
     def _extract_operations(self, level_data: dict) -> list[dict]:
         """Extract raw operation dicts from allowed_commands."""
@@ -314,84 +478,188 @@ class SSHCommandFilter:
                 })
         return ops
 
-    # --- Path checks for L2 ---
-
-    @staticmethod
-    def _path_appears_in_command(config_path: str, command: str) -> bool:
-        """Check whether a config path appears as a real path in the command.
-
-        Uses word-boundary-aware matching to prevent substring false positives.
-        E.g. config path '/etc/nginx' matches '/etc/nginx/conf.d' but not
-        '/notetc/nginx' or '/tmp/etc/nginx'.
-        """
-        escaped = re.escape(config_path)
-        pattern = rf'(?:^|\s|["\'])({escaped})(?:[/\s"\']|$)'
-        return re.search(pattern, command) is not None
+    # --- Path checks ---
 
     @staticmethod
     def _path_is_under(target: str, config_path: str) -> bool:
-        """Check whether target path is under a config directory path.
-
-        Normalises paths and checks proper prefix matching with separators.
-        E.g. '/etc/nginx/sites/default' is under '/etc/nginx' but
-        '/notetc/nginx' is not.
-        """
-        # Normalise: strip trailing slashes for consistency, then ensure
-        # the config path either matches exactly or is a proper prefix
-        # followed by a separator.
+        """Check whether target path is under a config directory path."""
         norm_target = target.rstrip("/")
         norm_config = config_path.rstrip("/")
         if norm_target == norm_config:
             return True
         return norm_target.startswith(norm_config + "/")
 
-    def _find_blocked_path_in_command(self, command: str) -> Optional[str]:
-        """Return the first blocked_path found in a command string."""
-        for path in self._blocked_paths:
-            if self._path_appears_in_command(path, command):
-                return path
-        return None
-
-    def _find_writable_path_in_command(self, command: str) -> Optional[str]:
-        """Return the first writable_path found in a command string."""
-        for path in self._writable_paths:
-            if self._path_appears_in_command(path, command):
-                return path
-        return None
-
-    def _find_blocked_path(self, target_path: str) -> Optional[str]:
-        """Return the first blocked_path that covers target_path."""
-        for path in self._blocked_paths:
+    def _find_blocked_path(self, target_path: str, level: int) -> Optional[str]:
+        """Return the first blocked_path that covers target_path for a level."""
+        for path in self._blocked_paths.get(level, []):
             if self._path_is_under(target_path, path):
                 return path
         return None
 
-    def _find_writable_path(self, target_path: str) -> Optional[str]:
-        """Return the first writable_path that covers target_path."""
-        for path in self._writable_paths:
+    def _find_writable_path(self, target_path: str, level: int) -> Optional[str]:
+        """Return the first writable_path that covers target_path for a level."""
+        for path in self._writable_paths.get(level, []):
             if self._path_is_under(target_path, path):
                 return path
         return None
+
+    @staticmethod
+    def _extract_target_path(command: str) -> Optional[str]:
+        """Extract a file path target from a mutation command.
+
+        Handles: sed -i ... /path, tee /path, > /path, >> /path, dd of=/path.
+        Returns the first absolute path found.
+        """
+        for pattern in (_SED_PATH_RE, _TEE_PATH_RE, _REDIRECT_PATH_RE, _DD_PATH_RE):
+            m = pattern.search(command)
+            if m:
+                return m.group(1)
+        return None
+
+    # --- Shell feature check ---
+
+    def _check_shell_features(
+        self, command: str, level: int, level_key: str
+    ) -> Optional[SSHFilterResult]:
+        """Check command against shell feature gates for the given level.
+
+        Returns SSHFilterResult (block) if a blocked feature is found,
+        or None if all features in the command are permitted.
+        """
+        features = self._shell_features.get(level, _ShellFeatures())
+
+        for feature_name, pattern_keys in _SHELL_FEATURE_PATTERN_KEYS.items():
+            if getattr(features, feature_name, False):
+                continue
+            for key in pattern_keys:
+                gate = self._shell_gate_patterns.get(key)
+                if gate and gate.compiled.search(command):
+                    logger.warning(
+                        f"SSHCommandFilter: BLOCKED shell_feature/{feature_name} "
+                        f"pattern='{gate.pattern_str[:60]}' cmd={command[:80]}"
+                    )
+                    return SSHFilterResult(
+                        allowed=False,
+                        action="block",
+                        reason=f"Shell feature not permitted at this level: {gate.description}",
+                        rule=f"{level_key}:shell_feature:{feature_name}",
+                        category="shell_feature",
+                    )
+        return None
+
+    # --- File mutation path check ---
+
+    def _check_file_mutation(
+        self, command: str, level: int, level_key: str
+    ) -> Optional[SSHFilterResult]:
+        """Check file mutation commands against path scoping.
+
+        At P0: all file mutations blocked (min_level >= 1 covers this).
+        At P1+: file mutations allowed only within writable_paths.
+        Returns SSHFilterResult if blocked, None if allowed or not a mutation.
+        """
+        for rule, min_level in self._file_mutation_patterns:
+            if not rule.compiled.search(command):
+                continue
+            # Mutation detected — check level gate
+            if level < min_level:
+                return SSHFilterResult(
+                    allowed=False,
+                    action="block",
+                    reason=f"File mutation not permitted below level {min_level}: {rule.description}",
+                    rule=f"{level_key}:file_mutation_level",
+                    category="file_mutation",
+                )
+            # Extract target path and validate against writable_paths
+            target = self._extract_target_path(command)
+            if target:
+                blocked = self._find_blocked_path(target, level)
+                if blocked:
+                    return SSHFilterResult(
+                        allowed=False,
+                        action="block",
+                        reason=f"File mutation to protected path blocked: {blocked}",
+                        rule=f"{level_key}:blocked_path",
+                        category="protected_path",
+                    )
+                writable = self._find_writable_path(target, level)
+                if not writable and level <= 2:
+                    return SSHFilterResult(
+                        allowed=False,
+                        action="block",
+                        reason=f"File mutation target '{target}' not in writable paths",
+                        rule=f"{level_key}:not_in_writable_paths",
+                        category="write_blocked",
+                    )
+        return None
+
+    # --- Level-gated capability check ---
+
+    def _check_level_gated_capabilities(
+        self, command: str, level: int, level_key: str
+    ) -> Optional[SSHFilterResult]:
+        """Check level-gated capabilities (crontab edit, systemctl enable, etc.)."""
+        for rule, min_level in self._level_gated_caps:
+            if rule.compiled.search(command):
+                if level < min_level:
+                    return SSHFilterResult(
+                        allowed=False,
+                        action="block",
+                        reason=f"Command requires level {min_level}+: {rule.description}",
+                        rule=f"{level_key}:level_gated:{min_level}",
+                        category="level_gated",
+                    )
+                return None
+        return None
+
+    # --- Sudo check for P1/P2 ---
+
+    def _check_sudo_restricted(
+        self, command: str, level: int, level_key: str
+    ) -> Optional[SSHFilterResult]:
+        """For P1 and P2: if command starts with sudo, check sudo_restricted_to.
+
+        P2 rules are pre-merged with P1 at load time — no runtime inheritance.
+        """
+        if not command.strip().startswith("sudo "):
+            return None
+
+        if level >= 3:
+            return None
+
+        for rule in self._sudo_restricted.get(level, []):
+            if rule.compiled.search(command):
+                return None
+
+        logger.warning(
+            f"SSHCommandFilter: BLOCKED {level_key}:sudo_not_in_restricted "
+            f"cmd={command[:80]}"
+        )
+        return SSHFilterResult(
+            allowed=False,
+            action="block",
+            reason=f"Sudo command not in allowed patterns for level {level}",
+            rule=f"{level_key}:sudo_restricted",
+            category="sudo_restricted",
+        )
 
     # --- Core check logic ---
 
     def check_command(
         self, command: str, privilege_level: int
     ) -> SSHFilterResult:
-        """Check a command against the 5-tier privilege model.
+        """Check a command against the 4-tier privilege model.
 
         Compound commands (joined by ;, |, &&, ||) are split and each
-        subcommand is checked individually.  This prevents injection attacks
-        such as ``uptime; rm -rf /`` from bypassing allowlist patterns.
+        subcommand is checked individually.
 
         Args:
             command: Full command string (may include pipes, redirects).
-            privilege_level: Integer 0-4 corresponding to L0-L4.
+            privilege_level: Integer 0-3 corresponding to P0-P3.
 
         Returns:
             SSHFilterResult with allow/block/requires_approval decision.
         """
-        # 1. Fail-closed if config did not load
         if not self._config_valid:
             logger.warning(
                 f"SSHCommandFilter: Config invalid, blocking: {command[:80]}"
@@ -404,51 +672,56 @@ class SSHCommandFilter:
                 category="config_error",
             )
 
-        # 2. Always-blocked check on FULL command string first.
-        # This runs before splitting so cross-subcommand patterns such as
-        # ``curl ... | bash`` are caught regardless of how the command is
-        # structured.
-        for category, rule in self._always_blocked:
+        level = max(0, min(3, privilege_level))
+        level_key = _LEVEL_KEYS[level]
+
+        # 1. Hard-blocked check on FULL command string first
+        for category, rule in self._hard_blocked:
             if rule.compiled.search(command):
                 logger.warning(
-                    f"SSHCommandFilter: BLOCKED always_blocked/{category} "
+                    f"SSHCommandFilter: BLOCKED hard_blocked/{category} "
                     f"pattern='{rule.pattern_str[:60]}' cmd={command[:80]}"
                 )
                 return SSHFilterResult(
                     allowed=False,
                     action="block",
                     reason=f"Command blocked: {rule.description}",
-                    rule=f"always_blocked:{category}",
+                    rule=f"hard_blocked:{category}",
                     category=category,
                 )
 
-        # 3. Requires human approval — full-string check (all levels)
+        # 2. Requires human approval — full-string check (all levels)
         for rule in self._requires_approval:
             if rule.compiled.search(command):
-                logger.info(
-                    f"SSHCommandFilter: REQUIRES_APPROVAL "
-                    f"pattern='{rule.pattern_str[:60]}' cmd={command[:80]}"
-                )
                 return SSHFilterResult(
                     allowed=False,
                     action="requires_approval",
                     reason=f"Command requires human approval: {rule.description}",
-                    rule="always_blocked:data_exfiltration_require_approval",
+                    rule="hard_blocked:data_exfiltration_require_approval",
                     category="data_exfiltration",
                 )
 
-        # 4. Split compound commands and check each subcommand individually.
-        # Splitting prevents ``uptime; rm -rf /`` from matching ``^uptime$``
-        # because we check each part in isolation.
+        # 3. Shell feature gating on FULL command string
+        shell_result = self._check_shell_features(command, level, level_key)
+        if shell_result:
+            return shell_result
+
+        # 4. File mutation path check on FULL command string
+        mutation_result = self._check_file_mutation(command, level, level_key)
+        if mutation_result:
+            return mutation_result
+
+        # 5. Level-gated capabilities check on FULL command string
+        cap_result = self._check_level_gated_capabilities(command, level, level_key)
+        if cap_result:
+            return cap_result
+
+        # 6. Split compound commands and check each subcommand
         subcommands = [
-            s.strip()
-            for s in _SSH_COMPOUND_SPLIT_RE.split(command)
-            if s.strip()
+            s for raw in _split_compound_command(command)
+            if (s := _STDERR_REDIRECT_RE.sub('', raw).strip())
         ]
         if not subcommands:
-            logger.info(
-                f"SSHCommandFilter: BLOCK empty command cmd={command[:80]}"
-            )
             return SSHFilterResult(
                 allowed=False,
                 action="block",
@@ -457,16 +730,14 @@ class SSHCommandFilter:
                 category="empty",
             )
 
-        # 5. Privilege-level check applied per subcommand
-        level = max(0, min(4, privilege_level))
-        level_key = _LEVEL_KEYS.get(level, f"L{level}")
+        is_compound = len(subcommands) > 1
 
-        if level <= 2:
-            # Allowlist mode: every subcommand must individually match
+        # 7. Profile-specific check per subcommand
+        if level == 0:
             for subcmd in subcommands:
-                result = self._check_allowlist(subcmd, level, level_key)
+                result = self._check_p0_allowlist(subcmd, level_key)
                 if not result.allowed:
-                    if len(subcommands) > 1:
+                    if is_compound:
                         result = SSHFilterResult(
                             allowed=False,
                             action=result.action,
@@ -479,19 +750,19 @@ class SSHCommandFilter:
                             category=result.category,
                         )
                     return result
-            # All subcommands passed — return allow from the last check
-            return self._check_allowlist(subcommands[-1], level, level_key)
+            return result  # type: ignore[possibly-undefined]
         else:
-            # Blocklist mode: check full string first (catches multi-part
-            # patterns like fork bombs that span shell operators), then
-            # check each subcommand individually.
-            full_result = self._check_blocklist(command, level, level_key)
-            if not full_result.allowed:
-                return full_result
+            # P1-P3: Blocklist mode
+            # Full-string blocklist check only for compound commands
+            # (catches multi-part patterns like fork bombs spanning operators)
+            if is_compound:
+                full_result = self._check_blocklist(command, level, level_key)
+                if not full_result.allowed:
+                    return full_result
             for subcmd in subcommands:
                 result = self._check_blocklist(subcmd, level, level_key)
                 if not result.allowed:
-                    if len(subcommands) > 1:
+                    if is_compound:
                         result = SSHFilterResult(
                             allowed=False,
                             action=result.action,
@@ -504,19 +775,20 @@ class SSHCommandFilter:
                             category=result.category,
                         )
                     return result
-            # No subcommand blocked — allow
-            return self._check_blocklist(subcommands[-1], level, level_key)
+                sudo_result = self._check_sudo_restricted(subcmd, level, level_key)
+                if sudo_result:
+                    return sudo_result
+                trigger_result = self._check_approval_triggers(subcmd, level, level_key)
+                if trigger_result:
+                    return trigger_result
+            return result  # type: ignore[possibly-undefined]
 
-    def _check_allowlist(
-        self, command: str, level: int, level_key: str
+    def _check_p0_allowlist(
+        self, command: str, level_key: str
     ) -> SSHFilterResult:
-        """Allowlist model for L0-L2: command must match an allowed pattern."""
-        for rule in self._level_allowlists.get(level, []):
+        """P0 allowlist: command must match an allowed pattern."""
+        for rule in self._p0_allowlist:
             if rule.compiled.search(command):
-                logger.debug(
-                    f"SSHCommandFilter: ALLOW {level_key}:allowlist "
-                    f"pattern='{rule.pattern_str[:60]}' cmd={command[:80]}"
-                )
                 return SSHFilterResult(
                     allowed=True,
                     action="allow",
@@ -524,45 +796,13 @@ class SSHCommandFilter:
                     rule=f"{level_key}:allowlist",
                     category="safe_read",
                 )
-
-        # L2 extension: allow writes to writable_paths, deny to blocked_paths
-        if level == 2:
-            blocked_path = self._find_blocked_path_in_command(command)
-            if blocked_path:
-                logger.warning(
-                    f"SSHCommandFilter: BLOCKED L2:blocked_path "
-                    f"path='{blocked_path}' cmd={command[:80]}"
-                )
-                return SSHFilterResult(
-                    allowed=False,
-                    action="block",
-                    reason=f"Write to protected path blocked: {blocked_path}",
-                    rule="L2_configuration:blocked_path",
-                    category="protected_path",
-                )
-
-            writable_path = self._find_writable_path_in_command(command)
-            if writable_path:
-                logger.debug(
-                    f"SSHCommandFilter: ALLOW L2:writable_path "
-                    f"path='{writable_path}' cmd={command[:80]}"
-                )
-                return SSHFilterResult(
-                    allowed=True,
-                    action="allow",
-                    reason=f"Write to allowed config path: {writable_path}",
-                    rule="L2_configuration:writable_path",
-                    category="config_write",
-                )
-
-        # Default: block (allowlist model — no match means denied)
         logger.info(
             f"SSHCommandFilter: BLOCK {level_key}:no_match cmd={command[:80]}"
         )
         return SSHFilterResult(
             allowed=False,
             action="block",
-            reason=f"Command not in allowlist for privilege level {level}",
+            reason="Command not in allowlist for Observer level",
             rule=f"{level_key}:no_allowlist_match",
             category="unlisted",
         )
@@ -570,7 +810,10 @@ class SSHCommandFilter:
     def _check_blocklist(
         self, command: str, level: int, level_key: str
     ) -> SSHFilterResult:
-        """Blocklist model for L3-L4: command blocked only if it matches."""
+        """Blocklist model for P1-P3: command blocked only if it matches.
+
+        P2 blocklist is pre-merged with P1 at load time — single pass.
+        """
         for rule in self._level_blocklists.get(level, []):
             if rule.compiled.search(command):
                 logger.warning(
@@ -585,11 +828,6 @@ class SSHCommandFilter:
                     category="blocked_command",
                 )
 
-        # Default: allow (blocklist model — no match means allowed)
-        logger.debug(
-            f"SSHCommandFilter: ALLOW {level_key}:no_blocklist_match "
-            f"cmd={command[:80]}"
-        )
         return SSHFilterResult(
             allowed=True,
             action="allow",
@@ -598,43 +836,37 @@ class SSHCommandFilter:
             category="unrestricted",
         )
 
+    def _check_approval_triggers(
+        self, command: str, level: int, level_key: str
+    ) -> Optional[SSHFilterResult]:
+        """Check if a command matches an approval trigger for the given level."""
+        for rule in self._approval_triggers.get(level, []):
+            if rule.compiled.search(command):
+                return SSHFilterResult(
+                    allowed=False,
+                    action="requires_approval",
+                    reason=f"Requires approval: {rule.description}",
+                    rule=f"{level_key}:approval_trigger",
+                    category="approval_required",
+                )
+        return None
+
     # --- Host and path checks ---
 
     def check_host(
         self, host: str, security_config: SSHSecurityConfig
     ) -> SSHFilterResult:
-        """Check whether a host is permitted by the SSH security config.
-
-        Checks, in order:
-        1. hosts.always_blocked — explicit host strings and CIDR ranges.
-        2. Private network ranges (RFC 1918 / loopback / link-local) unless
-           the host appears in hosts.private_network_exceptions.
-        3. Mode (allowlist vs blocklist) — allowlist requires an explicit
-           match in private_network_exceptions; blocklist allows by default.
-
-        Args:
-            host: Hostname or IP address string.
-            security_config: Loaded SSHSecurityConfig for the instance.
-
-        Returns:
-            SSHFilterResult with allow/block decision.
-        """
+        """Check whether a host is permitted by the SSH security config."""
         hosts_cfg = security_config.hosts
 
-        # Resolve host to IP if possible (for CIDR checks)
         host_addr: Optional[ipaddress.IPv4Address | ipaddress.IPv6Address] = None
         try:
             host_addr = ipaddress.ip_address(host)
         except ValueError:
-            pass  # hostname string — can only do exact matches for CIDR entries
+            pass
 
-        # 1. always_blocked: exact hostname or CIDR
         for entry in hosts_cfg.always_blocked:
             if self._host_matches_entry(host, host_addr, entry):
-                logger.warning(
-                    f"SSHCommandFilter: HOST BLOCKED always_blocked "
-                    f"entry='{entry}' host='{host}'"
-                )
                 return SSHFilterResult(
                     allowed=False,
                     action="block",
@@ -643,7 +875,6 @@ class SSHCommandFilter:
                     category="blocked_host",
                 )
 
-        # 2. Private network check
         is_private = self._is_private_host(host, host_addr)
         if is_private:
             in_exceptions = any(
@@ -651,10 +882,6 @@ class SSHCommandFilter:
                 for exc in hosts_cfg.private_network_exceptions
             )
             if not in_exceptions:
-                logger.warning(
-                    f"SSHCommandFilter: HOST BLOCKED private_network "
-                    f"host='{host}'"
-                )
                 return SSHFilterResult(
                     allowed=False,
                     action="block",
@@ -666,20 +893,6 @@ class SSHCommandFilter:
                     category="private_network",
                 )
 
-        # 3. Mode check
-        if hosts_cfg.mode == "allowlist":
-            in_exceptions = any(
-                self._host_matches_entry(host, host_addr, exc)
-                for exc in hosts_cfg.private_network_exceptions
-            )
-            if not in_exceptions and is_private is False:
-                # allowlist mode: only private-exception hosts are explicitly
-                # listed — public IPs are allowed unless always_blocked matched
-                pass  # fall through to allow
-
-        logger.debug(
-            f"SSHCommandFilter: HOST ALLOW host='{host}' mode={hosts_cfg.mode}"
-        )
         return SSHFilterResult(
             allowed=True,
             action="allow",
@@ -697,12 +910,10 @@ class SSHCommandFilter:
         """Return True if host matches an entry (exact string or CIDR)."""
         if host == entry:
             return True
-        # Try CIDR match
         try:
             network = ipaddress.ip_network(entry, strict=False)
             if host_addr is not None and host_addr in network:
                 return True
-            # entry may be a plain IP — try comparing as address
             entry_addr = ipaddress.ip_address(entry)
             return host_addr is not None and host_addr == entry_addr
         except ValueError:
@@ -730,40 +941,26 @@ class SSHCommandFilter:
     ) -> SSHFilterResult:
         """Check whether a path is writable at the given privilege level.
 
-        L0-L1: no write access — all paths blocked.
-        L2+: path must appear in writable_paths and not in blocked_paths.
-        L3-L4: writable_paths/blocked_paths still enforced for explicit checks.
-
-        Args:
-            path: Absolute path string to check.
-            privilege_level: Integer 0-4.
-
-        Returns:
-            SSHFilterResult with allow/block decision.
+        P3 (Full Access) has no blocked_paths of its own but still inherits
+        P2's blocked_paths — protected system files remain off-limits even at
+        the highest privilege level.
         """
-        level = max(0, min(4, privilege_level))
-        level_key = _LEVEL_KEYS.get(level, f"L{level}")
+        level = max(0, min(3, privilege_level))
+        level_key = _LEVEL_KEYS[level]
 
-        if level < 2:
-            logger.info(
-                f"SSHCommandFilter: PATH WRITE BLOCKED {level_key} "
-                f"(no write access below L2) path='{path}'"
-            )
+        if level == 0:
             return SSHFilterResult(
                 allowed=False,
                 action="block",
-                reason=f"Write access not permitted at privilege level {level} (L0/L1 are read-only)",
+                reason="Write access not permitted at Observer level",
                 rule=f"{level_key}:no_write_access",
                 category="write_blocked",
             )
 
-        # Check blocked_paths first (higher priority)
-        blocked = self._find_blocked_path(path)
+        # P3 inherits P2's blocked_paths so critical files stay protected.
+        check_level = min(level, 2)
+        blocked = self._find_blocked_path(path, check_level)
         if blocked:
-            logger.warning(
-                f"SSHCommandFilter: PATH WRITE BLOCKED {level_key}:blocked_path "
-                f"match='{blocked}' path='{path}'"
-            )
             return SSHFilterResult(
                 allowed=False,
                 action="block",
@@ -772,44 +969,29 @@ class SSHCommandFilter:
                 category="protected_path",
             )
 
-        # Check writable_paths
-        writable = self._find_writable_path(path)
+        writable = self._find_writable_path(path, level)
         if writable:
-            logger.debug(
-                f"SSHCommandFilter: PATH WRITE ALLOW {level_key}:writable_path "
-                f"match='{writable}' path='{path}'"
-            )
             return SSHFilterResult(
                 allowed=True,
                 action="allow",
-                reason=f"Write to allowed config path: {writable}",
+                reason=f"Write to allowed path: {writable}",
                 rule=f"{level_key}:writable_path",
                 category="config_write",
             )
 
-        # L3/L4 blocklist levels allow writes generally (no allowlist constraint)
         if level >= 3:
-            logger.debug(
-                f"SSHCommandFilter: PATH WRITE ALLOW {level_key} "
-                f"(blocklist level, no path restriction) path='{path}'"
-            )
             return SSHFilterResult(
                 allowed=True,
                 action="allow",
-                reason=f"Write permitted at privilege level {level} (no path restrictions apply)",
+                reason="Write permitted at Full Access level",
                 rule=f"{level_key}:unrestricted_write",
                 category="unrestricted",
             )
 
-        # L2: path not in writable_paths and not in blocked_paths — deny
-        logger.info(
-            f"SSHCommandFilter: PATH WRITE BLOCKED {level_key}:not_in_writable_paths "
-            f"path='{path}'"
-        )
         return SSHFilterResult(
             allowed=False,
             action="block",
-            reason=f"Path '{path}' is not in the allowed writable paths for privilege level {level}",
+            reason=f"Path '{path}' is not in the writable paths for level {level}",
             rule=f"{level_key}:not_in_writable_paths",
             category="write_blocked",
         )
@@ -819,26 +1001,18 @@ class SSHCommandFilter:
     ) -> SSHFilterResult:
         """Check whether a path is readable at the given privilege level.
 
-        L0-L2: paths in blocked_paths are denied (sensitive files).
-        L3-L4: no read restrictions (blocklist mode).
-
-        Args:
-            path: Absolute path string to check.
-            privilege_level: Integer 0-4.
-
-        Returns:
-            SSHFilterResult with allow/block decision.
+        P0 has no blocked_paths configured (allowlist mode covers it), so we
+        fall back to P1's blocked_paths — P0 is MORE restrictive, not less.
         """
-        level = max(0, min(4, privilege_level))
-        level_key = _LEVEL_KEYS.get(level, f"L{level}")
+        level = max(0, min(3, privilege_level))
+        level_key = _LEVEL_KEYS[level]
 
         if level <= 2:
-            blocked = self._find_blocked_path(path)
+            # P0 inherits P1's blocked_paths so sensitive paths are still
+            # protected even in observer mode.
+            check_level = max(level, 1)
+            blocked = self._find_blocked_path(path, check_level)
             if blocked:
-                logger.info(
-                    f"SSHCommandFilter: PATH READ BLOCKED {level_key}:blocked_path "
-                    f"match='{blocked}' path='{path}'"
-                )
                 return SSHFilterResult(
                     allowed=False,
                     action="block",
@@ -866,12 +1040,6 @@ class SSHCommandFilter:
         return self._config_valid
 
     def get_allowed_operations(self, privilege_level: int) -> list[dict]:
-        """Return list of allowed command patterns for a privilege level.
-
-        Used by SSHExec in operations mode to show available commands.
-
-        Returns:
-            List of dicts with 'pattern' and 'description' keys.
-        """
-        level = max(0, min(4, privilege_level))
+        """Return list of allowed command patterns for a privilege level."""
+        level = max(0, min(3, privilege_level))
         return list(self._level_operations.get(level, []))

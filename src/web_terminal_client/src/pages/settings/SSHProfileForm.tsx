@@ -4,24 +4,8 @@ import { maskSSHKey, isEncryptedKey } from '../../utils/sshUtils';
 import { testSSHConnection } from '../../sshApi';
 import { useAuth } from '../../AuthContext';
 import { ConnectionTestResult } from './ConnectionTestResult';
+import { SSH_ACCESS_LEVELS } from '../../types/ssh';
 import type { CreateSSHProfileRequest, SSHMode, SSHProfile, TestSSHConnectionResponse, UpdateSSHProfileRequest } from '../../types/ssh';
-
-// ---------------------------------------------------------------------------
-// Access level options
-// ---------------------------------------------------------------------------
-
-interface AccessLevel {
-  value: number;
-  label: string;
-  mode: SSHMode;
-  recommended?: boolean;
-}
-
-const ACCESS_LEVELS: AccessLevel[] = [
-  { value: 0, label: 'L0 Monitor (readonly)', mode: 'readonly' },
-  { value: 1, label: 'L1 Manage', mode: 'operations', recommended: true },
-  { value: 2, label: 'L2 Edit Configs', mode: 'filtered_shell' },
-];
 
 // ---------------------------------------------------------------------------
 // Form state
@@ -193,7 +177,7 @@ export function SSHProfileForm({
       host: form.host.trim(),
       port: form.port ? Number(form.port) : 22,
       username: form.username.trim(),
-      mode: ACCESS_LEVELS.find((l) => l.value === form.privilegeLevel)?.mode ?? ('operations' as SSHMode),
+      mode: SSH_ACCESS_LEVELS.find((l) => l.value === form.privilegeLevel)?.mode ?? ('operations' as SSHMode),
       privilege_level: form.privilegeLevel,
       description: form.description.trim() || undefined,
     };
@@ -344,7 +328,7 @@ export function SSHProfileForm({
       <div className="dash-form-group">
         <label className="dash-form-label">Access Level</label>
         <div className="ssh-access-levels">
-          {ACCESS_LEVELS.map((level) => (
+          {SSH_ACCESS_LEVELS.map((level) => (
             <label
               key={level.value}
               className={`ssh-access-level${form.privilegeLevel === level.value ? ' ssh-access-level-active' : ''}`}

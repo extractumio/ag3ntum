@@ -131,8 +131,8 @@ def test_ssh_profile():
 
 
 @pytest.fixture
-def test_ssh_profile_l3():
-    """L3 administration profile for blocklist-mode testing."""
+def test_ssh_profile_p3():
+    """P3 Full Access profile for blocklist-mode testing."""
     return SSHProfile(
         name="admin-server",
         host="10.0.1.5",
@@ -143,6 +143,10 @@ def test_ssh_profile_l3():
         mode="filtered_shell",
         privilege_level=3,
     )
+
+
+# Backward-compatible alias kept for any remaining callers
+test_ssh_profile_l3 = test_ssh_profile_p3
 
 
 # ---------------------------------------------------------------------------

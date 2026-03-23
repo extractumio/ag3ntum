@@ -68,8 +68,8 @@ class CreateSSHProfileRequest(BaseModel):
                                       description="Key passphrase if encrypted")
     mode: str = Field(default="readonly",
                       description="readonly | operations | filtered_shell")
-    privilege_level: int = Field(default=0, ge=0, le=4,
-                                 description="Privilege level 0-4")
+    privilege_level: int = Field(default=0, ge=0, le=3,
+                                 description="Privilege level 0-3")
     allowed_operations: Optional[list[str]] = Field(
         default=None, description="For operations mode")
     description: Optional[str] = Field(default=None, max_length=500)
@@ -110,7 +110,7 @@ class UpdateSSHProfileRequest(BaseModel):
                                        description="New key to replace existing")
     passphrase: Optional[str] = None
     mode: Optional[str] = None
-    privilege_level: Optional[int] = Field(default=None, ge=0, le=4)
+    privilege_level: Optional[int] = Field(default=None, ge=0, le=3)
     allowed_operations: Optional[list[str]] = None
     description: Optional[str] = Field(default=None, max_length=500)
     is_active: Optional[bool] = None

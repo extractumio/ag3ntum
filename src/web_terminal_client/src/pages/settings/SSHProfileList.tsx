@@ -11,6 +11,7 @@ import { DataTable, ConfirmDialog, StatusBadge } from '../../components/dashboar
 import type { Column } from '../../components/dashboard';
 import { SSHProfileForm } from './SSHProfileForm';
 import { ConnectionTestResult } from './ConnectionTestResult';
+import { SSH_ACCESS_LEVELS } from '../../types/ssh';
 import type { SSHProfile, CreateSSHProfileRequest, UpdateSSHProfileRequest, TestSSHConnectionResponse } from '../../types/ssh';
 
 // ---------------------------------------------------------------------------
@@ -130,8 +131,8 @@ export function SSHProfileList() {
       header: 'Access',
       render: (r) => {
         const level = Number(r.privilege_level);
-        const labels: Record<number, string> = { 0: 'Monitor', 1: 'Manage', 2: 'Config' };
-        return <span className="badge">L{level} {labels[level] || ''}</span>;
+        const match = SSH_ACCESS_LEVELS.find(l => l.value === level);
+        return <span className="badge">{match?.shortLabel ?? `P${level}`}</span>;
       },
     },
     {

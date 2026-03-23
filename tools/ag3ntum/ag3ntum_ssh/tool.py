@@ -1066,14 +1066,8 @@ async def _ssh_write_impl(
     if not path_check.allowed:
         return _error(f"Write denied: {path_check.reason}")
 
-    # L2 extension allowlist
-    if profile.privilege_level == 2:
-        ext = PurePosixPath(path).suffix.lower()
-        if ext not in _L2_ALLOWED_EXTENSIONS:
-            return _error(
-                f"File extension '{ext}' not allowed at L2. "
-                f"Allowed: {', '.join(sorted(_L2_ALLOWED_EXTENSIONS))}"
-            )
+    # Extension restrictions removed — path scoping provides security.
+    # P1 allows any file type in /var/www/; P2 allows in /etc/ configs.
 
     # Pre-read check (WriteTracker)
     if ctx.write_tracker is not None:
@@ -1354,21 +1348,14 @@ async def _ssh_write_batch_impl(
         if not path_check.allowed:
             return _error(f"Batch: write denied for '{path}': {path_check.reason}")
 
-        # L2 extension filter
-        if profile.privilege_level == 2:
-            ext = PurePosixPath(path).suffix.lower()
-            if ext not in _L2_ALLOWED_EXTENSIONS:
-                return _error(
-                    f"Batch: extension '{ext}' not allowed at L2 for '{path}'."
-                )
+        # Extension restrictions removed — path scoping provides security.
 
-        # Pre-read check (L2 requires all read; L3+ can skip)
-        if profile.privilege_level == 2 and ctx.write_tracker is not None:
+        # Pre-read check (P1-P2 require reading before writing)
+        if profile.privilege_level <= 2 and ctx.write_tracker is not None:
             record = ctx.write_tracker.get_read_record(profile_name, path)
             if record is None:
                 return _error(
-                    f"Batch: file '{path}' must be read with SSHRead first "
-                    "(required at L2)."
+                    f"Batch: file '{path}' must be read with SSHRead first."
                 )
 
     # Write budget check

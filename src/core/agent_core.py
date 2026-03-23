@@ -748,6 +748,23 @@ class ClaudeAgent:
         # Get session directory for isolated Claude storage (CLAUDE_CONFIG_DIR)
         session_dir = self._session_manager.get_session_dir(session_context.session_id)
 
+        # Ensure remote-settings.json exists in the session directory.
+        # The Claude Agent SDK binary reads this file with openSync during
+        # initialization and crashes (exit code 1) if it's missing — especially
+        # during session resume. An empty JSON object is a valid default.
+        remote_settings_path = session_dir / "remote-settings.json"
+        if not remote_settings_path.exists():
+            try:
+                remote_settings_path.write_text("{}")
+                logger.debug(
+                    "Created remote-settings.json for session %s",
+                    session_context.session_id,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not create remote-settings.json: %s", exc
+                )
+
         # Set up MCP servers for additional tools
         mcp_servers: dict[str, Any] = {}
 
@@ -1496,14 +1513,34 @@ class ClaudeAgent:
                 else:
                     raise
 
-        # Extract resume_id from session_context for SDK resumption
+        # Extract resume_id from session_context for SDK resumption.
+        # Validate that the conversation data still exists — the SDK crashes
+        # (exit code 1) if asked to resume a session whose JSONL was lost
+        # (e.g., after a container rebuild or a previous crash).
         resume_id: Optional[str] = None
         if session_context.claude_session_id:
             resume_id = session_context.claude_session_id
-            logger.info(
-                f"Resuming session: {session_context.session_id} "
-                f"(Claude session: {resume_id})"
+            # Check that the SDK's projects/ directory has conversation data
+            _sess_dir = self._session_manager.get_session_dir(
+                session_context.session_id
             )
+            projects_dir = _sess_dir / "projects"
+            has_conversation_data = (
+                projects_dir.is_dir()
+                and any(projects_dir.rglob("*.jsonl"))
+            )
+            if has_conversation_data:
+                logger.info(
+                    f"Resuming session: {session_context.session_id} "
+                    f"(Claude session: {resume_id})"
+                )
+            else:
+                logger.warning(
+                    f"Cannot resume session {session_context.session_id}: "
+                    f"conversation data missing (projects/*.jsonl not found). "
+                    f"Starting fresh conversation instead."
+                )
+                resume_id = None
 
         # Set session context for session-specific permissions
         # This sandboxes the agent to only its own workspace folder

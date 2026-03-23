@@ -1,6 +1,6 @@
 # Using SSH Tools
 
-Ag3ntum SSH tools let the agent manage remote servers through secure, filtered SSH connections. The agent can run commands, read files, and manage connections — all governed by a 5-tier privilege model enforced at the Python level, not by LLM prompts.
+Ag3ntum SSH tools let the agent manage remote servers through secure, filtered SSH connections. The agent can run commands, read files, and manage connections — all governed by a 4-tier privilege model enforced at the Python level, not by LLM prompts.
 
 ---
 
@@ -51,7 +51,7 @@ profiles:
     auth_method: key
     key_ref: my-server-key       # matches the --name from step 3
     mode: readonly
-    privilege_level: 0            # L0: read-only monitoring
+    privilege_level: 0            # P0: read-only monitoring
     description: "Production web server"
 ```
 
@@ -61,7 +61,7 @@ profiles:
 ./run.sh restart
 ```
 
-The agent now has three SSH tools: `SSHConnect`, `SSHExec`, and `SSHRead`. At L0, it can run `uptime`, `df -h`, read logs, check service status — nothing destructive.
+The agent now has three SSH tools: `SSHConnect`, `SSHExec`, and `SSHRead`. At P0, it can run `uptime`, `df -h`, read logs, check service status — nothing destructive.
 
 ---
 
@@ -211,7 +211,7 @@ profiles:
 
     # Access control
     mode: readonly                  # readonly | operations | filtered_shell
-    privilege_level: 0              # 0-4 (see Privilege Levels below)
+    privilege_level: 0              # 0-3 (see Privilege Levels below)
 
     # Operations mode: explicit list of allowed commands
     allowed_operations: []          # only used when mode=operations
@@ -227,7 +227,7 @@ profiles:
 |------|-------------|----------|
 | `readonly` | Agent can run allowed read-only commands and read files via SFTP | Monitoring, log review, diagnostics |
 | `operations` | Agent can only run commands from `allowed_operations` list | Targeted automation (restart service, deploy) |
-| `filtered_shell` | Agent can run any command not in the blocklist | Broad administration (L3/L4 only) |
+| `filtered_shell` | Agent can run any command not in the blocklist | Broad administration (P2/P3 only) |
 
 ### Multiple profiles per user
 
@@ -247,7 +247,7 @@ profiles:
     auth_method: key
     key_ref: staging-key
     mode: filtered_shell
-    privilege_level: 3
+    privilege_level: 2
 
   db-primary:
     host: 10.0.1.30
@@ -263,11 +263,11 @@ profiles:
 
 ---
 
-## Privilege Levels (L0 -- L4)
+## Privilege Levels (P0 -- P3)
 
-The command filter enforces a 5-tier privilege model. Every command the agent tries to run passes through this filter before reaching the SSH connection. The filter operates at the Python regex level — the LLM has zero influence on security decisions.
+The command filter enforces a 4-tier privilege model. Every command the agent tries to run passes through this filter before reaching the SSH connection. The filter operates at the Python regex level — the LLM has zero influence on security decisions.
 
-### L0: Monitoring (read-only allowlist)
+### P0: Observer (read-only allowlist)
 
 **Mode**: Allowlist — commands must match one of ~21 pre-approved patterns.
 
@@ -283,66 +283,62 @@ The agent can:
 - SSL check: `openssl s_client -connect host:443`
 - OS info: `cat /etc/os-release`
 
-The agent **cannot** (at L0): write files, restart services, use sudo, run arbitrary commands.
+The agent **cannot** (at P0): write files, restart services, use sudo, run arbitrary commands.
 
-### L1: Service Management
+### P1: Site Manager
 
-**Inherits**: All L0 commands, plus targeted sudo patterns:
+Complete WordPress site management. Inherits P0 commands, plus:
 
-- `sudo systemctl restart|reload|start|stop <service>`
-- `sudo service <name> restart|reload|start|stop`
-- `sudo nginx -s reload|reopen`
-- `sudo apachectl graceful`
+- File writes in `/var/www/` (WordPress root)
+- `wp-cli` full access (plugins, themes, settings, database)
+- `mysqldump` for WordPress database backups
+- `sudo systemctl restart|reload|start|stop` for web services (nginx, apache, php-fpm)
+- `sudo service` for web services
+- `composer` and `git` for dependency/version management
+- `certbot` for SSL certificate management (create, renew, revoke)
+- Shell redirects (`>`, `tee`) allowed for WordPress paths
 
-**Human approval**: Per-session (approve once, applies for the session).
+**Human approval**: Per-session baseline. Destructive operations require per-command approval: `rm -rf` on directories, `DROP/TRUNCATE`, `wp user delete`, `mysqldump` (first invocation), database import, `wp eval/eval-file/shell`.
 
-### L2: Configuration
+### P2: Server Admin
 
-**Inherits**: All L1 commands, plus path-restricted file writes.
+Full server administration with general restrictions. Inherits P1 commands, plus:
 
-**Writable paths** (default):
-- `/etc/nginx/`, `/etc/apache2/`, `/etc/php/`
-- `/etc/mysql/`, `/etc/postgresql/`, `/etc/redis/`
-- `/etc/systemd/system/`
+- Package management: `apt`, `yum`, `dpkg`, `rpm`
+- User and group management: `useradd`, `usermod`, `passwd`
+- Firewall management: `ufw`, `firewall-cmd`, `iptables`
+- Cgroup and systemd: `systemctl` (full control including enable/disable for non-critical services)
+- Docker management: `docker`, `docker-compose`
+- System configuration files: `/etc/` (except shadow, passwd, sudoers, sshd_config, pam.d)
+- Crontab editing for system maintenance tasks
+- File writes to config directories
+- Shell redirects allowed system-wide
 
-**Blocked paths** (even at L2):
-- `/etc/shadow`, `/etc/passwd`, `/etc/sudoers`
-- `/etc/ssh/sshd_config`, `/etc/pam.d/`
+**Blocked at P2**:
+- `/etc/shadow`, `/etc/passwd`, `/etc/sudoers` (user account manipulation)
+- `/etc/ssh/sshd_config`, `/etc/pam.d/` (auth bypass)
+- `sudo rm -rf /` (filesystem destruction)
+- Fork bombs and resource exhaustion
 
-**Human approval**: Per write command.
+**Human approval**: Per destructive command.
 
-### L3: Administration
+### P3: Full Access
 
-**Mode switches to blocklist** — anything not explicitly blocked is allowed.
-
-**Blocked at L3**:
-- `sudo rm -rf /` (root filesystem deletion)
-- Fork bombs: `:(){ :|:& };:`
-- Raw disk writes: `dd ... of=/dev/sda`, `mkfs.*`
-- Redirect to disk: `> /dev/sda`
-- `chmod -R 777 /`
-- System shutdown/reboot
-
-**Human approval**: Per command.
-
-### L4: Emergency
+Emergency unrestricted access, time-boxed to 60 minutes.
 
 **Minimal blocklist** — only `sudo rm -rf /` and fork bombs are blocked.
 
 **Additional restrictions**:
-- Maximum session duration: 30 minutes (`max_session_duration_seconds: 1800`)
+- Maximum session duration: 60 minutes (`max_session_duration_seconds: 3600`)
 - Requires re-authentication
 - Human approval: per command
 
-### Always blocked (all levels, including L4)
+### Hard-blocked (all levels, including P3)
 
 These patterns cannot be overridden by any privilege level:
 
 **Persistence prevention**:
 - Writing to `authorized_keys`
-- Modifying crontab or cron files
-- `systemctl enable|disable|mask` (service persistence)
-- Init script modification (`/etc/init.d`, `update-rc.d`)
 - `LD_PRELOAD` / `ld.so.preload` library injection
 
 **Lateral movement prevention**:
@@ -350,11 +346,29 @@ These patterns cannot be overridden by any privilege level:
 - `curl ... | bash` or `wget ... -O - |` (download-and-execute)
 - `nc -lp`, `ncat -lp`, `socat` (reverse shells / listeners)
 - Cloud metadata endpoint (`169.254.169.254`)
+- `base64 -d | bash` (encoded execution)
 
 **Data exfiltration** (requires human approval, not blocked outright):
-- `mysqldump`, `pg_dump`
-- `tar -czf ... /` (archive creation)
 - Reading `.env`, `.key`, `.pem`, `.p12`, `.pfx`, `.jks` files
+
+### Level-gated capabilities
+
+These were previously always-blocked but are now unlocked at higher profiles:
+
+| Capability | Blocked at | Allowed at |
+|---|---|---|
+| `crontab -e -u www-data` | P0 | P1+ |
+| `crontab -e` (own user) | P0-P1 | P2+ |
+| `systemctl enable/disable` | P0-P1 | P2+ |
+| `systemctl mask` | P0-P2 | P3 |
+| `sed -i` (web paths) | P0 | P1+ |
+| `sed -i` (system paths) | P0-P1 | P2+ |
+| `tee`, `>`, `>>` (web paths) | P0 | P1+ |
+| `$VAR`, `${}` | P0 | P1+ |
+| `$()`, backticks | P0-P1 | P2+ |
+| `bash -c`, `sh -c` | P0-P1 | P2+ |
+| `eval`, `exec` | P0-P2 | P3 |
+| `mysqldump` | Approval | P1+ (first invocation needs approval) |
 
 ---
 
@@ -556,8 +570,8 @@ The command did not pass the privilege level filter.
 
 **Check**:
 1. What privilege level is set on the profile? (`privilege_level: 0` is the most restrictive)
-2. At L0, only ~21 specific commands are allowed — check the full list above
-3. `always_blocked` patterns cannot be overridden at any level
+2. At P0, only ~21 specific commands are allowed — check the full list above
+3. `hard_blocked` patterns cannot be overridden at any level
 4. View block reason in the error message — it tells you which rule matched
 
 ### "SSH credential error"
@@ -578,7 +592,7 @@ The SSH connection itself failed.
 1. Is the remote host reachable from the Ag3ntum container? (`ping` from inside container)
 2. Is the SSH port open? (`nc -zv <host> <port>`)
 3. Is the SSH key authorized on the remote server? (test manually with `ssh -i`)
-4. Check `always_blocked` hosts — localhost, `127.0.0.1`, `::1`, and `169.254.0.0/16` are always blocked
+4. Check `hard_blocked` hosts — localhost, `127.0.0.1`, `::1`, and `169.254.0.0/16` are always blocked
 5. Private network IPs (10.x, 172.16-31.x, 192.168.x) require listing in `private_network_exceptions`
 
 ### "SSH connection limit reached"
@@ -626,3 +640,20 @@ for s in secrets:
 sqlite3 /data/ag3ntum.db \
   "SELECT timestamp, command, block_reason, block_rule FROM ssh_audit_events WHERE blocked=1 ORDER BY timestamp DESC LIMIT 20;"
 ```
+
+---
+
+## Migration from L0-L4 to P0-P3
+
+If you created SSH profiles under the previous 5-tier system (L0-L4), apply this mapping:
+
+| Old Level | New Level | Action |
+|---|---|---|
+| L0 (Monitoring) → | P0 (Observer) | No change needed (privilege_level=0) |
+| L1 (Service Management) → | P1 (Site Manager) | No change needed (privilege_level=1) |
+| L2 (Configuration) → | P2 (Server Admin) | Change to privilege_level=2. P2 is now broader than old L2 |
+| L3 (Administration) → | P2 (Server Admin) | Change privilege_level from 3 to 2 |
+| L4 (Emergency) → | P3 (Full Access) | Change privilege_level from 4 to 3 |
+
+Profiles with `privilege_level=4` will be rejected by the API validator (max is now 3).
+Update via the UI or API before restarting after upgrade.

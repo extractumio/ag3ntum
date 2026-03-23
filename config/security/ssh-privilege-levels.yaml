@@ -1,18 +1,27 @@
-# SSH Privilege Level Definitions
+# SSH Privilege Level Definitions — 4-Tier Profile System
 # Copy to ssh-privilege-levels.yaml and customize.
 #
-# Five tiers (L0-L4) with escalating capabilities:
-# L0 = Monitoring (read-only, allowlist)
-# L1 = Service Management (targeted sudo)
-# L2 = Configuration (path-restricted writes)
-# L3 = Administration (broad sudo, blocklist)
-# L4 = Emergency (minimal filter, time-boxed)
+# Four profiles with escalating capabilities:
+# P0 = Observer (read-only, allowlist)
+# P1 = Site Manager (website management, blocklist + path scoping)
+# P2 = Server Admin (full server admin, blocklist + broad sudo)
+# P3 = Full Access (minimal filter, time-boxed)
 
 privilege_levels:
-  L0_monitoring:
+  P0_observer:
     description: "Read-only monitoring and diagnostics"
     sudo_allowed: false
     command_mode: allowlist
+    human_approval: none
+    shell_features:
+      var_reference: false
+      brace_expansion: false
+      subshell: false
+      backticks: false
+      eval: false
+      exec: false
+      source: false
+      inline_shell: false
     allowed_commands:
       # --- Basic navigation and identification ---
       - pattern: '^pwd$'
@@ -29,81 +38,187 @@ privilege_levels:
         description: "Environment variables"
       - pattern: '^which\s+[\w-]+$'
         description: "Command location"
+      - pattern: '^type\s+[\w-]+$'
+        description: "Command type"
+      - pattern: '^nproc$'
+        description: "Number of CPU cores"
+
       # --- Directory and file listing ---
-      - pattern: '^ls(\s+-[laSrhta]+)*(\s+[\w/.~*-]+)*$'
-        description: "List directory contents"
+      - pattern: '^ls(\s+-[\w]+)*(\s+[\w/.~*-]+)*$'
+        description: "List directory contents (any flags, optional path)"
+      - pattern: '^tree(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Directory tree view"
+      - pattern: '^find\s+[\w/.~-]+(\s+-[\w]+(\s+[\w/.~*-]+)?)*$'
+        description: "Find files and directories"
+      - pattern: '^(locate|mlocate)\s+[\w.*-]+$'
+        description: "Locate files by name"
+      - pattern: '^readlink(\s+-[\w]+)*\s+[\w/.~-]+$'
+        description: "Resolve symlinks"
+
       # --- File reading ---
-      - pattern: '^cat\s+/var/log/[\w/.+-]+$'
-        description: "Read log files"
-      - pattern: '^cat\s+[\w/.~-]+$'
+      - pattern: '^cat(\s+-[\w]+)*\s+[\w/.~+-]+$'
         description: "Read file contents"
-      - pattern: '^head(\s+-[n]?\s*\d+)?\s+[\w/.~-]+$'
-        description: "Head file contents"
-      - pattern: '^head\s+-[n]?\s*\d+$'
-        description: "Head first N lines (pipe target)"
+      - pattern: '^cat\s+/etc/[\w-]*release$'
+        description: "Read OS release file"
+      - pattern: '^head(\s+-[\w]*\s*\d*)*(\s+[\w/.~+-]+)?$'
+        description: "Head file contents or pipe target"
+      - pattern: '^tail(\s+-[\w]*\s*\d*)*(\s+[\w/.~+-]+)?$'
+        description: "Tail file contents or pipe target"
       - pattern: '^tail\s+-[nf]\s+\d*\s+/var/log/[\w/.+-]+$'
         description: "Tail log files"
-      - pattern: '^tail(\s+-[nf]\s*\d*)?\s+[\w/.~-]+$'
-        description: "Tail file contents"
-      - pattern: '^tail\s+-[n]?\s*\d+$'
-        description: "Tail last N lines (pipe target)"
-      - pattern: '^grep\s+.*\s+/var/log/[\w/.+-]+$'
-        description: "Search log files"
-      - pattern: '^grep(\s+-[rilnHcvEw]+)*\s+(".*?"|''.*?''|[\w.*-]+)\s+[\w/.~-]+$'
-        description: "Search any file for patterns"
-      - pattern: '^wc\s+-[lwc]+\s+[\w/.~-]+$'
-        description: "Word/line/char count of a file"
-      - pattern: '^du\s+-[sh]+(\s+[\w/.~*-]+)+$'
-        description: "Directory disk usage with glob"
+      - pattern: '^(less|more)$'
+        description: "Pager (pipe target only)"
+      - pattern: '^strings\s+[\w/.~-]+$'
+        description: "Print printable strings from binary"
+      - pattern: '^(md5|sha1|sha256|sha512)sum\s+[\w/.~-]+$'
+        description: "Checksum a file"
+      - pattern: '^wc(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Word/line/char count"
+      - pattern: '^du\s+(-[\w]+\s*)*(\s+[\w/.~*-]+)*$'
+        description: "Directory disk usage"
+      - pattern: '^diff(\s+-[\w]+)*\s+[\w/.~-]+\s+[\w/.~-]+$'
+        description: "Compare two files"
+
       # --- File metadata ---
       - pattern: '^file\s+[\w/.~-]+$'
         description: "File type identification"
       - pattern: '^stat\s+[\w/.~-]+$'
         description: "File metadata"
+
       # --- Disk and storage ---
-      - pattern: '^df\s+-[hT]+$'
-        description: "Disk usage"
-      - pattern: '^du\s+-[sh]+(\s+[\w/.~-]+)?$'
-        description: "Directory disk usage"
+      - pattern: '^df(\s+-[\w]+)*(\s+[\w/.~-]+)*$'
+        description: "Disk usage (any flags, optional path)"
+      - pattern: '^ls(cpu|blk|mem|pci|usb)(\s+-[\w]+)*$'
+        description: "Hardware listing (lscpu, lsblk, lsmem, lspci, lsusb)"
+
       # --- System info ---
-      - pattern: '^free\s+-[hm]+$'
-        description: "Memory usage"
+      - pattern: '^free(\s+-[\w]+)*$'
+        description: "Memory usage (any flags)"
       - pattern: '^uptime$'
         description: "System uptime"
-      - pattern: '^uname\s+-[a]+$'
-        description: "System info"
-      - pattern: '^ps\s+aux$'
+      - pattern: '^uname(\s+-[\w]+)*$'
+        description: "System info (any flags)"
+      - pattern: '^ps(\s+[-]?[\w]+)*$'
         description: "Process list"
-      - pattern: '^cat\s+/etc/os-release$'
-        description: "OS version"
+      - pattern: '^top\s+-bn?\s*\d+$'
+        description: "Non-interactive top snapshot"
+      - pattern: '^iostat(\s+-[\w]+)*(\s+\d+)*$'
+        description: "I/O statistics"
+      - pattern: '^vmstat(\s+\d+)*(\s+\d+)?$'
+        description: "Virtual memory statistics"
+      - pattern: '^mpstat(\s+-[\w]+)*(\s+\d+)*$'
+        description: "CPU statistics"
+      - pattern: '^lsb_release(\s+-[\w]+)*$'
+        description: "Linux distribution info"
+      - pattern: '^hostnamectl(\s+status)?$'
+        description: "Hostname and OS info"
+      - pattern: '^timedatectl(\s+status)?$'
+        description: "Date/time and timezone info"
+      - pattern: '^getent\s+(passwd|group|hosts|services)\s*[\w.-]*$'
+        description: "Query system databases"
+
       # --- Service and journal ---
       - pattern: '^systemctl\s+status\s+[\w@.-]+$'
         description: "Check service status"
+      - pattern: '^systemctl\s+list-units(\s+--[\w-]+(=[\w,]+)?)*$'
+        description: "List systemd units (read-only)"
+      - pattern: '^systemctl\s+list-unit-files(\s+--[\w-]+(=[\w,]+)?)*$'
+        description: "List systemd unit files (read-only)"
+      - pattern: '^systemctl\s+is-active\s+[\w@.-]+$'
+        description: "Check if a service is active"
+      - pattern: '^systemctl\s+is-enabled\s+[\w@.-]+$'
+        description: "Check if a service is enabled"
+      - pattern: '^systemctl\s+show\s+[\w@.-]+(\s+-p\s+[\w]+)?$'
+        description: "Show systemd unit properties"
       - pattern: '^journalctl\s+(-u\s+[\w@.-]+\s+)?--no-pager(\s+-n\s+\d+)?$'
         description: "Read journal logs"
       - pattern: '^journalctl\s+(-u\s+(ssh|sshd|[\w@.-]+)\s+)?(--since|--until)\s+["''\w\s:.-]+(\s+--no-pager)?(\s+-n\s+\d+)?$'
         description: "Read journal logs in a bounded time window"
-      # --- Pipeline helpers ---
-      - pattern: '^wc\s+-[lwc]+$'
-        description: "Word/line/char count (pipe target)"
-      - pattern: '^sort(\s+-[rnuk]+)*$'
-        description: "Sort output (pipe target)"
-      - pattern: '^uniq(\s+-c)?$'
-        description: "Unique filter (pipe target)"
+
+      # --- Pipeline utilities (safe pipe targets, all read-only) ---
+      - pattern: "^grep(\\s+-[\\w]+)*\\s+(\"[^\"]*\"|'[^']*'|[^\\s]+)(\\s+[\\w/.~*-]+)*$"
+        description: "Search for patterns (with or without file)"
+      - pattern: '^awk\s+.*$'
+        description: "Awk text processing (pipe target)"
+      - pattern: '^sed(\s+-[n])?(\s+-e)?\s+.*$'
+        description: "Sed read-only text processing (no -i)"
+      - pattern: '^cut(\s+-[\w]+)*(\s+-[\w]+\s+[\w,.:-]+)*$'
+        description: "Cut fields from lines"
+      - pattern: '^tr(\s+-[\w]+)*\s+.*$'
+        description: "Translate characters"
+      - pattern: '^column(\s+-[\w]+)*$'
+        description: "Format output in columns (pipe target)"
+      - pattern: '^tac(\s+[\w/.~-]+)?$'
+        description: "Reverse line order"
+      - pattern: '^rev(\s+[\w/.~-]+)?$'
+        description: "Reverse characters in lines"
+      - pattern: '^nl(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Number lines"
+      - pattern: '^fmt(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Reformat text"
+      - pattern: '^sort(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Sort output"
+      - pattern: '^uniq(\s+-[\w]+)*(\s+[\w/.~-]+)?$'
+        description: "Unique filter"
+      - pattern: '^echo\s+[^><|;&\n]+$'
+        description: "Echo text (redirect operators blocked)"
+      - pattern: '^printf\s+[^><|;&\n]+$'
+        description: "Printf text output (redirect operators blocked)"
+      - pattern: '^(true|false)$'
+        description: "Boolean no-op commands"
+      - pattern: '^test\s+.*$'
+        description: "Test/conditional expression"
+      - pattern: '^\[.*\]$'
+        description: "Bracket conditional expression"
+
       # --- Network diagnostics ---
-      - pattern: '^netstat\s+-[tlnup]+$|^ss\s+-[tlnup]+$'
-        description: "Network connections"
-      - pattern: '^ip\s+(addr|route|link)\s*(show)?(\s+[\w.-]+)?$'
-        description: "Network configuration"
+      - pattern: '^netstat(\s+-[\w]+)*$'
+        description: "Network connections (any flags)"
+      - pattern: '^ss(\s+-[\w]+)*$'
+        description: "Socket statistics (any flags)"
+      - pattern: '^ip(\s+-[\w]+)*\s+[\w]+(\s+[\w]+)*(\s+[\w./:-]+)?$'
+        description: "Network configuration (ip addr, ip route, etc.)"
       - pattern: '^dig\s+[\w.-]+$'
+        description: "DNS lookup"
+      - pattern: '^nslookup\s+[\w.-]+(\s+[\w.-]+)?$'
+        description: "DNS lookup"
+      - pattern: '^host(\s+-[\w]+)*\s+[\w.-]+$'
         description: "DNS lookup"
       - pattern: '^ping\s+-c\s+\d+\s+[\w.-]+$'
         description: "Network connectivity"
+      - pattern: '^(traceroute|tracepath)\s+[\w.-]+$'
+        description: "Network route trace"
       - pattern: '^openssl\s+s_client\s+-connect\s+[\w.-]+:\d+$'
         description: "SSL certificate check"
-      # --- Find and locate ---
-      - pattern: '^find\s+[\w/.~-]+\s+-name\s+[''"\w.*-]+(\s+-type\s+[fd])?$'
-        description: "Find files by name"
+      - pattern: '^curl(\s+-[\w]+)*\s+[\w:/.?&=%@+-]+$'
+        description: "HTTP request (no pipe to shell — caught by hard_blocked)"
+      - pattern: '^wget\s+--spider\s+[\w:/.?&=%-]+$'
+        description: "HTTP head check (wget spider)"
+      - pattern: '^(sudo\s+)?iptables\s+-[LnvS]+(\s+--[\w-]+)*$'
+        description: "Read iptables rules"
+      - pattern: '^(sudo\s+)?ufw\s+status(\s+verbose|\s+numbered)?$'
+        description: "Read UFW firewall status"
+      - pattern: '^(sudo\s+)?firewall-cmd\s+--list-all$'
+        description: "Read firewalld rules"
+      - pattern: '^(sudo\s+)?fail2ban-client\s+status(\s+[\w-]+)?$'
+        description: "Read fail2ban status"
+
+      # --- Docker read-only ---
+      - pattern: '^docker\s+ps(\s+-[\w]+)*$'
+        description: "List containers"
+      - pattern: '^docker\s+stats\s+--no-stream$'
+        description: "Container resource stats (non-streaming)"
+      - pattern: '^docker\s+logs(\s+-[\w]+)*\s+[\w.-]+$'
+        description: "View container logs"
+      - pattern: '^docker\s+inspect\s+[\w.-]+$'
+        description: "Inspect container or image"
+      - pattern: '^docker\s+images(\s+-[\w]+)*$'
+        description: "List Docker images"
+      - pattern: '^docker\s+(info|version)$'
+        description: "Docker info or version"
+      - pattern: '^docker\s+compose\s+ps(\s+-[\w]+)*$'
+        description: "Docker compose container status"
+
       # --- Authentication diagnostics ---
       - pattern: '^last(\s+-[fniwxR]+)*(\s+[\w.-]+)?$'
         description: "Recent login history"
@@ -111,17 +226,19 @@ privilege_levels:
         description: "Recent failed login history"
       - pattern: '^faillog(\s+-[au])?(\s+[\w.-]+)?$'
         description: "Failed login counters"
-      - pattern: '^grep\s+.*\s+/var/log/(auth\.log|secure)(\.\d+)?$'
-        description: "Search SSH authentication logs"
-      - pattern: '^tail\s+-[nf]\s+\d*\s+/var/log/(auth\.log|secure)(\.\d+)?$'
-        description: "Tail SSH authentication logs"
+
       # --- Runtime and config checks ---
-      - pattern: '^nginx\s+-t$|^apache2ctl\s+-t$|^httpd\s+-t$'
-        description: "Config syntax check"
-      - pattern: '^php\s+-v$|^python3?\s+--version$|^node\s+--version$'
-        description: "Runtime version check"
-      - pattern: '^docker\s+ps(\s+-a)?$|^docker\s+stats\s+--no-stream$'
-        description: "Container status"
+      - pattern: '^nginx\s+-[tTvV]$|^apache2ctl\s+-[tSMvV]$|^httpd\s+-[tSMvV]$'
+        description: "Config syntax check / version"
+      - pattern: '^php\s+-(v|m|i)$|^python3?\s+--version$|^node\s+--version$'
+        description: "Runtime version/info check"
+
+      # --- Crontab read-only ---
+      - pattern: '^crontab\s+-l$'
+        description: "List current user crontab"
+      - pattern: '^sudo\s+crontab\s+-l(\s+-u\s+[\w-]+)?$'
+        description: "List another user crontab"
+
       # WordPress wp-cli read-only commands
       - pattern: '^wp\s+(plugin|theme|core)\s+(list|status|version|verify-checksums)(\s+--[\w-]+(=\S+)?)*$'
         description: "wp-cli read-only listing/version commands"
@@ -142,71 +259,74 @@ privilege_levels:
       - pattern: '^wp\s+search-replace\s+.*--dry-run(\s+--[\w-]+(=\S+)?)*$'
         description: "wp-cli search-replace dry run only"
 
-  L1_service_management:
-    description: "Service restart and cache management"
-    sudo_allowed: true
-    sudo_restricted_to:
-      - '^sudo\s+systemctl\s+(restart|reload|start|stop|status)\s+[\w@.-]+$'
-      - '^sudo\s+service\s+[\w.-]+\s+(restart|reload|start|stop)$'
-      - '^sudo\s+nginx\s+-s\s+(reload|reopen)$'
-      - '^sudo\s+apachectl\s+graceful$'
-    allowed_commands:
-      # WordPress wp-cli operational commands (no sudo needed — runs as web user)
-      - pattern: '^wp\s+plugin\s+update\s+[\w-]+(\s+--[\w-]+(=\S+)?)*$'
-        description: "wp-cli update a plugin"
-      - pattern: '^wp\s+theme\s+update\s+[\w-]+(\s+--[\w-]+(=\S+)?)*$'
-        description: "wp-cli update a theme"
-      - pattern: '^wp\s+core\s+update(\s+--[\w-]+(=\S+)?)*$'
-        description: "wp-cli update WordPress core"
-      - pattern: '^wp\s+cache\s+flush$'
-        description: "wp-cli flush object cache"
-      - pattern: '^wp\s+rewrite\s+flush(\s+--hard)?$'
-        description: "wp-cli flush rewrite rules"
-      - pattern: '^wp\s+db\s+optimize$'
-        description: "wp-cli optimize database"
-      - pattern: '^wp\s+db\s+repair$'
-        description: "wp-cli repair database"
-      - pattern: '^wp\s+transient\s+delete\s+--all$'
-        description: "wp-cli delete all transients"
-      - pattern: '^wp\s+plugin\s+(activate|deactivate)\s+[\w-]+$'
-        description: "wp-cli activate/deactivate plugin"
-    inherits: L0_monitoring
-    human_approval: per_session
+      # MySQL read-only
+      - pattern: '^mysql\s+.*-e\s+"(SELECT|SHOW|DESCRIBE|EXPLAIN)\s+[^"]*"'
+        description: "MySQL read-only queries"
+      - pattern: "^mysql\\s+.*-e\\s+'(SELECT|SHOW|DESCRIBE|EXPLAIN)\\s+[^']*'"
+        description: "MySQL read-only queries (single quotes)"
 
-  L2_configuration:
-    description: "Configuration file editing"
+  P1_site_manager:
+    description: "Complete WordPress site management"
     sudo_allowed: true
+    command_mode: blocklist
+    human_approval: per_session
+    shell_features:
+      var_reference: true
+      brace_expansion: true
+      subshell: false
+      backticks: false
+      eval: false
+      exec: false
+      source: false
+      inline_shell: false
     writable_paths:
-      - '/etc/nginx/'
-      - '/etc/apache2/'
-      - '/etc/caddy/'
-      - '/etc/php/'
-      - '/etc/mysql/'
-      - '/etc/postgresql/'
-      - '/etc/redis/'
-      - '/etc/letsencrypt/'
-      - '/etc/systemd/system/'
+      - '/var/www/'
+      - '/tmp/'
+      - '/home/'
+      - '/var/cache/nginx/'
+      - '/var/log/'
     blocked_paths:
       - '/etc/shadow'
       - '/etc/passwd'
       - '/etc/sudoers'
+      - '/etc/sudoers.d/'
       - '/etc/ssh/sshd_config'
       - '/etc/pam.d/'
-    inherits: L1_service_management
-    human_approval: per_write_command
-
-  L3_administration:
-    description: "Full system administration"
-    sudo_allowed: true
-    command_mode: blocklist
+      - '/root/'
+      - '/usr/'
+      - '/bin/'
+      - '/sbin/'
+      - '/lib/'
+    sudo_restricted_to:
+      # Web service management
+      - '^sudo\s+systemctl\s+(restart|reload|start|stop|status)\s+(nginx|apache2|httpd|php[\w.-]*fpm|mysql|mysqld|mariadb|postgresql|redis|redis-server|memcached|postfix|dovecot)(\s|$)'
+      - '^sudo\s+systemctl\s+list-units(\s+--[\w-]+(=[\w,]+)?)*$'
+      # Config testing
+      - '^sudo\s+nginx\s+-(t|s\s+(reload|reopen))$'
+      - '^sudo\s+(apache2ctl|httpd)\s+(graceful|-t)$'
+      - '^sudo\s+php[\w.-]*\s+-t$'
+      # SSL certificates
+      - '^sudo\s+certbot\s+(certonly|renew|certificates|revoke)(\s+[\w./-]+|--[\w-]+(=\S+)?|\s+-\w+\s+\S+)*$'
+      # Process management
+      - '^sudo\s+kill\s+-\w+\s+\d+$'
+      # Journal access
+      - '^sudo\s+journalctl(\s+-[\w]+)*(\s+[\w@.-]+)*(\s+--[\w-]+(=[\w"''./ -]+)?)*$'
+      # Crontab for web user
+      - '^sudo\s+crontab\s+-(l|e)\s+-u\s+(www-data|nginx|apache|www)$'
+      # Log rotation
+      - '^sudo\s+logrotate\s+(-[df])\s+/etc/logrotate\.d/[\w.-]+$'
+      # Permission management on web paths
+      - '^sudo\s+chown\s+(-[\w]+\s+)*[\w:.-]+\s+/var/www/'
+      - '^sudo\s+chown\s+(-[\w]+\s+)*[\w:.-]+\s+/tmp/'
+      - '^sudo\s+chmod\s+(-[\w]+\s+)*[\w]+\s+/var/www/'
+      - '^sudo\s+chmod\s+(-[\w]+\s+)*[\w]+\s+/tmp/'
+      - '^sudo\s+find\s+/var/www/.*-exec\s+(chmod|chown)\s+'
     blocked_commands:
-      # rm targeting root — catches: rm -rf /, rm -fr /, rm -r -f /, sudo rm -rf /, rm /*
+      # Catastrophic operations
       - pattern: '\brm\s+(-\w+\s+)*/(\s|$|\*)'
         description: "Delete root filesystem (any flag order)"
-      # rm --recursive targeting root
       - pattern: '\brm\s+.*--recursive.*\s+/(\s|$|\*)'
         description: "Delete root filesystem (long flags)"
-      # rm -r on critical system directories (only top-level, not subdirs)
       - pattern: '\brm\s+.*-\w*[rR].*\s+/(boot|usr|etc|var|lib|sbin|bin)/?\s*$'
         description: "Recursive delete of critical system directory"
       - pattern: ':\(\)\{.*\|.*&.*\};:'
@@ -217,20 +337,164 @@ privilege_levels:
         description: "Format filesystem"
       - pattern: '>\s*/dev/[sh]d[a-z]'
         description: "Redirect to disk device"
-      # chmod 777 — catches: chmod -R 777 /, chmod 777 /path, chmod -R 777 /path
       - pattern: '\bchmod\s+(-\w+\s+)*777\s+/'
         description: "World-writable chmod on system paths"
       - pattern: 'shutdown\s+(-h\s+)?now|halt|poweroff|init\s+0'
         description: "System shutdown"
       - pattern: 'reboot|init\s+6'
         description: "System reboot"
-    inherits: L2_configuration
-    human_approval: per_command
+    approval_triggers:
+      - pattern: '\brm\s+.*-\w*[rR].*\s+[\w/.~-]+/'
+        description: "Recursive directory removal"
+      - pattern: '(?i)(DROP|TRUNCATE)\s+(TABLE|DATABASE)'
+        description: "Database DROP/TRUNCATE"
+      - pattern: '^wp\s+user\s+delete\s+'
+        description: "WordPress user deletion"
+      - pattern: '\bmysqldump\b'
+        description: "Database dump"
+      - pattern: '\bmysql\s+.*<\s*'
+        description: "Database import/restore"
+      - pattern: '^wp\s+(eval|eval-file|shell)\b'
+        description: "Arbitrary PHP execution"
+      - pattern: '\brsync\s+.*\S+:\S+'
+        description: "Rsync to remote host"
+    inherits: P0_observer
 
-  L4_emergency:
-    description: "Emergency unrestricted access"
+  P2_server_admin:
+    description: "Full server administration"
     sudo_allowed: true
     command_mode: blocklist
+    human_approval: per_sudo_command
+    shell_features:
+      var_reference: true
+      brace_expansion: true
+      subshell: true
+      backticks: true
+      eval: false
+      exec: false
+      source: true
+      inline_shell: true
+    writable_paths:
+      # All P1 paths
+      - '/var/www/'
+      - '/tmp/'
+      - '/home/'
+      - '/var/cache/nginx/'
+      - '/var/log/'
+      # Server config paths
+      - '/etc/nginx/'
+      - '/etc/apache2/'
+      - '/etc/httpd/'
+      - '/etc/caddy/'
+      - '/etc/php/'
+      - '/etc/php-fpm.d/'
+      - '/etc/mysql/'
+      - '/etc/postgresql/'
+      - '/etc/redis/'
+      - '/etc/letsencrypt/'
+      - '/etc/systemd/system/'
+      - '/etc/postfix/'
+      - '/etc/dovecot/'
+      - '/etc/fail2ban/'
+      - '/etc/logrotate.d/'
+      - '/etc/cron.d/'
+      - '/etc/ufw/'
+      - '/etc/sysctl.d/'
+      - '/etc/sysctl.conf'
+      - '/etc/security/'
+      - '/etc/promtail/'
+      - '/etc/grafana/'
+    blocked_paths:
+      - '/etc/shadow'
+      - '/etc/passwd'
+      - '/etc/sudoers'
+      - '/etc/sudoers.d/'
+      - '/etc/ssh/sshd_config'
+      - '/etc/pam.d/'
+    sudo_restricted_to:
+      # All P1 sudo patterns plus:
+      # Any service management
+      - '^sudo\s+systemctl\s+(restart|reload|start|stop|status)\s+[\w@.-]+$'
+      - '^sudo\s+systemctl\s+(enable|disable)\s+[\w@.-]+$'
+      - '^sudo\s+systemctl\s+(list-units|list-unit-files|daemon-reload)(\s+--[\w-]+(=[\w,]+)?)*$'
+      # Package management
+      - '^sudo\s+apt(-get)?\s+(update|upgrade|install|remove|autoremove|list|search|show|purge)(\s+[\w.+-]+)*(\s+-[\w]+)*$'
+      - '^sudo\s+dpkg\s+(-i|-r|--configure|-l|-s)(\s+[\w./_+-]+)*$'
+      - '^sudo\s+(dnf|yum)\s+(update|install|remove|list|search|info)(\s+[\w.+-]+)*(\s+-[\w]+)*$'
+      - '^sudo\s+rpm\s+(-i|-U|-e|-q)(\s+[\w./_+-]+)*$'
+      # Firewall management
+      - '^sudo\s+ufw\s+(allow|deny|delete|enable|disable|reset|status|logging)(\s+[\w/:]+)*$'
+      - '^sudo\s+iptables\s+(-[\w]+\s+)*'
+      - '^sudo\s+iptables-(save|restore)(\s+.*)?$'
+      - '^sudo\s+firewall-cmd\s+'
+      - '^sudo\s+fail2ban-client\s+(status|set|start|stop|reload)(\s+[\w.-]+)*$'
+      # User management
+      - '^sudo\s+(useradd|usermod|userdel|passwd|chage|groupadd|groupdel)(\s+[\w.-]+)*(\s+-[\w]+(\s+[\w.-]+)?)*$'
+      # Crontab any user
+      - '^sudo\s+crontab\s+-(e|l|r)(\s+-u\s+[\w-]+)?$'
+      # Config tests
+      - '^sudo\s+nginx\s+-(t|s\s+(reload|reopen))$'
+      - '^sudo\s+(apache2ctl|httpd)\s+(graceful|-t)$'
+      - '^sudo\s+certbot\s+(certonly|renew|certificates|revoke)(\s+[\w./-]+|--[\w-]+(=\S+)?|\s+-\w+\s+\S+)*$'
+      # Process and journal
+      - '^sudo\s+kill\s+-\w+\s+\d+$'
+      - '^sudo\s+killall\s+[\w.-]+$'
+      - '^sudo\s+journalctl(\s+-[\w]+)*(\s+[\w@.-]+)*(\s+--[\w-]+(=[\w"''./ -]+)?)*$'
+      # Disk management
+      - '^sudo\s+(fdisk\s+-l|lvs|vgs|pvs|lsblk)(\s+[\w/.-]+)*$'
+      - '^sudo\s+(lvextend|resize2fs)(\s+[\w/.-]+)*$'
+      # Log management
+      - '^sudo\s+logrotate\s+(-[df])\s+/etc/logrotate\.d/[\w.-]+$'
+      # Network
+      - '^sudo\s+netplan\s+apply$'
+      # Time
+      - '^sudo\s+timedatectl\s+set-timezone\s+[\w/]+$'
+      # System tuning
+      - '^sudo\s+sysctl\s+(-w\s+)?[\w.]+='
+      # Permissions (any path)
+      - '^sudo\s+chown\s+'
+      - '^sudo\s+chmod\s+'
+      - '^sudo\s+find\s+.*-exec\s+(chmod|chown)\s+'
+    blocked_commands:
+      # Same catastrophic blocks as P1
+      - pattern: '\brm\s+(-\w+\s+)*/(\s|$|\*)'
+        description: "Delete root filesystem (any flag order)"
+      - pattern: '\brm\s+.*--recursive.*\s+/(\s|$|\*)'
+        description: "Delete root filesystem (long flags)"
+      - pattern: '\brm\s+.*-\w*[rR].*\s+/(boot|usr|etc|var|lib|sbin|bin)/?\s*$'
+        description: "Recursive delete of critical system directory"
+      - pattern: ':\(\)\{.*\|.*&.*\};:'
+        description: "Fork bomb"
+      - pattern: 'dd\s+.*of=/dev/[sh]d[a-z]'
+        description: "Raw disk overwrite"
+      - pattern: 'mkfs\.'
+        description: "Format filesystem"
+      - pattern: '>\s*/dev/[sh]d[a-z]'
+        description: "Redirect to disk device"
+      - pattern: '\bchmod\s+(-\w+\s+)*777\s+/'
+        description: "World-writable chmod on system paths"
+      - pattern: 'shutdown\s+(-h\s+)?now|halt|poweroff|init\s+0'
+        description: "System shutdown (requires approval)"
+      - pattern: 'reboot|init\s+6'
+        description: "System reboot (requires approval)"
+    inherits: P1_site_manager
+
+  P3_full_access:
+    description: "Unrestricted emergency access"
+    sudo_allowed: true
+    command_mode: blocklist
+    human_approval: per_command
+    max_session_duration_seconds: 3600
+    requires_reauthentication: true
+    shell_features:
+      var_reference: true
+      brace_expansion: true
+      subshell: true
+      backticks: true
+      eval: true
+      exec: true
+      source: true
+      inline_shell: true
     blocked_commands:
       - pattern: '\brm\s+(-\w+\s+)*/(\s|$|\*)'
         description: "Delete root filesystem (any flag order)"
@@ -238,22 +502,14 @@ privilege_levels:
         description: "Delete root filesystem (long flags)"
       - pattern: ':\(\)\{.*\|.*&.*\};:'
         description: "Fork bomb"
-    max_session_duration_seconds: 1800
-    requires_reauthentication: true
-    human_approval: per_command
 
-# Commands ALWAYS blocked regardless of privilege level
-always_blocked:
+# Commands ALWAYS blocked regardless of privilege level (hard-blocked).
+# These are attack patterns with no legitimate admin use case.
+hard_blocked:
   persistence:
     - pattern: '>>?\s*.*authorized_keys'
       description: "SSH key injection"
-    - pattern: 'crontab\s+-[el]?|>>?\s*.*cron'
-      description: "Cron job modification"
-    - pattern: 'systemctl\s+(enable|disable|mask)'
-      description: "Systemd service modification"
-    - pattern: '/etc/init\.d|update-rc\.d|chkconfig'
-      description: "Init script modification"
-    - pattern: 'ld\.so\.preload|LD_PRELOAD'
+    - pattern: 'LD_PRELOAD|ld\.so\.preload'
       description: "Library preloading"
 
   lateral_movement:
@@ -261,7 +517,7 @@ always_blocked:
       description: "Nested SSH"
     - pattern: '\bscp\s+'
       description: "SCP from remote"
-    - pattern: '\bcurl\s+.*\|\s*(bash|sh|python)'
+    - pattern: '\bcurl\s+.*\|\s*(bash|sh|python|perl)'
       description: "Download and execute"
     - pattern: '\bwget\s+.*-O\s*-\s*\|'
       description: "Download and pipe"
@@ -271,60 +527,92 @@ always_blocked:
       description: "Cloud metadata endpoint"
     - pattern: 'base64\s+(-d|--decode).*\|\s*(bash|sh|python|perl)'
       description: "Base64 decode piped to interpreter"
-    - pattern: '\bbash\s+-c\b'
-      description: "Bash inline execution"
-    - pattern: '\bsh\s+-c\b'
-      description: "Shell inline execution"
-    - pattern: '\bpython3?\s+-c\b'
-      description: "Python inline execution"
-    - pattern: '\bperl\s+-e\b'
-      description: "Perl inline execution"
-
-  shell_expansion:
-    - pattern: '\$\('
-      description: "Command substitution (subshell)"
-    - pattern: '`'
-      description: "Backtick command substitution"
-    - pattern: '\$\{'
-      description: "Variable expansion with braces"
-    - pattern: '\beval\b'
-      description: "Shell eval execution"
-    - pattern: '\bexec\b\s'
-      description: "Shell exec replacement"
-    - pattern: '\bsource\b\s|\.\s+/'
-      description: "Shell source/dot execution"
-    - pattern: '\$[A-Za-z_]'
-      description: "Shell variable reference ($VAR)"
-
-  output_redirect:
-    - pattern: '>\s*/etc/'
-      description: "Redirect output to /etc/"
-    - pattern: '>\s*/root/'
-      description: "Redirect output to /root/"
-    - pattern: '>\s*~/\.ssh/'
-      description: "Redirect output to .ssh directory"
-    - pattern: '>\s*/var/spool/cron'
-      description: "Redirect output to cron directory"
-    - pattern: '\btee\s+'
-      description: "Tee output to file (use SSHWrite instead)"
-    - pattern: '>\s*/var/www/'
-      description: "Redirect to web root (use SSHWrite instead)"
-    - pattern: '\bdd\s+.*of='
-      description: "dd write to file (use SSHWrite instead)"
-    - pattern: '\bsed\s+-i\b'
-      description: "In-place file modification (use SSHWrite instead)"
 
   data_exfiltration_require_approval:
-    - pattern: '\bmysqldump\b|\bpg_dump\b'
-      description: "Database dump"
-    - pattern: '\btar\s+.*-[cz].*\/'
-      description: "Archive creation"
     - pattern: 'cat\s+.*\.(env|key|pem|p12|pfx|jks)\b'
       description: "Sensitive file read"
 
+# Shell features that are gated by profile level.
+# These replace the old "always_blocked" shell_expansion and output_redirect
+# categories. The SSHCommandFilter checks these based on each profile's
+# shell_features flags.
+level_gated_shell:
+  subshell:
+    pattern: '\$\('
+    description: "Command substitution (subshell)"
+  backticks:
+    pattern: '`'
+    description: "Backtick command substitution"
+  brace_expansion:
+    pattern: '\$\{'
+    description: "Variable expansion with braces"
+  var_reference:
+    pattern: '\$[A-Za-z_]'
+    description: "Shell variable reference ($VAR)"
+  eval:
+    pattern: '\beval\b'
+    description: "Shell eval execution"
+  exec:
+    pattern: '\bexec\b\s'
+    description: "Shell exec replacement"
+  source:
+    pattern: '\bsource\b\s|\.\s+/'
+    description: "Shell source/dot execution"
+  inline_shell:
+    pattern: '\b(bash|sh)\s+-c\b'
+    description: "Inline shell execution"
+  inline_python:
+    pattern: '\bpython3?\s+-c\b'
+    description: "Python inline execution"
+  inline_perl:
+    pattern: '\bperl\s+-e\b'
+    description: "Perl inline execution"
+
+# File mutation commands that are gated by path scoping at P1+.
+# At P0: always blocked. At P1+: allowed only within writable_paths.
+# At P2+: broader writable_paths. The filter extracts target paths from
+# these commands and validates against the profile's writable_paths.
+level_gated_file_mutation:
+  sed_inplace:
+    pattern: '\bsed\s+-i\b'
+    description: "In-place file modification"
+    extract_path_after: '-i'
+  tee:
+    pattern: '\btee\s+'
+    description: "Tee output to file"
+    extract_path_after: 'tee'
+  redirect_write:
+    pattern: '(?<![2&])>\s*/'
+    description: "Redirect output to absolute path (not stderr 2> or combined &>)"
+  redirect_append:
+    pattern: '>>\s*/'
+    description: "Append output to absolute path"
+  dd_write:
+    pattern: '\bdd\s+.*of=/'
+    description: "dd write to file"
+    min_level: 3
+
+# Level-gated capabilities (systemctl enable, crontab edit, systemctl mask)
+level_gated_capabilities:
+  crontab_edit_webuser:
+    pattern: '^sudo\s+crontab\s+-e\s+-u\s+(www-data|nginx|apache|www)$'
+    description: "Edit web user crontab"
+    min_level: 1
+  crontab_edit_own:
+    pattern: '^crontab\s+-e$'
+    description: "Edit own crontab"
+    min_level: 2
+  systemctl_enable:
+    pattern: '^sudo\s+systemctl\s+(enable|disable)\s+'
+    description: "Enable/disable systemd services"
+    min_level: 2
+  systemctl_mask:
+    pattern: '^sudo\s+systemctl\s+mask\s+'
+    description: "Mask systemd services"
+    min_level: 3
+
 # Patterns redacted from command output (stdout/stderr) before
-# returning to the agent.  Each entry has a regex 'pattern' and a
-# 'replacement' string (may use backreferences like \1).
+# returning to the agent.
 output_redaction:
   - pattern: "define\\(\\s*'DB_PASSWORD'\\s*,\\s*'[^']+'\\s*\\)"
     replacement: "define('DB_PASSWORD', '[REDACTED]')"
@@ -338,3 +626,6 @@ output_redaction:
   - pattern: '(?i)(api[_-]?key|secret[_-]?key|auth[_-]?token)\s*[=:]\s*\S+'
     replacement: '\1=[REDACTED]'
     description: "API keys and tokens"
+  - pattern: '(?i)(aws_secret_access_key)\s*[=:]\s*\S+'
+    replacement: '\1=[REDACTED]'
+    description: "AWS secret key"

@@ -3,6 +3,26 @@
 /** Valid SSH access modes — matches backend VALID_SSH_MODES in ssh_profile_models.py */
 export type SSHMode = 'readonly' | 'operations' | 'filtered_shell';
 
+/** SSH privilege level definition — single source of truth for form and list. */
+export interface SSHAccessLevel {
+  value: number;
+  label: string;
+  shortLabel: string;
+  mode: SSHMode;
+  recommended?: boolean;
+}
+
+/**
+ * All privilege profiles. P0–P1 use distinct modes; P2/P3 share 'filtered_shell'
+ * and are differentiated by privilege_level number in the backend filter.
+ */
+export const SSH_ACCESS_LEVELS: SSHAccessLevel[] = [
+  { value: 0, label: 'Observer', shortLabel: 'Observer', mode: 'readonly' },
+  { value: 1, label: 'Site Manager', shortLabel: 'Site Mgr', mode: 'operations', recommended: true },
+  { value: 2, label: 'Server Admin', shortLabel: 'Srv Admin', mode: 'filtered_shell' },
+  { value: 3, label: 'Full Access', shortLabel: 'Full', mode: 'filtered_shell' },
+];
+
 export interface SSHProfile {
   id: string;
   name: string;

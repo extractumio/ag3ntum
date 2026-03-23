@@ -67,7 +67,7 @@ def mock_command_filter():
         allowed=True,
         action="allow",
         reason="command is safe",
-        rule="L0_monitoring:allowlist",
+        rule="P0_observer:allowlist",
         category="safe_read",
     ))
     # SSHRead uses check_path_readable for path filtering — default to allow
@@ -241,7 +241,7 @@ class TestSSHExecImpl:
                 allowed=False,
                 action="block",
                 reason="Destructive command blocked",
-                rule="L0_monitoring:blocklist",
+                rule="P0_observer:blocklist",
                 category="destructive",
             )
         )
@@ -279,7 +279,7 @@ class TestSSHExecImpl:
                 allowed=False,
                 action="requires_approval",
                 reason="High-risk command needs review",
-                rule="L2_approval_list",
+                rule="P1_site_manager:approval_trigger",
                 category="risky",
             )
         )

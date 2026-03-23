@@ -222,10 +222,10 @@ class TestCreateSSHProfileRequestValidation:
         assert req_max.port == 65535
 
     @pytest.mark.unit
-    def test_privilege_level_max_4(self):
-        """Privilege level above 4 is rejected."""
+    def test_privilege_level_max_3(self):
+        """Privilege level above 3 is rejected (max is P3)."""
         with pytest.raises(ValidationError):
-            CreateSSHProfileRequest(**_valid_payload(privilege_level=5))
+            CreateSSHProfileRequest(**_valid_payload(privilege_level=4))
 
     @pytest.mark.unit
     def test_privilege_level_min_0(self):
@@ -235,8 +235,8 @@ class TestCreateSSHProfileRequestValidation:
 
     @pytest.mark.unit
     def test_privilege_level_valid_range(self):
-        """Privilege levels 0 through 4 are all accepted."""
-        for level in range(5):
+        """Privilege levels 0 through 3 are all accepted (4-tier P0-P3 model)."""
+        for level in range(4):
             req = CreateSSHProfileRequest(**_valid_payload(privilege_level=level))
             assert req.privilege_level == level
 

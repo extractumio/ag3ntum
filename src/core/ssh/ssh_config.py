@@ -145,7 +145,7 @@ class SSHProfile:
     certificate_ref: Optional[str] = None
     password_secret_id: Optional[int] = None
     mode: str = "readonly"  # operations | readonly | filtered_shell
-    privilege_level: int = 0  # 0-4
+    privilege_level: int = 0  # 0-3
     allowed_operations: list[str] = field(default_factory=list)
     description: str = ""
     file_handling: dict = field(default_factory=dict)
