@@ -1,10 +1,10 @@
 ---
 name: infocompressor
 description: |
-  Use when the user needs to compress, condense, or summarize lengthy content while preserving ALL
-  critical details. Triggers: "compress this", "make it shorter but keep everything", "create a
-  cheat sheet", "dense summary", "reference format", "compact version", "information-dense". NOT
-  for casual summaries—only when user explicitly wants maximum density with zero data loss.
+  Use when the user needs to compress, condense, or summarize lengthy content while preserving all
+  critical and high-priority facts. Triggers: "compress this", "make it shorter but keep everything",
+  "create a cheat sheet", "dense summary", "reference format", "compact version", "information-dense".
+  NOT for casual summaries—only when user explicitly wants maximum density with no loss of critical facts.
 ---
 # Text Compression Skill
 
@@ -16,7 +16,7 @@ Transform verbose documents into dense, human-readable reference specs.
 - **Format:** Markdown with minimal nesting
 - **Redundancy:** Zero. State each fact once.
 - **Notation:** Plain language with minimal intuitive symbols.
-- **Target:** 40-60% reduction for most technical documents.
+- **Target:** Measure reduction in a stated unit — characters for human docs, tokens for model context — as (before - after) / before over the full emitted output (including diagrams). 40-60% by characters is typical for technical documents, but it is a guideline, not a hard gate.
 - **DRY:** Don't repeat. Reference existing docs instead of duplicating.
 - **Progressive disclosure:** Link to details, don't inline everything.
 
@@ -102,7 +102,7 @@ Pick the **first** format that fits:
 | List of items (no attributes) | Bullet points |
 | Named properties | `key: value` pairs |
 | Simple sequence (no branching) | Numbered list |
-| Sequence with branching | MermaidJS flowchart |
+| Sequence with branching | MermaidJS flowchart (human reader); compact inline notation (model context) |
 | 2+ attributes per item | Table |
 
 ---
@@ -114,7 +114,7 @@ Pick the **first** format that fits:
 - **Imperative mood.** "Validate input" not "The input should be validated"
 - **Present tense.** "System returns error" not "System will return"
 - **Active voice.** "User submits form" not "Form is submitted by user"
-- **3-7 words per statement** when possible
+- **One idea per sentence.** Prefer short sentences; don't enforce a fixed word count
 
 ### Words to Cut
 
@@ -339,11 +339,11 @@ Read document. Tag each chunk:
 
 ### Step 4: Compress
 
-- Shorten sentences to 3-7 words.
-- Remove articles (a, an, the) where clear.
+- Shorten sentences; aim for one idea each.
+- Remove articles (a, an, the) only at Heavy human-quick-lookup density, where unambiguous — never for model input or safety-critical text.
 - Use bullets over paragraphs.
 - Use key-value over bullets when named.
-- Use flowchart over list when branching.
+- Use flowchart over list when branching for human readers; for model context, prefer compact inline notation.
 - Apply relationship notation where clearer than words.
 - Remove hedging — commit to statements or omit.
 - Remove transitions between sections.
@@ -376,7 +376,7 @@ Default to **Medium** for most technical documentation.
 
 ## Example
 
-### Before (147 words)
+### Before (134 words)
 
 ```
 User Authentication Process
@@ -397,7 +397,7 @@ and return it to the user. This token must be included in all
 subsequent requests.
 ```
 
-### After (67 words, 54% reduction)
+### After (98 words — 27% fewer words, ~15% fewer characters)
 
 ```markdown
 ## Login
@@ -437,6 +437,10 @@ flowchart TD
 - 423: account locked
 ```
 
+Counts cover the full emitted block, including the Mermaid diagram (~47% of the After block's
+characters). A flowchart aids human scannability but adds tokens for a model consumer; for model
+context, prefer compact inline notation.
+
 ---
 
 ## Final Checklist
@@ -452,8 +456,8 @@ Before delivering compressed document:
 - [ ] Sequence order maintained?
 
 **Quality**
-- [ ] Every sentence under 10 words?
-- [ ] No passive voice?
+- [ ] One idea per sentence (no needless words)?
+- [ ] Active voice (passive only when the actor is unknown or irrelevant)?
 - [ ] No filler phrases?
 - [ ] No hedging language?
 - [ ] Simplest representation used?
@@ -465,4 +469,4 @@ Before delivering compressed document:
 - [ ] Readable without original document?
 - [ ] No ambiguity introduced?
 - [ ] Notation used consistently?
-- [ ] Compression ratio 40-60%?
+- [ ] Compression ratio within the selected density band (Light/Medium/Heavy)?
